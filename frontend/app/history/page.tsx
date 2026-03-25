@@ -1,7 +1,7 @@
-"use client";
+'use client';
 
-import { useEffect, useState, useCallback } from "react";
-import { useStore } from "@/lib/store";
+import { useEffect, useState, useCallback } from 'react';
+import { useStore } from '@/lib/store';
 import {
   rpc,
   INVOICE_CONTRACT_ID,
@@ -9,21 +9,21 @@ import {
   scValToNative,
   formatUSDC,
   truncateAddress,
-} from "@/lib/stellar";
+} from '@/lib/stellar';
 
-const EXPLORER_BASE = "https://stellar.expert/explorer/testnet";
+const EXPLORER_BASE = 'https://stellar.expert/explorer/testnet';
 const PAGE_SIZE = 20;
 const EVENT_LIMIT = 200;
 
 type EventKind =
-  | "invoice_created"
-  | "invoice_funded"
-  | "invoice_paid"
-  | "invoice_defaulted"
-  | "pool_deposit"
-  | "pool_funded"
-  | "pool_repaid"
-  | "pool_withdraw";
+  | 'invoice_created'
+  | 'invoice_funded'
+  | 'invoice_paid'
+  | 'invoice_defaulted'
+  | 'pool_deposit'
+  | 'pool_funded'
+  | 'pool_repaid'
+  | 'pool_withdraw';
 
 interface HistoryEvent {
   id: string;
@@ -38,25 +38,25 @@ interface HistoryEvent {
 }
 
 const KIND_LABELS: Record<EventKind, string> = {
-  invoice_created: "Invoice Created",
-  invoice_funded: "Invoice Funded",
-  invoice_paid: "Invoice Repaid",
-  invoice_defaulted: "Invoice Defaulted",
-  pool_deposit: "Pool Deposit",
-  pool_funded: "Pool Funded Invoice",
-  pool_repaid: "Repayment Received",
-  pool_withdraw: "Pool Withdrawal",
+  invoice_created: 'Invoice Created',
+  invoice_funded: 'Invoice Funded',
+  invoice_paid: 'Invoice Repaid',
+  invoice_defaulted: 'Invoice Defaulted',
+  pool_deposit: 'Pool Deposit',
+  pool_funded: 'Pool Funded Invoice',
+  pool_repaid: 'Repayment Received',
+  pool_withdraw: 'Pool Withdrawal',
 };
 
 const KIND_COLORS: Record<EventKind, string> = {
-  invoice_created: "text-blue-400 bg-blue-400/10 border-blue-400/20",
-  invoice_funded: "text-brand-gold bg-brand-gold/10 border-brand-gold/20",
-  invoice_paid: "text-green-400 bg-green-400/10 border-green-400/20",
-  invoice_defaulted: "text-red-400 bg-red-400/10 border-red-400/20",
-  pool_deposit: "text-purple-400 bg-purple-400/10 border-purple-400/20",
-  pool_funded: "text-brand-gold bg-brand-gold/10 border-brand-gold/20",
-  pool_repaid: "text-green-400 bg-green-400/10 border-green-400/20",
-  pool_withdraw: "text-orange-400 bg-orange-400/10 border-orange-400/20",
+  invoice_created: 'text-blue-400 bg-blue-400/10 border-blue-400/20',
+  invoice_funded: 'text-brand-gold bg-brand-gold/10 border-brand-gold/20',
+  invoice_paid: 'text-green-400 bg-green-400/10 border-green-400/20',
+  invoice_defaulted: 'text-red-400 bg-red-400/10 border-red-400/20',
+  pool_deposit: 'text-purple-400 bg-purple-400/10 border-purple-400/20',
+  pool_funded: 'text-brand-gold bg-brand-gold/10 border-brand-gold/20',
+  pool_repaid: 'text-green-400 bg-green-400/10 border-green-400/20',
+  pool_withdraw: 'text-orange-400 bg-orange-400/10 border-orange-400/20',
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -65,12 +65,12 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
   const ownedInvoiceIds = new Set<bigint>();
   for (const e of rawEvents) {
     try {
-      const contract = e.contractId ?? "";
+      const contract = e.contractId ?? '';
       if (contract !== INVOICE_CONTRACT_ID) continue;
       const topics = e.topic ?? [];
       if (topics.length < 2) continue;
       const action = scValToNative(topics[1]) as string;
-      if (action !== "created") continue;
+      if (action !== 'created') continue;
       const val = scValToNative(e.value);
       const [id, owner] = Array.isArray(val) ? val : [val, undefined];
       if (String(owner) === walletAddress) {
@@ -85,7 +85,7 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
 
   for (const e of rawEvents) {
     try {
-      const contract = e.contractId ?? "";
+      const contract = e.contractId ?? '';
       const topics = e.topic ?? [];
       if (topics.length < 2) continue;
 
@@ -100,54 +100,53 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
       let address: string | undefined;
       let relevant = false;
 
-      if (ns === "INVOICE" && contract === INVOICE_CONTRACT_ID) {
-        if (action === "created") {
+      if (ns === 'INVOICE' && contract === INVOICE_CONTRACT_ID) {
+        if (action === 'created') {
           const [id, owner, amt] = Array.isArray(val) ? val : [val, undefined, undefined];
           invoiceId = BigInt(id as bigint);
           amount = amt !== undefined ? BigInt(amt as bigint) : undefined;
           address = String(owner);
-          kind = "invoice_created";
+          kind = 'invoice_created';
           relevant = String(owner) === walletAddress;
-        } else if (action === "funded") {
+        } else if (action === 'funded') {
           invoiceId = BigInt(val as bigint);
-          kind = "invoice_funded";
+          kind = 'invoice_funded';
           relevant = ownedInvoiceIds.has(invoiceId);
-        } else if (action === "paid") {
+        } else if (action === 'paid') {
           invoiceId = BigInt(val as bigint);
-          kind = "invoice_paid";
+          kind = 'invoice_paid';
           relevant = ownedInvoiceIds.has(invoiceId);
-        } else if (action === "default") {
+        } else if (action === 'default') {
           invoiceId = BigInt(val as bigint);
-          kind = "invoice_defaulted";
+          kind = 'invoice_defaulted';
           relevant = ownedInvoiceIds.has(invoiceId);
         }
-      } else if (ns === "POOL" && contract === POOL_CONTRACT_ID) {
-        if (action === "deposit") {
+      } else if (ns === 'POOL' && contract === POOL_CONTRACT_ID) {
+        if (action === 'deposit') {
           const [inv, amt] = Array.isArray(val) ? val : [val, undefined];
           address = String(inv);
           amount = amt !== undefined ? BigInt(amt as bigint) : undefined;
-          kind = "pool_deposit";
+          kind = 'pool_deposit';
           relevant = String(inv) === walletAddress;
-        } else if (action === "funded") {
+        } else if (action === 'funded') {
           const [id, sme, principal] = Array.isArray(val) ? val : [val, undefined, undefined];
           invoiceId = BigInt(id as bigint);
           amount = principal !== undefined ? BigInt(principal as bigint) : undefined;
           address = String(sme);
-          kind = "pool_funded";
-          relevant =
-            ownedInvoiceIds.has(invoiceId) || String(sme) === walletAddress;
-        } else if (action === "repaid") {
+          kind = 'pool_funded';
+          relevant = ownedInvoiceIds.has(invoiceId) || String(sme) === walletAddress;
+        } else if (action === 'repaid') {
           const [id, principal, int_] = Array.isArray(val) ? val : [val, undefined, undefined];
           invoiceId = BigInt(id as bigint);
           amount = principal !== undefined ? BigInt(principal as bigint) : undefined;
           interest = int_ !== undefined ? BigInt(int_ as bigint) : undefined;
-          kind = "pool_repaid";
+          kind = 'pool_repaid';
           relevant = ownedInvoiceIds.has(invoiceId);
-        } else if (action === "withdraw") {
+        } else if (action === 'withdraw') {
           const [inv, amt] = Array.isArray(val) ? val : [val, undefined];
           address = String(inv);
           amount = amt !== undefined ? BigInt(amt as bigint) : undefined;
-          kind = "pool_withdraw";
+          kind = 'pool_withdraw';
           relevant = String(inv) === walletAddress;
         }
       }
@@ -161,9 +160,9 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
         amount,
         interest,
         address,
-        timestamp: e.ledgerClosedAt ?? "",
+        timestamp: e.ledgerClosedAt ?? '',
         ledger: Number(e.ledger ?? 0),
-        txHash: e.txHash ?? "",
+        txHash: e.txHash ?? '',
       });
     } catch {
       // skip malformed events
@@ -174,13 +173,13 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
 }
 
 function formatTs(ts: string): string {
-  if (!ts) return "—";
-  return new Date(ts).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
   });
 }
 
@@ -199,7 +198,9 @@ export default function HistoryPage() {
       if (!wallet.connected || !wallet.address) return;
 
       if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
-        setError("Contract IDs not configured. Set NEXT_PUBLIC_INVOICE_CONTRACT_ID and NEXT_PUBLIC_POOL_CONTRACT_ID.");
+        setError(
+          'Contract IDs not configured. Set NEXT_PUBLIC_INVOICE_CONTRACT_ID and NEXT_PUBLIC_POOL_CONTRACT_ID.',
+        );
         setLoading(false);
         return;
       }
@@ -216,7 +217,7 @@ export default function HistoryPage() {
           ...(nextCursor ? { cursor: nextCursor } : { startLedger }),
           filters: [
             {
-              type: "contract",
+              type: 'contract',
               contractIds: [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID],
             },
           ],
@@ -233,18 +234,21 @@ export default function HistoryPage() {
           setVisible(PAGE_SIZE);
         }
 
-        const lastToken = raw.at(-1)?.pagingToken;
-        setHasMore(raw.length === EVENT_LIMIT);
-        setCursor(lastToken);
+        const responseCursor =
+          typeof response === 'object' && response !== null && 'cursor' in response
+            ? (response as { cursor?: string }).cursor
+            : undefined;
+        setHasMore(raw.length === EVENT_LIMIT && Boolean(responseCursor));
+        setCursor(responseCursor);
       } catch (e) {
-        setError("Failed to load transaction history. Make sure contracts are deployed.");
+        setError('Failed to load transaction history. Make sure contracts are deployed.');
         console.error(e);
       } finally {
         setLoading(false);
         setLoadingMore(false);
       }
     },
-    [wallet.connected, wallet.address]
+    [wallet.connected, wallet.address],
   );
 
   useEffect(() => {
@@ -278,9 +282,7 @@ export default function HistoryPage() {
           <div className="flex flex-col items-center justify-center py-32 text-center">
             <div className="text-4xl mb-4">◈</div>
             <h2 className="text-xl font-semibold mb-2">Connect your wallet</h2>
-            <p className="text-brand-muted">
-              Connect Freighter to view your transaction history.
-            </p>
+            <p className="text-brand-muted">Connect Freighter to view your transaction history.</p>
           </div>
         ) : loading ? (
           <div className="space-y-3">
@@ -297,9 +299,7 @@ export default function HistoryPage() {
           </div>
         ) : events.length === 0 ? (
           <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
-            <p className="text-brand-muted">
-              No on-chain activity found for this wallet.
-            </p>
+            <p className="text-brand-muted">No on-chain activity found for this wallet.</p>
           </div>
         ) : (
           <>
@@ -332,17 +332,14 @@ export default function HistoryPage() {
                           +{formatUSDC(evt.interest)} interest
                         </span>
                       )}
-                      {evt.address &&
-                        evt.kind !== "invoice_created" && (
-                          <span className="text-xs text-brand-muted font-mono">
-                            {truncateAddress(evt.address)}
-                          </span>
-                        )}
+                      {evt.address && evt.kind !== 'invoice_created' && (
+                        <span className="text-xs text-brand-muted font-mono">
+                          {truncateAddress(evt.address)}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-3 mt-1.5">
-                      <span className="text-xs text-brand-muted">
-                        {formatTs(evt.timestamp)}
-                      </span>
+                      <span className="text-xs text-brand-muted">{formatTs(evt.timestamp)}</span>
                       {evt.txHash && (
                         <a
                           href={`${EXPLORER_BASE}/tx/${evt.txHash}`}
@@ -366,7 +363,7 @@ export default function HistoryPage() {
                   disabled={loadingMore}
                   className="px-6 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-medium hover:border-brand-gold/50 hover:text-brand-gold transition-colors disabled:opacity-50"
                 >
-                  {loadingMore ? "Loading…" : "Load more"}
+                  {loadingMore ? 'Loading…' : 'Load more'}
                 </button>
               </div>
             )}

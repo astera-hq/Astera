@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '@/lib/store';
 import PoolStats from '@/components/PoolStats';
+import { APYCalculator } from '@/components/APYCalculator';
 import {
   getPoolConfig,
   getInvestorPosition,
@@ -10,8 +11,7 @@ import {
   buildWithdrawTx,
   submitTx,
 } from '@/lib/contracts';
-import { toStroops, fromStroops, formatUSDC } from '@/lib/stellar';
-import type { PoolConfig, InvestorPosition } from '@/lib/types';
+import { toStroops, formatUSDC } from '@/lib/stellar';
 
 export default function InvestPage() {
   const { wallet, poolConfig, setPoolConfig, position, setPosition } = useStore();
@@ -115,6 +115,8 @@ export default function InvestPage() {
                 Pool not deployed yet. Deploy contracts to see live data.
               </div>
             )}
+
+            <APYCalculator yieldBps={poolConfig?.yieldBps ?? null} loading={loading} />
 
             {/* Investor position */}
             {wallet.connected && position && (
