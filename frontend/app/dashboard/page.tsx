@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { useStore } from '@/lib/store';
 import InvoiceCard from '@/components/InvoiceCard';
 import CreditScore from '@/components/CreditScore';
-import { getInvoice, getInvoiceCount } from '@/lib/contracts';
+import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
+import { getInvoice, getInvoiceCount, getFundedInvoice } from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 
@@ -15,20 +16,20 @@ export default function DashboardPage() {
   const [committedMap, setCommittedMap] = useState<Record<number, bigint>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
-  const [sort, setSort] = useState<SortOption>("newest");
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
+  const [sort, setSort] = useState<SortOption>('newest');
 
+  // Check if user is first-time visitor
   useEffect(() => {
-    if (!wallet.connected) {
-      setLoading(false);
-      return;
+    if (isFirstTimeUser()) {
+      setShowOnboarding(true);
     }
-    loadInvoices();
-  }, [wallet.connected, wallet.address]);
+  }, []);
 
-  async function loadInvoices() {
+  const loadInvoices = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -44,7 +45,7 @@ export default function DashboardPage() {
       const committed: Record<number, bigint> = {};
       await Promise.all(
         all
-          .filter((inv) => inv.status === "Pending")
+          .filter((inv) => inv.status === 'Pending')
           .map(async (inv) => {
             try {
               const record = await getFundedInvoice(inv.id);
@@ -52,7 +53,7 @@ export default function DashboardPage() {
             } catch {
               // Not registered for co-funding yet — leave uncommitted
             }
-          })
+          }),
       );
       setCommittedMap(committed);
     } catch (e) {
@@ -61,7 +62,15 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [wallet.address]);
+
+  useEffect(() => {
+    if (!wallet.connected) {
+      setLoading(false);
+      return;
+    }
+    loadInvoices();
+  }, [wallet.connected, wallet.address, loadInvoices]);
 
   const stats = {
     total: invoices.length,
@@ -78,27 +87,25 @@ export default function DashboardPage() {
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       result = result.filter(
-        (inv) =>
-          inv.debtor.toLowerCase().includes(q) ||
-          inv.description.toLowerCase().includes(q)
+        (inv) => inv.debtor.toLowerCase().includes(q) || inv.description.toLowerCase().includes(q),
       );
     }
 
-    if (statusFilter !== "All") {
+    if (statusFilter !== 'All') {
       result = result.filter((inv) => inv.status === statusFilter);
     }
 
     switch (sort) {
-      case "newest":
+      case 'newest':
         result.sort((a, b) => b.createdAt - a.createdAt);
         break;
-      case "oldest":
+      case 'oldest':
         result.sort((a, b) => a.createdAt - b.createdAt);
         break;
-      case "highest":
+      case 'highest':
         result.sort((a, b) => (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0));
         break;
-      case "due-soonest":
+      case 'due-soonest':
         result.sort((a, b) => a.dueDate - b.dueDate);
         break;
     }
@@ -106,7 +113,7 @@ export default function DashboardPage() {
     return result;
   }, [invoices, search, statusFilter, sort]);
 
-  const isFiltered = search.trim() !== "" || statusFilter !== "All";
+  const isFiltered = search.trim() !== '' || statusFilter !== 'All';
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-6">
@@ -117,14 +124,22 @@ export default function DashboardPage() {
             <h1 className="text-3xl font-bold mb-1">SME Dashboard</h1>
             <p className="text-brand-muted">Manage your tokenized invoices</p>
           </div>
-          {wallet.connected && (
-            <Link
-              href="/invoice/new"
-              className="px-5 py-2.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors"
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowOnboarding(true)}
+              className="px-4 py-2 text-brand-muted hover:text-white transition-colors text-sm"
             >
-              + New Invoice
-            </Link>
-          )}
+              Help
+            </button>
+            {wallet.connected && (
+              <Link
+                href="/invoice/new"
+                className="px-5 py-2.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors"
+              >
+                + New Invoice
+              </Link>
+            )}
+          </div>
         </div>
 
         {!wallet.connected ? (
@@ -185,7 +200,7 @@ export default function DashboardPage() {
                   />
                   {search && (
                     <button
-                      onClick={() => setSearch("")}
+                      onClick={() => setSearch('')}
                       className="absolute right-3 top-1/2 -translate-y-1/2 text-brand-muted hover:text-white"
                     >
                       ✕
@@ -202,8 +217,8 @@ export default function DashboardPage() {
                         onClick={() => setStatusFilter(tab)}
                         className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
                           statusFilter === tab
-                            ? "bg-brand-gold text-brand-dark"
-                            : "text-brand-muted hover:text-white bg-brand-card border border-brand-border"
+                            ? 'bg-brand-gold text-brand-dark'
+                            : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
                         }`}
                       >
                         {tab}
@@ -252,7 +267,10 @@ export default function DashboardPage() {
                     <p className="text-brand-muted mb-3">No invoices match your filters.</p>
                     {isFiltered && (
                       <button
-                        onClick={() => { setSearch(""); setStatusFilter("All"); }}
+                        onClick={() => {
+                          setSearch('');
+                          setStatusFilter('All');
+                        }}
                         className="text-brand-gold hover:underline text-sm font-medium"
                       >
                         Clear filters
@@ -262,11 +280,7 @@ export default function DashboardPage() {
                 ) : (
                   <div className="space-y-4">
                     {invoices.map((inv) => (
-                      <InvoiceCard
-                        key={inv.id}
-                        invoice={inv}
-                        fundedAmount={committedMap[inv.id]}
-                      />
+                      <InvoiceCard key={inv.id} invoice={inv} fundedAmount={committedMap[inv.id]} />
                     ))}
                   </div>
                 )}
@@ -285,6 +299,23 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Onboarding Modal */}
+      <OnboardingModal isOpen={showOnboarding} onClose={() => setShowOnboarding(false)} />
     </div>
   );
 }
+
+// Type definitions
+type StatusFilter = 'All' | 'Pending' | 'Funded' | 'Paid' | 'Defaulted';
+type SortOption = 'newest' | 'oldest' | 'highest' | 'due-soonest';
+
+// Constants
+const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
+
+const SORT_OPTIONS = [
+  { value: 'newest', label: 'Newest First' },
+  { value: 'oldest', label: 'Oldest First' },
+  { value: 'highest', label: 'Highest Amount' },
+  { value: 'due-soonest', label: 'Due Soonest' },
+];
