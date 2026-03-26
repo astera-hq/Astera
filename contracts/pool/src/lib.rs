@@ -733,4 +733,317 @@ mod test {
         // Repayment should fail
         client.repay_invoice(&1, &sme);
     }
+
+    // ---- Integration Tests: Full Deposit → Fund → Repay → Withdraw Cycle ----
+
+    #[test]
+    fn test_full_cycle_deposit_fund_repay_withdraw() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        // Setup: mint USDC to investor and SME
+        let deposit_amount: i128 = 1_000_000_000; // 1000 USDC (7 decimals)
+        let repay_buffer: i128 = 100_000_000; // Extra for interest
+        mint(&env, &usdc_id, &investor, deposit_amount);
+        mint(&env, &usdc_id, &sme, deposit_amount + repay_buffer);
+
+        // Step 1: Deposit USDC → verify investor position updated
+        client.deposit(&investor, &deposit_amount);
+        let pos = client.get_position(&investor).unwrap();
+        assert_eq!(pos.deposited, deposit_amount);
+        assert_eq!(pos.available, deposit_amount);
+        assert_eq!(pos.deployed, 0);
+        assert_eq!(pos.earned, 0);
+        assert_eq!(pos.deposit_count, 1);
+
+        let config = client.get_config();
+        assert_eq!(config.total_deposited, deposit_amount);
+        assert_eq!(config.total_deployed, 0);
+
+        // Step 2: Fund invoice → verify SME receives USDC, pool deployed balance updated
+        let invoice_id: u64 = 100;
+        let principal = deposit_amount;
+        let due_date = env.ledger().timestamp() + 2_592_000; // 30 days
+
+        client.init_co_funding(&admin, &invoice_id, &principal, &sme, &due_date);
+        client.commit_to_invoice(&investor, &invoice_id, &principal);
+
+        // Verify investor position after funding
+        let pos = client.get_position(&investor).unwrap();
+        assert_eq!(pos.available, 0);
+        assert_eq!(pos.deployed, principal);
+
+        // Verify funded invoice record
+        let record = client.get_funded_invoice(&invoice_id).unwrap();
+        assert_eq!(record.principal, principal);
+        assert_eq!(record.committed, principal);
+        assert!(record.funded_at > 0);
+        assert!(!record.repaid);
+
+        // Verify pool config
+        let config = client.get_config();
+        assert_eq!(config.total_deployed, principal);
+
+        // Step 3: Advance time and repay → verify interest calculated correctly
+        let elapsed_days = 30u64;
+        env.ledger().with_mut(|l| l.timestamp += elapsed_days * 86_400);
+
+        let initial_available = pos.available;
+        client.repay_invoice(&invoice_id, &sme);
+
+        // Verify investor position after repayment
+        let pos = client.get_position(&investor).unwrap();
+        assert_eq!(pos.deployed, 0);
+        assert!(pos.available > initial_available + principal); // Principal + interest
+        assert!(pos.earned > 0);
+
+        // Verify interest calculation accuracy
+        let expected_interest = (principal as u128 * DEFAULT_YIELD_BPS as u128 
+            * (elapsed_days * 86_400) as u128) 
+            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        assert_eq!(pos.earned, expected_interest as i128);
+
+        // Verify invoice marked as repaid
+        let record = client.get_funded_invoice(&invoice_id).unwrap();
+        assert!(record.repaid);
+
+        // Step 4: Withdraw available balance → verify investor receives USDC
+        let withdraw_amount = pos.available;
+        let earned_before_withdraw = pos.earned;
+        client.withdraw(&investor, &withdraw_amount);
+
+        let pos = client.get_position(&investor).unwrap();
+        assert_eq!(pos.available, 0);
+        // After withdrawing everything, deposited should be 0 (or could be negative due to accounting)
+        // The key is that available is 0 and deployed is 0
+        assert_eq!(pos.deployed, 0);
+        assert_eq!(pos.earned, earned_before_withdraw); // Earned amount doesn't change on withdrawal
+    }
+
+    #[test]
+    fn test_interest_calculation_various_time_periods() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let principal: i128 = 1_000_000_000;
+
+        // Test 1: 7 days
+        let investor1 = Address::generate(&env);
+        let sme1 = Address::generate(&env);
+        mint(&env, &usdc_id, &investor1, principal);
+        mint(&env, &usdc_id, &sme1, principal + 100_000_000);
+
+        client.deposit(&investor1, &principal);
+        client.init_co_funding(&admin, &1, &principal, &sme1, &(env.ledger().timestamp() + 604_800));
+        client.commit_to_invoice(&investor1, &1, &principal);
+
+        env.ledger().with_mut(|l| l.timestamp += 7 * 86_400); // 7 days
+        client.repay_invoice(&1, &sme1);
+
+        let pos1 = client.get_position(&investor1).unwrap();
+        let expected_7d = (principal as u128 * DEFAULT_YIELD_BPS as u128 * (7 * 86_400) as u128) 
+            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        assert_eq!(pos1.earned, expected_7d as i128);
+
+        // Test 2: 90 days
+        let investor2 = Address::generate(&env);
+        let sme2 = Address::generate(&env);
+        mint(&env, &usdc_id, &investor2, principal);
+        mint(&env, &usdc_id, &sme2, principal + 200_000_000);
+
+        client.deposit(&investor2, &principal);
+        client.init_co_funding(&admin, &2, &principal, &sme2, &(env.ledger().timestamp() + 7_776_000));
+        client.commit_to_invoice(&investor2, &2, &principal);
+
+        env.ledger().with_mut(|l| l.timestamp += 90 * 86_400); // 90 days
+        client.repay_invoice(&2, &sme2);
+
+        let pos2 = client.get_position(&investor2).unwrap();
+        let expected_90d = (principal as u128 * DEFAULT_YIELD_BPS as u128 * (90 * 86_400) as u128) 
+            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        assert_eq!(pos2.earned, expected_90d as i128);
+
+        // Test 3: 365 days (full year)
+        let investor3 = Address::generate(&env);
+        let sme3 = Address::generate(&env);
+        mint(&env, &usdc_id, &investor3, principal);
+        mint(&env, &usdc_id, &sme3, principal + 300_000_000);
+
+        client.deposit(&investor3, &principal);
+        client.init_co_funding(&admin, &3, &principal, &sme3, &(env.ledger().timestamp() + SECS_PER_YEAR));
+        client.commit_to_invoice(&investor3, &3, &principal);
+
+        env.ledger().with_mut(|l| l.timestamp += SECS_PER_YEAR); // 365 days
+        client.repay_invoice(&3, &sme3);
+
+        let pos3 = client.get_position(&investor3).unwrap();
+        let expected_365d = (principal as u128 * DEFAULT_YIELD_BPS as u128 * SECS_PER_YEAR as u128) 
+            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        assert_eq!(pos3.earned, expected_365d as i128);
+
+        // Verify 90 days earns more than 7 days, and 365 days earns most
+        assert!(pos2.earned > pos1.earned);
+        assert!(pos3.earned > pos2.earned);
+    }
+
+    // ---- Panic Tests ----
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_deposit_zero_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+
+        client.deposit(&investor, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient available balance")]
+    fn test_fund_invoice_insufficient_liquidity_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 500_000_000);
+        client.deposit(&investor, &500_000_000);
+
+        let invoice_id: u64 = 1;
+        let principal: i128 = 1_000_000_000; // More than deposited
+        let due_date = env.ledger().timestamp() + 2_592_000;
+
+        client.init_co_funding(&admin, &invoice_id, &principal, &sme, &due_date);
+        
+        // Try to commit more than available
+        client.commit_to_invoice(&investor, &invoice_id, &1_000_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "already repaid")]
+    fn test_repay_already_repaid_invoice_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 1_000_000_000;
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.deposit(&investor, &principal);
+        
+        let invoice_id: u64 = 1;
+        let due_date = env.ledger().timestamp() + 2_592_000;
+        client.init_co_funding(&admin, &invoice_id, &principal, &sme, &due_date);
+        client.commit_to_invoice(&investor, &invoice_id, &principal);
+
+        env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
+        
+        // First repayment succeeds
+        client.repay_invoice(&invoice_id, &sme);
+        
+        // Second repayment should panic
+        client.repay_invoice(&invoice_id, &sme);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient available balance")]
+    fn test_withdraw_more_than_available_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+        client.deposit(&investor, &1_000_000_000);
+
+        // Try to withdraw more than available
+        client.withdraw(&investor, &2_000_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "yield cannot exceed 50%")]
+    fn test_set_yield_above_50_percent_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _usdc_id) = setup(&env);
+
+        // Try to set yield to 51% (5100 bps)
+        client.set_yield(&admin, &5_100);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_fund_invoice_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, _usdc_id) = setup(&env);
+        let non_admin = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let invoice_id: u64 = 1;
+        let principal: i128 = 1_000_000_000;
+        let due_date = env.ledger().timestamp() + 2_592_000;
+
+        // Non-admin tries to initialize co-funding
+        client.init_co_funding(&non_admin, &invoice_id, &principal, &sme, &due_date);
+    }
+
+    #[test]
+    fn test_set_yield_at_boundary_50_percent() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _usdc_id) = setup(&env);
+
+        // Setting yield to exactly 50% (5000 bps) should succeed
+        client.set_yield(&admin, &5_000);
+
+        let config = client.get_config();
+        assert_eq!(config.yield_bps, 5_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_withdraw_zero_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+        client.deposit(&investor, &1_000_000_000);
+
+        client.withdraw(&investor, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_deposit_negative_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+
+        client.deposit(&investor, &-100);
+    }
 }
