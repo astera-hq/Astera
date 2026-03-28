@@ -1,29 +1,32 @@
-import type { PoolConfig } from '@/lib/types';
+import type { PoolConfig, PoolTokenTotals } from '@/lib/types';
 import { formatUSDC } from '@/lib/stellar';
 
 interface Props {
   config: PoolConfig;
+  tokenTotals: PoolTokenTotals | null;
+  tokenLabel: string;
 }
 
-export default function PoolStats({ config }: Props) {
-  const utilizationRate =
-    config.totalDeposited > 0n ? Number((config.totalDeployed * 100n) / config.totalDeposited) : 0;
+export default function PoolStats({ config, tokenTotals, tokenLabel }: Props) {
+  const deposited = tokenTotals?.totalDeposited ?? 0n;
+  const deployed = tokenTotals?.totalDeployed ?? 0n;
+  const paidOut = tokenTotals?.totalPaidOut ?? 0n;
+  const available = deposited - deployed;
+
+  const utilizationRate = deposited > 0n ? Number((deployed * 100n) / deposited) : 0;
 
   const apy = (config.yieldBps / 100).toFixed(1);
 
   return (
     <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
-      <h2 className="text-lg font-semibold mb-6">Pool Overview</h2>
+      <h2 className="text-lg font-semibold mb-1">Pool Overview</h2>
+      <p className="text-xs text-brand-muted mb-6">Showing {tokenLabel} liquidity</p>
 
       <div className="grid grid-cols-2 gap-4 mb-6">
-        <Stat label="Total Deposited" value={formatUSDC(config.totalDeposited)} />
-        <Stat label="Deployed" value={formatUSDC(config.totalDeployed)} />
-        <Stat
-          label="Available"
-          value={formatUSDC(config.totalDeposited - config.totalDeployed)}
-          highlight
-        />
-        <Stat label="Total Paid Out" value={formatUSDC(config.totalPaidOut)} />
+        <Stat label="Total Deposited" value={formatUSDC(deposited)} />
+        <Stat label="Deployed" value={formatUSDC(deployed)} />
+        <Stat label="Available" value={formatUSDC(available)} highlight />
+        <Stat label="Total Paid In" value={formatUSDC(paidOut)} />
       </div>
 
       <div className="mb-4">

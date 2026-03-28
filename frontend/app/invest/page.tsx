@@ -7,11 +7,14 @@ import { APYCalculator } from '@/components/APYCalculator';
 import {
   getPoolConfig,
   getInvestorPosition,
+  getAcceptedTokens,
+  getPoolTokenTotals,
   buildDepositTx,
   buildWithdrawTx,
   submitTx,
 } from '@/lib/contracts';
-import { toStroops, formatUSDC } from '@/lib/stellar';
+import { toStroops, formatUSDC, stablecoinLabel, USDC_TOKEN_ID } from '@/lib/stellar';
+import type { PoolTokenTotals } from '@/lib/types';
 
 export default function InvestPage() {
   const { wallet, poolConfig, setPoolConfig, position, setPosition } = useStore();
@@ -22,41 +25,72 @@ export default function InvestPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  const [acceptedTokens, setAcceptedTokens] = useState<string[]>([]);
+  const [selectedToken, setSelectedToken] = useState<string>('');
+  const [tokenTotals, setTokenTotals] = useState<PoolTokenTotals | null>(null);
+
   useEffect(() => {
     loadPool();
   }, []);
 
   useEffect(() => {
-    if (wallet.connected && wallet.address) {
-      loadPosition(wallet.address);
+    if (!selectedToken) return;
+    loadTokenTotals(selectedToken);
+  }, [selectedToken, poolConfig]);
+
+  useEffect(() => {
+    if (wallet.connected && wallet.address && selectedToken) {
+      loadPosition(wallet.address, selectedToken);
     }
-  }, [wallet.address, wallet.connected]);
+  }, [wallet.address, wallet.connected, selectedToken]);
+
+  function pickDefaultToken(tokens: string[]): string {
+    if (tokens.length === 0) return '';
+    if (USDC_TOKEN_ID && tokens.includes(USDC_TOKEN_ID)) return USDC_TOKEN_ID;
+    return tokens[0];
+  }
 
   async function loadPool() {
     setLoading(true);
     try {
-      const config = await getPoolConfig();
+      const [config, tokens] = await Promise.all([getPoolConfig(), getAcceptedTokens()]);
       setPoolConfig(config);
+      setAcceptedTokens(tokens);
+      setSelectedToken((prev) => {
+        if (prev && tokens.includes(prev)) return prev;
+        return pickDefaultToken(tokens);
+      });
     } catch (e) {
-      // Pool not deployed yet — show placeholder
       console.error(e);
     } finally {
       setLoading(false);
     }
   }
 
-  async function loadPosition(addr: string) {
+  async function loadTokenTotals(token: string) {
+    if (!POOL_CONFIGURED) return;
     try {
-      const pos = await getInvestorPosition(addr);
+      const tt = await getPoolTokenTotals(token);
+      setTokenTotals(tt);
+    } catch {
+      setTokenTotals(null);
+    }
+  }
+
+  async function loadPosition(addr: string, token: string) {
+    try {
+      const pos = await getInvestorPosition(addr, token);
       setPosition(pos);
     } catch (e) {
       console.error(e);
     }
   }
 
+  const POOL_CONFIGURED = Boolean(process.env.NEXT_PUBLIC_POOL_CONTRACT_ID);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!wallet.address || !amount) return;
+    if (!wallet.address || !amount || !selectedToken) return;
 
     setTxLoading(true);
     setError(null);
@@ -67,8 +101,8 @@ export default function InvestPage() {
 
       const xdr =
         mode === 'deposit'
-          ? await buildDepositTx(wallet.address, stroops)
-          : await buildWithdrawTx(wallet.address, stroops);
+          ? await buildDepositTx(wallet.address, selectedToken, stroops)
+          : await buildWithdrawTx(wallet.address, selectedToken, stroops);
 
       const freighter = await import('@stellar/freighter-api');
       const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
@@ -78,12 +112,14 @@ export default function InvestPage() {
       if (signError) throw new Error(signError.message);
 
       await submitTx(signedTxXdr);
+      const sym = stablecoinLabel(selectedToken);
       setSuccess(
-        `${mode === 'deposit' ? 'Deposited' : 'Withdrew'} ${formatUSDC(stroops)} successfully.`,
+        `${mode === 'deposit' ? 'Deposited' : 'Withdrew'} ${formatUSDC(stroops)} ${sym} successfully.`,
       );
       setAmount('');
       await loadPool();
-      await loadPosition(wallet.address);
+      await loadTokenTotals(selectedToken);
+      await loadPosition(wallet.address, selectedToken);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Transaction failed.';
       setError(msg);
@@ -95,33 +131,34 @@ export default function InvestPage() {
   return (
     <div className="min-h-screen pt-24 pb-16 px-6">
       <div className="max-w-5xl mx-auto">
-        {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold mb-1">Invest</h1>
           <p className="text-brand-muted">
-            Deposit USDC into the Astera pool. Earn yield backed by real invoice repayments.
+            Deposit accepted stablecoins into the Astera pool. Earn yield backed by real invoice
+            repayments. Withdraw in the same token you deposited.
           </p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Left: Pool stats */}
           <div className="space-y-6">
             {loading ? (
               <div className="h-64 bg-brand-card border border-brand-border rounded-2xl animate-pulse" />
             ) : poolConfig ? (
-              <PoolStats config={poolConfig} />
+              <PoolStats
+                config={poolConfig}
+                tokenTotals={tokenTotals}
+                tokenLabel={stablecoinLabel(selectedToken || '')}
+              />
             ) : (
               <div className="p-6 bg-brand-card border border-brand-border rounded-2xl text-brand-muted text-sm">
                 Pool not deployed yet. Deploy contracts to see live data.
               </div>
             )}
 
-            <APYCalculator yieldBps={poolConfig?.yieldBps ?? null} loading={loading} />
-
-            {/* Investor position */}
-            {wallet.connected && position && (
+            {wallet.connected && position && selectedToken && (
               <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
-                <h2 className="text-lg font-semibold mb-4">Your Position</h2>
+                <h2 className="text-lg font-semibold mb-1">Your Position</h2>
+                <p className="text-xs text-brand-muted mb-4">{stablecoinLabel(selectedToken)}</p>
                 <div className="space-y-3">
                   {[
                     { label: 'Total Deposited', value: formatUSDC(position.deposited) },
@@ -147,7 +184,6 @@ export default function InvestPage() {
             )}
           </div>
 
-          {/* Right: Deposit / Withdraw form */}
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl h-fit">
             {!wallet.connected ? (
               <div className="text-center py-12">
@@ -177,7 +213,33 @@ export default function InvestPage() {
 
                 <form onSubmit={handleSubmit} className="space-y-4">
                   <div>
-                    <label className="block text-sm text-brand-muted mb-2">Amount (USDC)</label>
+                    <label className="block text-sm text-brand-muted mb-2">Stablecoin</label>
+                    <select
+                      value={selectedToken}
+                      onChange={(e) => {
+                        setSelectedToken(e.target.value);
+                        setError(null);
+                        setSuccess(null);
+                      }}
+                      disabled={acceptedTokens.length === 0}
+                      className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white focus:outline-none focus:border-brand-gold"
+                    >
+                      {acceptedTokens.length === 0 ? (
+                        <option value="">No tokens configured</option>
+                      ) : (
+                        acceptedTokens.map((t) => (
+                          <option key={t} value={t}>
+                            {stablecoinLabel(t)}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-brand-muted mb-2">
+                      Amount ({stablecoinLabel(selectedToken) || 'token'})
+                    </label>
                     <div className="relative">
                       <input
                         type="number"
@@ -189,13 +251,10 @@ export default function InvestPage() {
                         className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-lg"
                         required
                       />
-                      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-brand-muted text-sm font-medium">
-                        USDC
-                      </span>
                     </div>
                     {mode === 'withdraw' && position && (
                       <p className="text-xs text-brand-muted mt-1">
-                        Available: {formatUSDC(position.available)}
+                        Available: {formatUSDC(position.available)} {stablecoinLabel(selectedToken)}
                       </p>
                     )}
                   </div>
@@ -213,16 +272,18 @@ export default function InvestPage() {
 
                   <button
                     type="submit"
-                    disabled={txLoading || !amount}
+                    disabled={txLoading || !amount || !selectedToken}
                     className="w-full py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 capitalize"
                   >
-                    {txLoading ? 'Processing...' : `${mode} USDC`}
+                    {txLoading ? 'Processing...' : `${mode} ${stablecoinLabel(selectedToken)}`}
                   </button>
                 </form>
 
                 <div className="mt-6 p-4 bg-brand-dark border border-brand-border rounded-xl text-xs text-brand-muted space-y-1">
-                  <p>• Your USDC is deployed to fund verified SME invoices.</p>
-                  <p>• You earn yield when invoices are repaid.</p>
+                  <p>• Choose a whitelisted stablecoin; deposits and withdrawals use that token.</p>
+                  <p>
+                    • Invoice funding and repayment use the same token registered for that invoice.
+                  </p>
                   <p>• Only undeployed funds can be withdrawn at any time.</p>
                 </div>
               </>

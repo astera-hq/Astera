@@ -24,6 +24,18 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: 'due-soonest', label: 'Due soonest' },
 ];
 
+type StatusFilter = Invoice['status'] | 'All';
+type SortOption = 'newest' | 'oldest' | 'highest' | 'due-soonest';
+
+const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
+
+const SORT_OPTIONS: { value: SortOption; label: string }[] = [
+  { value: 'newest', label: 'Newest first' },
+  { value: 'oldest', label: 'Oldest first' },
+  { value: 'highest', label: 'Highest amount' },
+  { value: 'due-soonest', label: 'Due soonest' },
+];
+
 export default function DashboardPage() {
   const { wallet } = useStore();
   const [invoices, setInvoices] = useState<DashboardRow[]>([]);
@@ -310,13 +322,8 @@ export default function DashboardPage() {
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {filtered.map((row) => (
-                      <InvoiceCard
-                        key={row.invoice.id}
-                        id={row.invoice.id}
-                        metadata={row.metadata}
-                        fundedAmount={committedMap[row.invoice.id]}
-                      />
+                    {filtered.map((inv) => (
+                      <InvoiceCard key={inv.id} invoice={inv} fundedAmount={committedMap[inv.id]} />
                     ))}
                   </div>
                 )}

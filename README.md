@@ -26,10 +26,13 @@ frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
 - `mark_defaulted` — Pool flags missed repayment
 
 ### Pool Contract
-- `deposit` — Investor deposits USDC into the liquidity pool
-- `fund_invoice` — Admin deploys pool liquidity to fund a specific invoice
-- `repay_invoice` — SME repays principal + simple interest (8% APY default)
-- `withdraw` — Investor withdraws available (undeployed) balance
+- `initialize` — Sets admin, first accepted stablecoin (`initial_token`), and invoice contract
+- `add_token` / `remove_token` — Admin maintains a whitelist of accepted stablecoin SAC addresses
+- `deposit` — Investor deposits a whitelisted stablecoin into the pool (positions are per token)
+- `init_co_funding` — Admin opens an invoice for co-funding in a specific stablecoin
+- `commit_to_invoice` — Investors commit **available balance in that invoice’s token** until the principal target is met
+- `repay_invoice` — SME repays principal + simple interest (8% APY default) **in the same token the invoice was funded with**
+- `withdraw` — Investor withdraws available (undeployed) balance **in the chosen token**
 
 ---
 
@@ -117,7 +120,7 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ### Investor Flow
 1. Connect Freighter wallet
-2. Go to **Invest** — deposit USDC into pool
+2. Go to **Invest** — choose a whitelisted stablecoin and deposit into the pool
 3. Pool admin deploys liquidity to approved invoices
 4. When invoices are repaid, yield accumulates in the pool
 5. Withdraw available balance anytime

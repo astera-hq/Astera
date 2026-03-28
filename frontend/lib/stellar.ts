@@ -18,6 +18,7 @@ export const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 export const INVOICE_CONTRACT_ID = process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID ?? '';
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
+export const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
 
 export const rpc = new StellarRpc.Server(RPC_URL);
 
@@ -58,6 +59,13 @@ export function daysUntil(ts: number): number {
 export function truncateAddress(addr: string): string {
   if (!addr) return '';
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+}
+
+/** Human label for a pool stablecoin (matches env-known tokens). */
+export function stablecoinLabel(tokenId: string): string {
+  if (tokenId === USDC_TOKEN_ID) return 'USDC';
+  if (tokenId === EURC_TOKEN_ID) return 'EURC';
+  return truncateAddress(tokenId);
 }
 
 /** Build and simulate a Soroban transaction */

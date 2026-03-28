@@ -12,9 +12,9 @@ import {
 import { TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc } from '@stellar/stellar-sdk';
 import type {
   Invoice,
-  InvoiceMetadata,
   InvestorPosition,
   PoolConfig,
+  PoolTokenTotals,
   FundedInvoice,
 } from './types';
 
@@ -120,21 +120,50 @@ export async function getPoolConfig(): Promise<PoolConfig> {
   const raw = scValToNative(result!.retval) as Record<string, unknown>;
 
   return {
-    usdcToken: raw.usdc_token as string,
     invoiceContract: raw.invoice_contract as string,
     admin: raw.admin as string,
     yieldBps: Number(raw.yield_bps),
+  };
+}
+
+export async function getAcceptedTokens(): Promise<string[]> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'accepted_tokens',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as string[];
+  return Array.isArray(raw) ? raw : [];
+}
+
+export async function getPoolTokenTotals(token: string): Promise<PoolTokenTotals> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_token_totals',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+  return {
     totalDeposited: BigInt(raw.total_deposited as string),
     totalDeployed: BigInt(raw.total_deployed as string),
     totalPaidOut: BigInt(raw.total_paid_out as string),
   };
 }
 
-export async function getInvestorPosition(investor: string): Promise<InvestorPosition | null> {
+export async function getInvestorPosition(
+  investor: string,
+  token: string,
+): Promise<InvestorPosition | null> {
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
     'get_position',
-    [new Address(investor).toScVal()],
+    [new Address(investor).toScVal(), new Address(token).toScVal()],
     'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
   );
 
@@ -152,7 +181,11 @@ export async function getInvestorPosition(investor: string): Promise<InvestorPos
   };
 }
 
-export async function buildDepositTx(investor: string, amount: bigint): Promise<string> {
+export async function buildDepositTx(
+  investor: string,
+  token: string,
+  amount: bigint,
+): Promise<string> {
   const account = await rpc.getAccount(investor);
   const contract = new Contract(POOL_CONTRACT_ID);
 
@@ -164,6 +197,7 @@ export async function buildDepositTx(investor: string, amount: bigint): Promise<
       contract.call(
         'deposit',
         new Address(investor).toScVal(),
+        new Address(token).toScVal(),
         nativeToScVal(amount, { type: 'i128' }),
       ),
     )
@@ -195,6 +229,7 @@ export async function getFundedInvoice(invoiceId: number): Promise<FundedInvoice
   return {
     invoiceId: Number(r.invoice_id),
     sme: r.sme as string,
+    token: r.token as string,
     principal: BigInt(r.principal as string),
     committed: BigInt(r.committed as string),
     fundedAt: Number(r.funded_at),
@@ -209,6 +244,7 @@ export async function buildInitCoFundingTx(params: {
   principal: bigint;
   sme: string;
   dueDate: number;
+  token: string;
 }): Promise<string> {
   const account = await rpc.getAccount(params.admin);
   const contract = new Contract(POOL_CONTRACT_ID);
@@ -225,6 +261,7 @@ export async function buildInitCoFundingTx(params: {
         nativeToScVal(params.principal, { type: 'i128' }),
         new Address(params.sme).toScVal(),
         nativeToScVal(params.dueDate, { type: 'u64' }),
+        new Address(params.token).toScVal(),
       ),
     )
     .setTimeout(30)
@@ -271,7 +308,11 @@ export async function buildCommitToInvoiceTx(params: {
   return prepared.toXDR();
 }
 
-export async function buildWithdrawTx(investor: string, amount: bigint): Promise<string> {
+export async function buildWithdrawTx(
+  investor: string,
+  token: string,
+  amount: bigint,
+): Promise<string> {
   const account = await rpc.getAccount(investor);
   const contract = new Contract(POOL_CONTRACT_ID);
 
@@ -283,6 +324,7 @@ export async function buildWithdrawTx(investor: string, amount: bigint): Promise
       contract.call(
         'withdraw',
         new Address(investor).toScVal(),
+        new Address(token).toScVal(),
         nativeToScVal(amount, { type: 'i128' }),
       ),
     )
