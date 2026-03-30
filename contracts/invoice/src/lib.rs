@@ -10,6 +10,12 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 
+// String length limits to prevent storage exhaustion attacks
+const MAX_DEBTOR_LENGTH: u32 = 100;
+const MAX_DESCRIPTION_LENGTH: u32 = 500;
+const MAX_VERIFICATION_HASH_LENGTH: u32 = 128;
+const MAX_DISPUTE_REASON_LENGTH: u32 = 300;
+
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
 pub enum InvoiceStatus {
@@ -135,6 +141,26 @@ fn concat_prefix_u64(env: &Env, prefix: &[u8], id: u64) -> String {
     String::from_bytes(env, &buf[..plen + dlen])
 }
 
+/// Validates string length against maximum allowed limits
+fn validate_string_length(env: &Env, value: &String, max_len: u32, field_name: &str) {
+    let len = value.len();
+    if len > max_len {
+        panic!(
+            "{} exceeds maximum length of {} characters (got {})",
+            field_name,
+            max_len,
+            len
+        );
+    }
+}
+
+/// Validates all string inputs for invoice creation
+fn validate_invoice_strings(env: &Env, debtor: &String, description: &String, verification_hash: &String) {
+    validate_string_length(env, debtor, MAX_DEBTOR_LENGTH, "debtor");
+    validate_string_length(env, description, MAX_DESCRIPTION_LENGTH, "description");
+    validate_string_length(env, verification_hash, MAX_VERIFICATION_HASH_LENGTH, "verification_hash");
+}
+
 #[contract]
 pub struct InvoiceContract;
 
@@ -179,6 +205,9 @@ impl InvoiceContract {
     ) -> u64 {
         owner.require_auth();
         bump_instance(&env);
+
+        // Validate string lengths to prevent storage exhaustion attacks
+        validate_invoice_strings(&env, &debtor, &description, &verification_hash);
 
         if amount <= 0 {
             panic!("amount must be positive");
@@ -253,6 +282,11 @@ impl InvoiceContract {
             .expect("oracle not configured");
         if oracle != stored_oracle {
             panic!("unauthorized oracle");
+        }
+
+        // Validate dispute reason length when rejecting
+        if !approved {
+            validate_string_length(&env, &reason, MAX_DISPUTE_REASON_LENGTH, "dispute reason");
         }
 
         let mut invoice: Invoice = env
@@ -925,5 +959,172 @@ mod test {
 
         let stats = client.get_storage_stats();
         assert_eq!(stats.active_invoices, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "debtor exceeds maximum length of 100 characters")]
+    fn test_create_invoice_debtor_too_long_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let hash = String::from_str(&env, "hash");
+
+        // Create debtor string longer than 100 characters
+        let long_debtor = String::from_str(&env, &"A".repeat(101));
+        client.create_invoice(
+            &sme,
+            &long_debtor,
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "description"),
+            &hash,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "description exceeds maximum length of 500 characters")]
+    fn test_create_invoice_description_too_long_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let hash = String::from_str(&env, "hash");
+
+        // Create description string longer than 500 characters
+        let long_description = String::from_str(&env, &"B".repeat(501));
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &long_description,
+            &hash,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "verification_hash exceeds maximum length of 128 characters")]
+    fn test_create_invoice_verification_hash_too_long_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        // Create verification hash string longer than 128 characters
+        let long_hash = String::from_str(&env, &"C".repeat(129));
+        client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "description"),
+            &long_hash,
+        );
+    }
+
+    #[test]
+    fn test_create_invoice_max_length_strings_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        // Test strings exactly at maximum length
+        let max_debtor = String::from_str(&env, &"A".repeat(100));
+        let max_description = String::from_str(&env, &"B".repeat(500));
+        let max_hash = String::from_str(&env, &"C".repeat(128));
+
+        let id = client.create_invoice(
+            &sme,
+            &max_debtor,
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &max_description,
+            &max_hash,
+        );
+
+        assert_eq!(id, 1);
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.debtor, max_debtor);
+        assert_eq!(invoice.description, max_description);
+        assert_eq!(invoice.verification_hash, max_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "dispute reason exceeds maximum length of 300 characters")]
+    fn test_verify_invoice_dispute_reason_too_long_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+
+        let oracle = Address::generate(&env);
+        client.set_oracle(&admin, &oracle);
+
+        let hash = String::from_str(&env, "hash");
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "description"),
+            &hash,
+        );
+
+        // Create dispute reason longer than 300 characters
+        let long_reason = String::from_str(&env, &"D".repeat(301));
+        client.verify_invoice(&id, &oracle, &false, &long_reason);
+    }
+
+    #[test]
+    fn test_verify_invoice_max_dispute_reason_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+
+        let oracle = Address::generate(&env);
+        client.set_oracle(&admin, &oracle);
+
+        let hash = String::from_str(&env, "hash");
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "description"),
+            &hash,
+        );
+
+        // Test dispute reason exactly at maximum length
+        let max_reason = String::from_str(&env, &"E".repeat(300));
+        client.verify_invoice(&id, &oracle, &false, &max_reason);
+
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.status, InvoiceStatus::Disputed);
+        assert_eq!(invoice.dispute_reason, max_reason);
+    }
+
+    #[test]
+    fn test_verify_invoice_approved_no_validation_on_reason() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+
+        let oracle = Address::generate(&env);
+        client.set_oracle(&admin, &oracle);
+
+        let hash = String::from_str(&env, "hash");
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "description"),
+            &hash,
+        );
+
+        // When approved, reason length should not be validated
+        let long_reason = String::from_str(&env, &"F".repeat(500)); // Longer than max
+        client.verify_invoice(&id, &oracle, &true, &long_reason);
+
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.status, InvoiceStatus::Verified);
+        assert!(invoice.oracle_verified);
     }
 }
