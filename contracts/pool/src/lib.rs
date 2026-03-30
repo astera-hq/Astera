@@ -83,6 +83,16 @@ pub struct PoolStorageStats {
 }
 
 #[contracttype]
+#[derive(Clone, Default)]
+pub struct FundingProgress {
+    pub total_principal: i128,
+    pub total_committed: i128,
+    pub remaining_amount: i128,
+    pub funding_percentage: u32,
+    pub unique_investors: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     Config,
     InvestorPosition(InvestorTokenKey),
@@ -389,12 +399,13 @@ impl FundingPool {
             .get(&DataKey::CoFundShare(share_key.clone()))
             .unwrap_or(0);
 
+        let mut co_funders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoFunders(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
         if existing_share == 0 {
-            let mut co_funders: Vec<Address> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::CoFunders(invoice_id))
-                .unwrap_or_else(|| Vec::new(&env));
             co_funders.push_back(investor.clone());
             env.storage()
                 .persistent()
@@ -414,6 +425,13 @@ impl FundingPool {
             .unwrap_or_default();
         tt.total_deployed += amount;
 
+        let progress_percentage = ((record.committed as u128 * 10000) / record.principal as u128) as u32;
+        
+        env.events().publish(
+            (EVT, symbol_short!("commit")),
+            (invoice_id, investor.clone(), amount, progress_percentage),
+        );
+
         if record.committed == record.principal {
             let token_client = token::Client::new(&env, &record.token);
             token_client.transfer(
@@ -425,7 +443,7 @@ impl FundingPool {
             record.funded_at = env.ledger().timestamp();
             env.events().publish(
                 (EVT, symbol_short!("funded")),
-                (invoice_id, record.sme.clone(), record.principal),
+                (invoice_id, record.sme.clone(), record.principal, co_funders.len() as u32),
             );
         }
 
@@ -511,6 +529,11 @@ impl FundingPool {
             pos.earned += investor_interest;
             env.storage().persistent().set(&pos_data_key, &pos);
             set_position_ttl(&env, &pos_data_key);
+
+            env.events().publish(
+                (EVT, symbol_short!("yield")),
+                (invoice_id, investor_addr.clone(), share, investor_interest),
+            );
         }
 
         record.repaid = true;
@@ -663,6 +686,101 @@ impl FundingPool {
             .get(&DataKey::TokenTotals(token))
             .unwrap_or_default();
         tt.total_deposited - tt.total_deployed
+    }
+
+    pub fn get_funding_progress(env: Env, invoice_id: u64) -> Option<FundingProgress> {
+        bump_instance(&env);
+        
+        let record: FundedInvoice = match env.storage().persistent().get(&DataKey::FundedInvoice(invoice_id)) {
+            Some(r) => r,
+            None => return None,
+        };
+
+        let co_funders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoFunders(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let remaining = record.principal - record.committed;
+        let funding_percentage = if record.principal > 0 {
+            ((record.committed as u128 * 10000) / record.principal as u128) as u32
+        } else {
+            0
+        };
+
+        Some(FundingProgress {
+            total_principal: record.principal,
+            total_committed: record.committed,
+            remaining_amount: remaining,
+            funding_percentage,
+            unique_investors: co_funders.len() as u32,
+        })
+    }
+
+    pub fn get_invoice_investors(env: Env, invoice_id: u64) -> Vec<Address> {
+        bump_instance(&env);
+        env.storage()
+            .persistent()
+            .get(&DataKey::CoFunders(invoice_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    pub fn get_investor_portfolio_summary(env: Env, investor: Address) -> Vec<(u64, i128)> {
+        bump_instance(&env);
+        let mut portfolio: Vec<(u64, i128)> = Vec::new(&env);
+        
+        let tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AcceptedTokens)
+            .expect("not initialized");
+
+        for token in tokens.iter() {
+            let pos_key = InvestorTokenKey {
+                investor: investor.clone(),
+                token: token.clone(),
+            };
+            let position: InvestorPosition = match env.storage().persistent().get(&DataKey::InvestorPosition(pos_key)) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            if position.deployed > 0 {
+                portfolio.push_back((1, position.deployed));
+            }
+        }
+        
+        portfolio
+    }
+
+    pub fn estimate_yield_for_share(env: Env, invoice_id: u64, investor_share: i128) -> i128 {
+        bump_instance(&env);
+        
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .expect("not initialized");
+        
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+            .expect("invoice not funded");
+
+        if record.funded_at == 0 || record.principal == 0 {
+            return 0;
+        }
+
+        let now = env.ledger().timestamp();
+        let elapsed_secs = now - record.funded_at;
+        let total_interest = (record.principal as u128
+            * config.yield_bps as u128
+            * elapsed_secs as u128)
+            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+
+        (total_interest * investor_share as u128 / record.principal as u128) as i128
     }
 
     pub fn get_storage_stats(env: Env) -> PoolStorageStats {
@@ -1347,8 +1465,6 @@ mod test {
 
     #[test]
     #[should_panic(expected = "amount must be positive")]
-        #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn test_withdraw_zero_amount_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1431,5 +1547,184 @@ mod test {
 
         assert_eq!(stats_after.cleaned_invoices, stats_before.cleaned_invoices + 1);
         assert!(client.get_funded_invoice(&1).is_none());
+    }
+
+    #[test]
+    fn test_funding_progress_tracking() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let investor1 = Address::generate(&env);
+        let investor2 = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 5_000_000_000;
+        let due_date = env.ledger().timestamp() + 2_592_000;
+
+        client.init_co_funding(&admin, &1, &principal, &sme, &due_date, &usdc_id);
+
+        let progress = client.get_funding_progress(&1).unwrap();
+        assert_eq!(progress.total_principal, principal);
+        assert_eq!(progress.total_committed, 0);
+        assert_eq!(progress.remaining_amount, principal);
+        assert_eq!(progress.funding_percentage, 0);
+        assert_eq!(progress.unique_investors, 0);
+
+        mint(&env, &usdc_id, &investor1, 3_000_000_000);
+        mint(&env, &usdc_id, &investor2, 2_000_000_000);
+        client.deposit(&investor1, &usdc_id, &3_000_000_000);
+        client.deposit(&investor2, &usdc_id, &2_000_000_000);
+
+        client.commit_to_invoice(&investor1, &1, &2_000_000_000);
+        
+        let progress = client.get_funding_progress(&1).unwrap();
+        assert_eq!(progress.total_committed, 2_000_000_000);
+        assert_eq!(progress.remaining_amount, 3_000_000_000);
+        assert_eq!(progress.funding_percentage, 4000); // 40%
+        assert_eq!(progress.unique_investors, 1);
+
+        client.commit_to_invoice(&investor2, &1, &3_000_000_000);
+        
+        let progress = client.get_funding_progress(&1).unwrap();
+        assert_eq!(progress.total_committed, principal);
+        assert_eq!(progress.remaining_amount, 0);
+        assert_eq!(progress.funding_percentage, 10000); // 100%
+        assert_eq!(progress.unique_investors, 2);
+    }
+
+    #[test]
+    fn test_get_invoice_investors() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let investor1 = Address::generate(&env);
+        let investor2 = Address::generate(&env);
+        let investor3 = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 6_000_000_000;
+        let due_date = env.ledger().timestamp() + 2_592_000;
+
+        client.init_co_funding(&admin, &1, &principal, &sme, &due_date, &usdc_id);
+
+        let investors = client.get_invoice_investors(&1);
+        assert_eq!(investors.len(), 0);
+
+        mint(&env, &usdc_id, &investor1, 2_000_000_000);
+        mint(&env, &usdc_id, &investor2, 2_000_000_000);
+        mint(&env, &usdc_id, &investor3, 2_000_000_000);
+        
+        client.deposit(&investor1, &usdc_id, &2_000_000_000);
+        client.deposit(&investor2, &usdc_id, &2_000_000_000);
+        client.deposit(&investor3, &usdc_id, &2_000_000_000);
+
+        client.commit_to_invoice(&investor1, &1, &1_000_000_000);
+        client.commit_to_invoice(&investor2, &1, &2_000_000_000);
+        client.commit_to_invoice(&investor3, &1, &3_000_000_000);
+
+        let investors = client.get_invoice_investors(&1);
+        assert_eq!(investors.len(), 3);
+        
+        let investors_set: std::collections::HashSet<_> = investors.iter().collect();
+        assert!(investors_set.contains(&investor1));
+        assert!(investors_set.contains(&investor2));
+        assert!(investors_set.contains(&investor3));
+    }
+
+    #[test]
+    fn test_estimate_yield_for_share() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 4_000_000_000;
+        let share: i128 = 1_000_000_000; // 25% of principal
+        let due_date = env.ledger().timestamp() + 2_592_000;
+
+        client.init_co_funding(&admin, &1, &principal, &sme, &due_date, &usdc_id);
+        
+        mint(&env, &usdc_id, &investor, &share);
+        client.deposit(&investor, &usdc_id, &share);
+        client.commit_to_invoice(&investor, &1, &share);
+
+        let yield_estimate = client.estimate_yield_for_share(&1, &share);
+        assert_eq!(yield_estimate, 0); // Not funded yet
+
+        let investor2 = Address::generate(&env);
+        mint(&env, &usdc_id, &investor2, &3_000_000_000);
+        client.deposit(&investor2, &usdc_id, &3_000_000_000);
+        client.commit_to_invoice(&investor2, &1, &3_000_000_000);
+
+        let yield_before = client.estimate_yield_for_share(&1, &share);
+        assert!(yield_before > 0);
+
+        env.ledger().with_mut(|l| l.timestamp += 30 * 86_400);
+
+        let yield_after = client.estimate_yield_for_share(&1, &share);
+        assert!(yield_after > yield_before);
+        
+        let expected_yield = (share as u128 * DEFAULT_YIELD_BPS as u128 * (30 * 86_400) as u128) 
+            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        assert_eq!(yield_after, expected_yield as i128);
+    }
+
+    #[test]
+    fn test_proportional_yield_distribution_three_investors() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let investor1 = Address::generate(&env);
+        let investor2 = Address::generate(&env);
+        let investor3 = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let principal: i128 = 6_000_000_000;
+        let share1: i128 = 1_000_000_000; // 16.67%
+        let share2: i128 = 2_000_000_000; // 33.33%
+        let share3: i128 = 3_000_000_000; // 50%
+        let due_date = env.ledger().timestamp() + 2_592_000;
+
+        client.init_co_funding(&admin, &1, &principal, &sme, &due_date, &usdc_id);
+
+        mint(&env, &usdc_id, &investor1, &share1);
+        mint(&env, &usdc_id, &investor2, &share2);
+        mint(&env, &usdc_id, &investor3, &share3);
+        mint(&env, &usdc_id, &sme, &(principal + 500_000_000));
+
+        client.deposit(&investor1, &usdc_id, &share1);
+        client.deposit(&investor2, &usdc_id, &share2);
+        client.deposit(&investor3, &usdc_id, &share3);
+
+        client.commit_to_invoice(&investor1, &1, &share1);
+        client.commit_to_invoice(&investor2, &1, &share2);
+        client.commit_to_invoice(&investor3, &1, &share3);
+
+        env.ledger().with_mut(|l| l.timestamp += 60 * 86_400); // 60 days
+
+        client.repay_invoice(&1, &sme);
+
+        let pos1 = client.get_position(&investor1, &usdc_id).unwrap();
+        let pos2 = client.get_position(&investor2, &usdc_id).unwrap();
+        let pos3 = client.get_position(&investor3, &usdc_id).unwrap();
+
+        assert!(pos1.earned > 0);
+        assert!(pos2.earned > 0);
+        assert!(pos3.earned > 0);
+
+        // Check proportional distribution
+        assert!(pos2.earned > pos1.earned);
+        assert!(pos3.earned > pos2.earned);
+        
+        // investor3 should earn exactly 3x investor1 (50% vs 16.67%)
+        assert!((pos3.earned as f64 / pos1.earned as f64 - 3.0).abs() < 0.01);
+        
+        // investor2 should earn exactly 2x investor1 (33.33% vs 16.67%)
+        assert!((pos2.earned as f64 / pos1.earned as f64 - 2.0).abs() < 0.01);
     }
 }
