@@ -22,6 +22,7 @@ pub struct PoolConfig {
     pub invoice_contract: Address,
     pub admin: Address,
     pub yield_bps: u32,
+    pub compound_interest: bool,
 }
 
 #[contracttype]
@@ -123,6 +124,29 @@ fn set_position_ttl(env: &Env, key: &DataKey) {
     }
 }
 
+fn calculate_interest(principal: u128, yield_bps: u32, elapsed_secs: u64, is_compound: bool) -> u128 {
+    let denominator = BPS_DENOM as u128 * SECS_PER_YEAR as u128;
+
+    if !is_compound {
+        return (principal * yield_bps as u128 * elapsed_secs as u128) / denominator;
+    }
+
+    let elapsed_days = elapsed_secs / 86400;
+    let mut amount = principal;
+    let daily_rate_num = yield_bps as u128 * 86400;
+
+    for _ in 0..elapsed_days {
+        amount += (amount * daily_rate_num) / denominator;
+    }
+
+    let remaining_secs = elapsed_secs % 86400;
+    if remaining_secs > 0 {
+        amount += (amount * yield_bps as u128 * remaining_secs as u128) / denominator;
+    }
+
+    amount - principal
+}
+
 #[contract]
 pub struct FundingPool;
 
@@ -137,6 +161,7 @@ impl FundingPool {
             invoice_contract,
             admin,
             yield_bps: DEFAULT_YIELD_BPS,
+            compound_interest: false,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -463,10 +488,12 @@ impl FundingPool {
 
         let now = env.ledger().timestamp();
         let elapsed_secs = now - record.funded_at;
-        let total_interest = (record.principal as u128
-            * config.yield_bps as u128
-            * elapsed_secs as u128)
-            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        let total_interest = calculate_interest(
+            record.principal as u128,
+            config.yield_bps,
+            elapsed_secs,
+            config.compound_interest,
+        );
         let total_due = record.principal + total_interest as i128;
 
         let token_client = token::Client::new(&env, &record.token);
@@ -606,6 +633,21 @@ impl FundingPool {
         env.storage().instance().set(&DataKey::Config, &config);
     }
 
+    pub fn set_compound_interest(env: Env, admin: Address, compound: bool) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .expect("not initialized");
+
+        config.compound_interest = compound;
+        env.storage().instance().set(&DataKey::Config, &config);
+    }
+
     // ---- Views ----
 
         pub fn get_config(env: Env) -> PoolConfig {
@@ -742,10 +784,12 @@ impl FundingPool {
 
         let now = env.ledger().timestamp();
         let elapsed = now - record.funded_at;
-        let interest = (record.principal as u128
-            * config.yield_bps as u128
-            * elapsed as u128)
-            / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
+        let interest = calculate_interest(
+            record.principal as u128,
+            config.yield_bps,
+            elapsed,
+            config.compound_interest,
+        );
 
         record.principal + interest as i128
     }
@@ -1431,5 +1475,56 @@ mod test {
 
         assert_eq!(stats_after.cleaned_invoices, stats_before.cleaned_invoices + 1);
         assert!(client.get_funded_invoice(&1).is_none());
+    }
+
+    #[test]
+    fn test_set_compound_interest() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, _usdc_id) = setup(&env);
+
+        let config = client.get_config();
+        assert_eq!(config.compound_interest, false);
+
+        client.set_compound_interest(&admin, &true);
+
+        let config = client.get_config();
+        assert_eq!(config.compound_interest, true);
+    }
+
+    #[test]
+    fn test_compound_vs_simple_interest() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, usdc_id) = setup(&env);
+        let principal: i128 = 10_000_000_000_000;
+
+        let investor1 = Address::generate(&env);
+        let sme1 = Address::generate(&env);
+        mint(&env, &usdc_id, &investor1, principal);
+        mint(&env, &usdc_id, &sme1, principal + 1_000_000_000_000);
+
+        client.deposit(&investor1, &usdc_id, &principal);
+        // Fund invoice for a long enough time to see divergence between simple and compound.
+        client.init_co_funding(&admin, &1, &principal, &sme1, &(env.ledger().timestamp() + SECS_PER_YEAR * 2), &usdc_id);
+        client.commit_to_invoice(&investor1, &1, &principal);
+
+        let elapsed_days = 90u64;
+        env.ledger().with_mut(|l| l.timestamp += elapsed_days * 86_400);
+
+        let est_simple = client.estimate_repayment(&1);
+
+        client.set_compound_interest(&admin, &true);
+        let est_compound = client.estimate_repayment(&1);
+
+        assert!(est_compound > est_simple);
+
+        client.repay_invoice(&1, &sme1);
+        let pos = client.get_position(&investor1, &usdc_id).unwrap();
+        
+        let interest = est_compound - principal;
+        assert_eq!(pos.earned, interest);
     }
 }
