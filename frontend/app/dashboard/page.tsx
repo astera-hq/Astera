@@ -6,7 +6,7 @@ import { useStore } from '@/lib/store';
 import InvoiceCard from '@/components/InvoiceCard';
 import CreditScore from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
-import { getInvoice, getInvoiceCount, getInvoiceMetadata, getFundedInvoice } from '@/lib/contracts';
+import { getInvoice, getInvoiceCount, getInvoiceMetadata, getFundedInvoice, getInvoicesBatch, getFundedInvoicesBatch } from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice, InvoiceMetadata } from '@/lib/types';
 
@@ -26,6 +26,8 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 
 /** Number of invoices to load per page */
 const PAGE_SIZE = 20;
+/** Intersection Observer threshold for infinite scroll */
+const SCROLL_THRESHOLD = 0.8;
 
 export default function DashboardPage() {
   const { wallet } = useStore();
@@ -49,6 +51,10 @@ export default function DashboardPage() {
 
   /** Ref used to preserve scroll position when loading more */
   const listRef = useRef<HTMLDivElement>(null);
+  /** Ref for intersection observer to trigger infinite scroll */
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  /** Intersection Observer for infinite scroll */
+  const observerRef = useRef<IntersectionObserver | null>(null);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -59,44 +65,110 @@ export default function DashboardPage() {
 
   /**
    * Fetch a batch of invoices starting from `startId` down to 1 (newest first).
-   * Returns the user's invoices found in this batch and the co-funding map entries.
+   * Uses optimized batch operations for better performance.
    */
   const fetchBatch = useCallback(
     async (startId: number, batchSize: number) => {
       const endId = Math.max(1, startId - batchSize + 1);
       const ids = Array.from({ length: startId - endId + 1 }, (_, i) => startId - i);
 
-      const fetched = await Promise.all(
-        ids.map(async (id) => {
-          const invoice = await getInvoice(id);
-          return { id, invoice };
-        }),
-      );
-
-      const mine = fetched.filter((row) => row.invoice.owner === wallet.address);
-      const rows: DashboardRow[] = await Promise.all(
-        mine.map(async ({ id, invoice }) => ({
+      try {
+        // Batch fetch all invoices and metadata in parallel
+        const { invoices, metadata } = await getInvoicesBatch(ids);
+        
+        // Filter to user's invoices
+        const userInvoices = invoices.filter(invoice => invoice.owner === wallet.address);
+        const userInvoiceIds = userInvoices.map(inv => inv.id);
+        
+        // Create metadata map for quick lookup
+        const metadataMap = new Map<number, InvoiceMetadata>();
+        metadata.forEach((meta, index) => {
+          if (index < ids.length) {
+            metadataMap.set(ids[index], meta);
+          }
+        });
+        
+        // Combine invoice data with metadata
+        const rows: DashboardRow[] = userInvoices.map(invoice => ({
           invoice,
-          metadata: await getInvoiceMetadata(id),
-        })),
-      );
+          metadata: metadataMap.get(invoice.id) || {
+            name: 'Unknown',
+            description: 'No description available',
+            image: '',
+            amount: invoice.amount,
+            debtor: 'Unknown',
+            dueDate: invoice.dueDate,
+            status: 'Pending',
+            symbol: 'USDC',
+            decimals: 7,
+          },
+        }));
 
-      // Fetch co-funding progress for pending invoices in this batch
-      const committed: Record<number, bigint> = {};
-      await Promise.all(
-        rows
-          .filter((row) => row.invoice.status === 'Pending')
-          .map(async (row) => {
-            try {
-              const record = await getFundedInvoice(row.invoice.id);
-              if (record) committed[row.invoice.id] = record.committed;
-            } catch {
-              // Not registered for co-funding yet
-            }
+        // Batch fetch funded invoice data for pending invoices
+        const pendingInvoiceIds = rows
+          .filter(row => row.invoice.status === 'Pending')
+          .map(row => row.invoice.id);
+
+        let committed: Record<number, bigint> = {};
+        if (pendingInvoiceIds.length > 0) {
+          try {
+            const fundedInvoices = await getFundedInvoicesBatch(pendingInvoiceIds);
+            fundedInvoices.forEach(funded => {
+              committed[funded.invoiceId] = funded.committed;
+            });
+          } catch (error) {
+            console.warn('Failed to fetch funded invoice batch:', error);
+            // Fallback to individual calls if batch fails
+            await Promise.all(
+              pendingInvoiceIds.map(async (id) => {
+                try {
+                  const record = await getFundedInvoice(id);
+                  if (record) committed[id] = record.committed;
+                } catch {
+                  // Not registered for co-funding yet
+                }
+              }),
+            );
+          }
+        }
+
+        return { rows, committed, scannedUpTo: endId - 1 };
+      } catch (error) {
+        console.error('Batch fetch failed, falling back to individual calls:', error);
+        
+        // Fallback to original implementation
+        const fetched = await Promise.all(
+          ids.map(async (id) => {
+            const invoice = await getInvoice(id);
+            return { id, invoice };
           }),
-      );
+        );
 
-      return { rows, committed, scannedUpTo: endId - 1 };
+        const mine = fetched.filter((row) => row.invoice.owner === wallet.address);
+        const rows: DashboardRow[] = await Promise.all(
+          mine.map(async ({ id, invoice }) => ({
+            invoice,
+            metadata: await getInvoiceMetadata(id),
+          })),
+        );
+
+        // Fetch co-funding progress for pending invoices in this batch
+        const committed: Record<number, bigint> = {};
+        await Promise.all(
+          rows
+            .filter((row) => row.invoice.status === 'Pending')
+            .map(async (row) => {
+              try {
+                const record = await getFundedInvoice(row.invoice.id);
+                if (record) committed[row.invoice.id] = record.committed;
+              } catch {
+                // Not registered for co-funding yet
+              }
+            }),
+        );
+
+        return { rows, committed, scannedUpTo: endId - 1 };
+      }
     },
     [wallet.address],
   );
@@ -163,6 +235,33 @@ export default function DashboardPage() {
     }
     loadInvoices();
   }, [wallet.connected, wallet.address, loadInvoices]);
+
+  // Setup infinite scroll using Intersection Observer
+  useEffect(() => {
+    if (!loadMoreRef.current || !hasMore || loadingMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const target = entries[0];
+        if (target.isIntersecting && hasMore && !loadingMore) {
+          loadMore();
+        }
+      },
+      {
+        threshold: SCROLL_THRESHOLD,
+        rootMargin: '100px', // Start loading 100px before element comes into view
+      }
+    );
+
+    observer.observe(loadMoreRef.current);
+    observerRef.current = observer;
+
+    return () => {
+      if (observerRef.current) {
+        observerRef.current.disconnect();
+      }
+    };
+  }, [hasMore, loadingMore, loadMore]);
 
   const stats = {
     total: invoices.length,
@@ -394,6 +493,10 @@ export default function DashboardPage() {
                     {/* Load More / Pagination Controls */}
                     {hasMore && (
                       <div className="mt-6 text-center">
+                        {/* Infinite scroll trigger */}
+                        <div ref={loadMoreRef} className="h-1" />
+                        
+                        {/* Manual load more button as fallback */}
                         <button
                           onClick={loadMore}
                           disabled={loadingMore}

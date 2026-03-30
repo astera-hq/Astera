@@ -16,11 +16,96 @@ import type {
   PoolConfig,
   PoolTokenTotals,
   FundedInvoice,
+  InvoiceMetadata,
 } from './types';
+import { performanceMonitor } from './performance';
+
+// ---- Performance Optimizations ----
+
+/** Simple in-memory cache for contract calls */
+const contractCache = new Map<string, { data: any; timestamp: number; ttl: number }>();
+const CACHE_TTL = 30_000; // 30 seconds
+
+function getCachedResult<T>(key: string): T | null {
+  const cached = contractCache.get(key);
+  if (cached && Date.now() - cached.timestamp < cached.ttl) {
+    performanceMonitor.recordCacheHit();
+    return cached.data as T;
+  }
+  performanceMonitor.recordCacheMiss();
+  return null;
+}
+
+function setCachedResult<T>(key: string, data: T, ttl: number = CACHE_TTL): void {
+  contractCache.set(key, { data, timestamp: Date.now(), ttl });
+}
+
+/** Batch multiple contract reads into a single simulation where possible */
+async function batchContractReads(calls: Array<{
+  contractId: string;
+  method: string;
+  args: any[];
+  key?: string;
+  cacheTTL?: number;
+}>): Promise<any[]> {
+  // Check cache first for each call
+  const uncachedCalls: typeof calls = [];
+  const results: any[] = new Array(calls.length);
+
+  calls.forEach((call, index) => {
+    if (call.key) {
+      const cached = getCachedResult(call.key);
+      if (cached !== null) {
+        results[index] = cached;
+      } else {
+        uncachedCalls.push({ ...call, originalIndex: index });
+      }
+    } else {
+      uncachedCalls.push({ ...call, originalIndex: index });
+    }
+  });
+
+  if (uncachedCalls.length === 0) {
+    return results;
+  }
+
+  // For now, process uncached calls individually
+  // In a future optimization, we could use Stellar's batch operations
+  await Promise.all(
+    uncachedCalls.map(async ({ contractId, method, args, key, cacheTTL, originalIndex }) => {
+      try {
+        const result = await simulateTx(
+          contractId,
+          method,
+          args,
+          'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+        );
+
+        const simResult = (result as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+        const data = scValToNative(simResult!.retval);
+        
+        results[originalIndex] = data;
+        
+        if (key) {
+          setCachedResult(key, data, cacheTTL);
+        }
+      } catch (error) {
+        console.error(`Failed to call ${method}:`, error);
+        results[originalIndex] = null;
+      }
+    })
+  );
+
+  return results;
+}
 
 // ---- Invoice Contract ----
 
 export async function getInvoice(id: number): Promise<Invoice> {
+  const cacheKey = `invoice_${id}`;
+  const cached = getCachedResult<Invoice>(cacheKey);
+  if (cached) return cached;
+
   const sim = await simulateTx(
     INVOICE_CONTRACT_ID,
     'get_invoice',
@@ -30,10 +115,16 @@ export async function getInvoice(id: number): Promise<Invoice> {
   );
 
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
-  return scValToNative(result!.retval) as Invoice;
+  const invoice = scValToNative(result!.retval) as Invoice;
+  setCachedResult(cacheKey, invoice, 60_000); // Cache for 1 minute
+  return invoice;
 }
 
 export async function getInvoiceMetadata(id: number): Promise<InvoiceMetadata> {
+  const cacheKey = `invoice_metadata_${id}`;
+  const cached = getCachedResult<InvoiceMetadata>(cacheKey);
+  if (cached) return cached;
+
   const sim = await simulateTx(
     INVOICE_CONTRACT_ID,
     'get_metadata',
@@ -45,7 +136,7 @@ export async function getInvoiceMetadata(id: number): Promise<InvoiceMetadata> {
   const raw = scValToNative(result!.retval) as Record<string, unknown>;
   const due = raw.due_date !== undefined ? Number(raw.due_date) : Number(raw.dueDate);
 
-  return {
+  const metadata: InvoiceMetadata = {
     name: raw.name as string,
     description: raw.description as string,
     image: raw.image as string,
@@ -56,9 +147,16 @@ export async function getInvoiceMetadata(id: number): Promise<InvoiceMetadata> {
     symbol: raw.symbol as string,
     decimals: Number(raw.decimals),
   };
+  
+  setCachedResult(cacheKey, metadata, 60_000); // Cache for 1 minute
+  return metadata;
 }
 
 export async function getInvoiceCount(): Promise<number> {
+  const cacheKey = 'invoice_count';
+  const cached = getCachedResult<number>(cacheKey);
+  if (cached) return cached;
+
   const sim = await simulateTx(
     INVOICE_CONTRACT_ID,
     'get_invoice_count',
@@ -67,7 +165,47 @@ export async function getInvoiceCount(): Promise<number> {
   );
 
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
-  return Number(scValToNative(result!.retval));
+  const count = Number(scValToNative(result!.retval));
+  setCachedResult(cacheKey, count, 10_000); // Cache for 10 seconds
+  return count;
+}
+
+/** Batch fetch multiple invoices and their metadata */
+export async function getInvoicesBatch(ids: number[]): Promise<{
+  invoices: Invoice[];
+  metadata: InvoiceMetadata[];
+}> {
+  const calls = ids.flatMap(id => [
+    {
+      contractId: INVOICE_CONTRACT_ID,
+      method: 'get_invoice',
+      args: [nativeToScVal(id, { type: 'u64' })],
+      key: `invoice_${id}`,
+      cacheTTL: 60_000
+    },
+    {
+      contractId: INVOICE_CONTRACT_ID,
+      method: 'get_metadata',
+      args: [nativeToScVal(id, { type: 'u64' })],
+      key: `invoice_metadata_${id}`,
+      cacheTTL: 60_000
+    }
+  ]);
+
+  const results = await batchContractReads(calls);
+  
+  const invoices: Invoice[] = [];
+  const metadata: InvoiceMetadata[] = [];
+  
+  for (let i = 0; i < ids.length; i++) {
+    const invoiceResult = results[i * 2];
+    const metadataResult = results[i * 2 + 1];
+    
+    if (invoiceResult) invoices.push(invoiceResult);
+    if (metadataResult) metadata.push(metadataResult);
+  }
+  
+  return { invoices, metadata };
 }
 
 export async function buildCreateInvoiceTx(params: {
@@ -214,6 +352,10 @@ export async function buildDepositTx(
 }
 
 export async function getFundedInvoice(invoiceId: number): Promise<FundedInvoice | null> {
+  const cacheKey = `funded_invoice_${invoiceId}`;
+  const cached = getCachedResult<FundedInvoice | null>(cacheKey);
+  if (cached !== undefined) return cached;
+
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
     'get_funded_invoice',
@@ -223,19 +365,38 @@ export async function getFundedInvoice(invoiceId: number): Promise<FundedInvoice
 
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
   const raw = scValToNative(result!.retval);
-  if (!raw) return null;
+  if (!raw) {
+    setCachedResult(cacheKey, null, 30_000); // Cache null for 30 seconds
+    return null;
+  }
 
-  const r = raw as Record<string, unknown>;
-  return {
-    invoiceId: Number(r.invoice_id),
-    sme: r.sme as string,
-    token: r.token as string,
-    principal: BigInt(r.principal as string),
-    committed: BigInt(r.committed as string),
-    fundedAt: Number(r.funded_at),
-    dueDate: Number(r.due_date),
-    repaid: Boolean(r.repaid),
+  const fundedInvoice: FundedInvoice = {
+    invoiceId: Number(raw.invoice_id),
+    sme: raw.sme as string,
+    token: raw.token as string,
+    principal: BigInt(raw.principal as string),
+    committed: BigInt(raw.committed as string),
+    fundedAt: Number(raw.funded_at),
+    dueDate: Number(raw.due_date),
+    repaid: Boolean(raw.repaid),
   };
+  
+  setCachedResult(cacheKey, fundedInvoice, 30_000); // Cache for 30 seconds
+  return fundedInvoice;
+}
+
+/** Batch fetch multiple funded invoices */
+export async function getFundedInvoicesBatch(invoiceIds: number[]): Promise<FundedInvoice[]> {
+  const calls = invoiceIds.map(id => ({
+    contractId: POOL_CONTRACT_ID,
+    method: 'get_funded_invoice',
+    args: [nativeToScVal(id, { type: 'u64' })],
+    key: `funded_invoice_${id}`,
+    cacheTTL: 30_000
+  }));
+
+  const results = await batchContractReads(calls);
+  return results.filter(r => r !== null) as FundedInvoice[];
 }
 
 export async function buildInitCoFundingTx(params: {
