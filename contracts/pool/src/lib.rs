@@ -93,6 +93,7 @@ pub enum DataKey {
     TokenTotals(Address),
     Initialized,
     StorageStats,
+    Paused,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -101,6 +102,17 @@ fn bump_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+fn require_not_paused(env: &Env) {
+    if env
+        .storage()
+        .instance()
+        .get::<DataKey, bool>(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        panic!("contract is paused");
+    }
 }
 
 fn set_funded_invoice_ttl(env: &Env, invoice_id: u64, is_completed: bool) {
@@ -152,12 +164,38 @@ impl FundingPool {
         env.storage()
             .instance()
             .set(&DataKey::StorageStats, &PoolStorageStats::default());
+        env.storage().instance().set(&DataKey::Paused, &false);
         bump_instance(&env);
+    }
+
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        bump_instance(&env);
+        env.events().publish((EVT, symbol_short!("paused")), admin);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        bump_instance(&env);
+        env.events().publish((EVT, symbol_short!("unpaused")), admin);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn add_token(env: Env, admin: Address, token: Address) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
 
         let mut tokens: Vec<Address> = env
@@ -189,6 +227,7 @@ impl FundingPool {
     pub fn remove_token(env: Env, admin: Address, token: Address) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
 
         let tokens: Vec<Address> = env
@@ -228,6 +267,7 @@ impl FundingPool {
     pub fn deposit(env: Env, investor: Address, token: Address, amount: i128) {
         investor.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -285,6 +325,7 @@ impl FundingPool {
     ) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
         Self::assert_accepted_token(&env, &token);
 
@@ -337,6 +378,7 @@ impl FundingPool {
     ) {
         investor.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -441,6 +483,7 @@ impl FundingPool {
     pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address) {
         payer.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
 
         let config: PoolConfig = env
             .storage()
@@ -548,6 +591,7 @@ impl FundingPool {
     pub fn withdraw(env: Env, investor: Address, token: Address, amount: i128) {
         investor.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -593,6 +637,7 @@ impl FundingPool {
     pub fn set_yield(env: Env, admin: Address, yield_bps: u32) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         let mut config: PoolConfig = env
             .storage()
             .instance()
@@ -676,6 +721,7 @@ impl FundingPool {
     pub fn cleanup_funded_invoice(env: Env, admin: Address, invoice_id: u64) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
 
         let record: FundedInvoice = env
@@ -759,6 +805,10 @@ impl FundingPool {
         if admin != &config.admin {
             panic!("unauthorized");
         }
+    }
+
+    fn require_not_paused(env: &Env) {
+        require_not_paused(env);
     }
 
     fn assert_accepted_token(env: &Env, token: &Address) {
@@ -1431,5 +1481,153 @@ mod test {
 
         assert_eq!(stats_after.cleaned_invoices, stats_before.cleaned_invoices + 1);
         assert!(client.get_funded_invoice(&1).is_none());
+    }
+
+    // ---- Circuit Breaker Tests ----
+
+    #[test]
+    fn test_pool_is_paused_false_after_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc) = setup(&env);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_pool_pause_and_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc) = setup(&env);
+        client.pause(&admin);
+        assert!(client.is_paused());
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_pool_pause_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc) = setup(&env);
+        let intruder = Address::generate(&env);
+        client.pause(&intruder);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_pool_unpause_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc) = setup(&env);
+        client.pause(&admin);
+        let intruder = Address::generate(&env);
+        client.unpause(&intruder);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_deposit_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+        client.pause(&admin);
+        client.deposit(&investor, &usdc_id, &1_000_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_withdraw_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000_000);
+        client.pause(&admin);
+        client.withdraw(&investor, &usdc_id, &500_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_init_co_funding_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id) = setup(&env);
+        let sme = Address::generate(&env);
+        client.pause(&admin);
+        client.init_co_funding(&admin, &1, &1_000_000_000, &sme, &(env.ledger().timestamp() + 1000), &usdc_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_commit_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000_000);
+        client.init_co_funding(&admin, &1, &1_000_000_000, &sme, &(env.ledger().timestamp() + 1000), &usdc_id);
+        client.pause(&admin);
+        client.commit_to_invoice(&investor, &1, &1_000_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_repay_while_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+        mint(&env, &usdc_id, &sme, 2_000_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000_000);
+        client.init_co_funding(&admin, &1, &1_000_000_000, &sme, &(env.ledger().timestamp() + 1000), &usdc_id);
+        client.commit_to_invoice(&investor, &1, &1_000_000_000);
+        client.pause(&admin);
+        client.repay_invoice(&1, &sme);
+    }
+
+    #[test]
+    fn test_pool_views_succeed_while_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000_000);
+        client.init_co_funding(&admin, &1, &1_000_000_000, &sme, &(env.ledger().timestamp() + 1000), &usdc_id);
+        client.pause(&admin);
+
+        let _ = client.get_config();
+        let _ = client.accepted_tokens();
+        let _ = client.get_token_totals(&usdc_id);
+        let _ = client.get_position(&investor, &usdc_id);
+        let _ = client.get_funded_invoice(&1);
+        let _ = client.available_liquidity(&usdc_id);
+        let _ = client.get_storage_stats();
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_pool_pause_unpause_restores_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        client.deposit(&investor, &usdc_id, &1_000_000_000);
+        let pos = client.get_position(&investor, &usdc_id).unwrap();
+        assert_eq!(pos.available, 1_000_000_000);
     }
 }
