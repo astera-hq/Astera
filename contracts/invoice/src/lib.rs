@@ -142,7 +142,7 @@ fn concat_prefix_u64(env: &Env, prefix: &[u8], id: u64) -> String {
 }
 
 /// Validates string length against maximum allowed limits
-fn validate_string_length(env: &Env, value: &String, max_len: u32, field_name: &str) {
+fn validate_string_length(_env: &Env, value: &String, max_len: u32, field_name: &str) {
     let len = value.len();
     if len > max_len {
         panic!(
