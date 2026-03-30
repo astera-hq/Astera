@@ -45,4 +45,4 @@
     - **Property 9: Idempotency guard**
     - **Validates: Requirements 4.3**
 
-- [-] 7. Checkpoint — Ensure all tests pass, ask the user if questions arise.
+- [x] 7. Checkpoint — Ensure all tests pass, ask the user if questions arise.
