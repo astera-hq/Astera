@@ -1,0 +1,203 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---- Security Audit ----
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run cargo-audit
+        working-directory: ./contracts
+        run: cargo audit
+
+  # ---- Rust Contracts ----
+  rust-contracts:
+    name: Rust Contracts
+    runs-on: ubuntu-latest
+    needs: security-audit
+    strategy:
+      matrix:
+        contract: [invoice, pool, credit_score]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Check formatting
+        working-directory: ./contracts/${{ matrix.contract }}
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        working-directory: ./contracts/${{ matrix.contract }}
+        run: cargo clippy -- -D warnings
+
+      - name: Build contract
+        working-directory: ./contracts/${{ matrix.contract }}
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Run tests
+        working-directory: ./contracts/${{ matrix.contract }}
+        run: cargo test --verbose
+
+  # ---- Frontend ----
+  frontend:
+    name: Frontend Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+  # ---- Dependency Scanning ----
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Scan frontend dependencies
+        working-directory: ./frontend
+        run: |
+          npm install -g npm-audit-resolver
+          npm audit --audit-level=high
+
+  # ---- Integration Tests ----
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [rust-contracts, frontend]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build all contracts
+        working-directory: ./contracts
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Run all contract tests
+        working-directory: ./contracts
+        run: cargo test --workspace --verbose
+
+  # ---- Deploy to Testnet ----
+  deploy-testnet:
+    name: Deploy to Testnet
+    runs-on: ubuntu-latest
+    needs: [rust-contracts, frontend, integration-tests]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: testnet
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+
+      - name: Build contracts
+        working-directory: ./contracts
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Configure Stellar CLI
+        run: |
+          stellar keys add deployer --secret-key "${{ secrets.TESTNET_DEPLOYER_KEY }}"
+
+      - name: Deploy Invoice Contract
+        id: deploy-invoice
+        run: |
+          CONTRACT_ID=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/invoice.wasm \
+            --source deployer \
+            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
+          echo "INVOICE_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Deploy Pool Contract
+        id: deploy-pool
+        run: |
+          CONTRACT_ID=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/pool.wasm \
+            --source deployer \
+            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
+          echo "POOL_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Deploy Credit Score Contract
+        id: deploy-credit
+        run: |
+          CONTRACT_ID=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/credit_score.wasm \
+            --source deployer \
+            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
+          echo "CREDIT_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Summary
+        run: |
+          echo "### Testnet Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Invoice Contract: ${{ steps.deploy-invoice.outputs.INVOICE_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Pool Contract: ${{ steps.deploy-pool.outputs.POOL_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Credit Score Contract: ${{ steps.deploy-credit.outputs.CREDIT_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
