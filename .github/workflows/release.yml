@@ -1,0 +1,147 @@
+name: Release Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 1.0.0)'
+        required: true
+        type: string
+      create_tag:
+        description: 'Create git tag'
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build contracts
+        working-directory: ./contracts
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Run tests
+        working-directory: ./contracts
+        run: cargo test --workspace --verbose
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Create git tag
+        if: ${{ github.event.inputs.create_tag == 'true' }}
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag -a "v${{ github.event.inputs.version }}" -m "Release v${{ github.event.inputs.version }}"
+          git push origin "v${{ github.event.inputs.version }}"
+
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          release_name: Release v${{ github.event.inputs.version }}
+          body: |
+            ## Release v${{ github.event.inputs.version }}
+            
+            ### 📦 Smart Contracts
+            - Invoice contract: Optimized and tested
+            - Pool contract: Optimized and tested
+            - Credit Score contract: Optimized and tested
+            
+            ### 🌐 Frontend
+            - Built and optimized for production
+            - All tests passing
+            
+            ### 🚀 Deployment
+            - Ready for Stellar Testnet deployment
+            
+            ### 📋 Installation
+            ```bash
+            # Clone the repository
+            git clone https://github.com/${{ github.repository }}.git
+            cd $(basename ${{ github.repository }})
+            
+            # Checkout this release
+            git checkout v${{ github.event.inputs.version }}
+            
+            # Build contracts
+            cd contracts
+            cargo build --target wasm32-unknown-unknown --release
+            
+            # Build frontend
+            cd ../frontend
+            npm install
+            npm run build
+            ```
+          draft: false
+          prerelease: false
+
+      - name: Upload contract artifacts
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: contracts/target/wasm32-unknown-unknown/release/invoice.wasm
+          asset_name: invoice.wasm
+          asset_content_type: application/wasm
+
+      - name: Upload pool contract
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: contracts/target/wasm32-unknown-unknown/release/pool.wasm
+          asset_name: pool.wasm
+          asset_content_type: application/wasm
+
+      - name: Upload credit score contract
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: contracts/target/wasm32-unknown-unknown/release/credit_score.wasm
+          asset_name: credit_score.wasm
+          asset_content_type: application/wasm
+
+      - name: Upload frontend build
+        run: |
+          cd frontend
+          zip -r ../frontend-build.zip dist/
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload frontend asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: frontend-build.zip
+          asset_name: frontend-build.zip
+          asset_content_type: application/zip

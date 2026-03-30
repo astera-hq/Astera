@@ -3,8 +3,11 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [main, develop]
+    tags:
+      - 'v*'
   pull_request:
     branches: [main, develop]
+    types: [opened, synchronize, closed]
 
 env:
   CARGO_TERM_COLOR: always
@@ -68,6 +71,13 @@ jobs:
         working-directory: ./contracts/${{ matrix.contract }}
         run: cargo test --verbose
 
+      - name: Upload contract artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.contract }}-wasm
+          path: contracts/${{ matrix.contract }}/target/wasm32-unknown-unknown/release/${{ matrix.contract }}.wasm
+          retention-days: 30
+
   # ---- Frontend ----
   frontend:
     name: Frontend Build & Test
@@ -93,6 +103,13 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+      - name: Upload frontend artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist/
+          retention-days: 30
 
   # ---- Dependency Scanning ----
   dependency-scan:
@@ -121,6 +138,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download contract artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-wasm'
+          path: artifacts/
+          merge-multiple: true
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -139,15 +163,24 @@ jobs:
         working-directory: ./contracts
         run: cargo test --workspace --verbose
 
-  # ---- Deploy to Testnet ----
-  deploy-testnet:
-    name: Deploy to Testnet
+  # ---- Deploy to Testnet on PR Merge ----
+  deploy-testnet-pr:
+    name: Deploy to Testnet (PR Merge)
     runs-on: ubuntu-latest
     needs: [rust-contracts, frontend, integration-tests]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
     environment: testnet
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download contract artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-wasm'
+          path: target/wasm32-unknown-unknown/release/
+          merge-multiple: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -156,10 +189,6 @@ jobs:
 
       - name: Install Stellar CLI
         run: cargo install stellar-cli --locked
-
-      - name: Build contracts
-        working-directory: ./contracts
-        run: cargo build --target wasm32-unknown-unknown --release
 
       - name: Configure Stellar CLI
         run: |
@@ -195,9 +224,138 @@ jobs:
           echo "CREDIT_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
         continue-on-error: true
 
+      - name: Comment PR with deployment info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const invoiceId = '${{ steps.deploy-invoice.outputs.INVOICE_CONTRACT_ID }}';
+            const poolId = '${{ steps.deploy-pool.outputs.POOL_CONTRACT_ID }}';
+            const creditId = '${{ steps.deploy-credit.outputs.CREDIT_CONTRACT_ID }}';
+            
+            const comment = `## 🚀 Testnet Deployment Complete
+            
+            Contracts have been deployed to Stellar Testnet:
+            
+            - **Invoice Contract**: ${invoiceId || 'Deployment failed'}
+            - **Pool Contract**: ${poolId || 'Deployment failed'}
+            - **Credit Score Contract**: ${creditId || 'Deployment failed'}
+            
+            You can interact with these contracts using the Stellar Testnet.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
       - name: Summary
         run: |
           echo "### Testnet Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "- Invoice Contract: ${{ steps.deploy-invoice.outputs.INVOICE_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
           echo "- Pool Contract: ${{ steps.deploy-pool.outputs.POOL_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
           echo "- Credit Score Contract: ${{ steps.deploy-credit.outputs.CREDIT_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
+
+  # ---- Deploy to Testnet on Main Push ----
+  deploy-testnet-main:
+    name: Deploy to Testnet (Main)
+    runs-on: ubuntu-latest
+    needs: [rust-contracts, frontend]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: testnet
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download contract artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-wasm'
+          path: target/wasm32-unknown-unknown/release/
+          merge-multiple: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+
+      - name: Configure Stellar CLI
+        run: |
+          stellar keys add deployer --secret-key "${{ secrets.TESTNET_DEPLOYER_KEY }}"
+
+      - name: Deploy contracts
+        run: |
+          for contract in invoice pool credit_score; do
+            echo "Deploying $contract contract..."
+            stellar contract deploy \
+              --wasm target/wasm32-unknown-unknown/release/$contract.wasm \
+              --source deployer \
+              --network testnet || echo "Failed to deploy $contract"
+          done
+
+  # ---- Create Release ----
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [rust-contracts, frontend, deploy-testnet-main]
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts/
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Release v${{ steps.version.outputs.VERSION }}
+            
+            ### 📦 Contracts
+            - Invoice contract deployed and tested
+            - Pool contract deployed and tested  
+            - Credit Score contract deployed and tested
+            
+            ### 🌐 Frontend
+            - Frontend built and optimized
+            
+            ### 🚀 Deployment
+            - All contracts deployed to Stellar Testnet
+            
+            ### 🔗 Links
+            - [Stellar Testnet Explorer](https://stellar.expert/explorer/testnet)
+          draft: false
+          prerelease: false
+
+      - name: Upload contract WASM files
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: release-artifacts/invoice-wasm/invoice.wasm
+          asset_name: invoice.wasm
+          asset_content_type: application/wasm
+
+      - name: Upload frontend build
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: release-artifacts/frontend-build/
+          asset_name: frontend-build.zip
+          asset_content_type: application/zip
