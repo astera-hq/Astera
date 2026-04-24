@@ -55,7 +55,7 @@ fn test_complete_invoice_lifecycle() {
     let share_client = share::Client::new(&env, &share_id);
 
     // Initialize contracts
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128);
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
     share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
@@ -139,7 +139,7 @@ fn test_default_with_grace_period() {
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128);
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
     share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
@@ -209,7 +209,7 @@ fn test_multiple_invoices_yield_distribution() {
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128);
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
     share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);
@@ -308,7 +308,7 @@ fn test_state_consistency() {
     let credit_client = credit_score::Client::new(&env, &credit_id);
     let share_client = share::Client::new(&env, &share_id);
 
-    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128);
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
     share_client.initialize(&admin, &7u32, &String::from_str(&env, "Pool Shares"), &String::from_str(&env, "POOL"));
     pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
     credit_client.initialize(&admin, &invoice_id, &pool_id);

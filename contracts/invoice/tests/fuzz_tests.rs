@@ -15,7 +15,8 @@ fn setup(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address) {
     let admin = Address::generate(env);
     let pool = Address::generate(env);
     let sme = Address::generate(env);
-    client.initialize(&admin, &pool, &i128::MAX);
+    let expiration = 30u64 * 86_400u64;
+    client.initialize(&admin, &pool, &i128::MAX, &expiration);
     (client, admin, pool, sme)
 }
 
