@@ -24,6 +24,7 @@ pub enum InvoiceStatus {
     Funded,
     Paid,
     Defaulted,
+    Cancelled,
 }
 
 #[contracttype]
@@ -565,6 +566,43 @@ impl InvoiceContract {
         env.events().publish((EVT, symbol_short!("default")), id);
     }
 
+    pub fn cancel_invoice(env: Env, id: u64, owner: Address) {
+        owner.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+
+        if owner != invoice.owner {
+            panic!("unauthorized");
+        }
+        if invoice.status != InvoiceStatus::Pending {
+            panic!("only pending invoices can be cancelled");
+        }
+
+        invoice.status = InvoiceStatus::Cancelled;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        set_invoice_ttl(&env, id, true);
+
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        stats.active_invoices = stats.active_invoices.saturating_sub(1);
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+
+        env.events()
+            .publish((EVT, symbol_short!("cancelled")), (id, owner));
+    }
+
     pub fn cleanup_invoice(env: Env, id: u64, caller: Address) {
         caller.require_auth();
         require_not_paused(&env);
@@ -585,8 +623,9 @@ impl InvoiceContract {
             .get(&DataKey::Invoice(id))
             .expect("invoice not found");
 
-        let is_completed =
-            invoice.status == InvoiceStatus::Paid || invoice.status == InvoiceStatus::Defaulted;
+        let is_completed = invoice.status == InvoiceStatus::Paid
+            || invoice.status == InvoiceStatus::Defaulted
+            || invoice.status == InvoiceStatus::Cancelled;
         if !is_completed {
             panic!("can only cleanup completed invoices");
         }
@@ -1121,6 +1160,73 @@ mod test {
 
         let stats = client.get_storage_stats();
         assert_eq!(stats.active_invoices, 0);
+    }
+
+    // ---- Cancellation Tests ----
+
+    #[test]
+    fn test_cancel_pending_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+
+        let stats_before = client.get_storage_stats();
+        assert_eq!(stats_before.active_invoices, 1);
+
+        client.cancel_invoice(&id, &sme);
+        let inv = client.get_invoice(&id);
+        assert_eq!(inv.status, InvoiceStatus::Cancelled);
+
+        let stats_after = client.get_storage_stats();
+        assert_eq!(stats_after.active_invoices, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "only pending invoices can be cancelled")]
+    fn test_cancel_non_pending_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, pool, sme) = setup(&env);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.mark_funded(&id, &pool);
+        client.cancel_invoice(&id, &sme);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_cancel_unauthorized_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+
+        let intruder = Address::generate(&env);
+        client.cancel_invoice(&id, &intruder);
     }
 
     // ---- Circuit Breaker Tests ----

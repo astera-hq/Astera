@@ -29,3 +29,6 @@ yarn-error.log*
 .soroban/
 node_modules/
 target/
+
+# Contract test snapshots (generated)
+contracts/**/test_snapshots/
