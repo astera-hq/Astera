@@ -2,9 +2,9 @@
 
 use proptest::prelude::*;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short,
+    contract, contractimpl, symbol_short,
     testutils::{Address as _, Ledger},
-    Address, Env, String, Symbol,
+    Address, Env, IntoVal, Symbol,
 };
 
 use pool::{FundingPool, FundingPoolClient};
@@ -62,6 +62,138 @@ fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
+
+    // ---- #110: Pool invariant – pool_value >= total_deployed ----
+
+    /// Invariant: After any sequence of deposits and funding, pool_value >= total_deployed.
+    #[test]
+    fn prop_pool_value_gte_total_deployed(
+        deposit in 1_000_000i128..10_000_000_000i128,
+        fund_ratio in 1u32..90u32,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, deposit);
+        mint(&env, &usdc_id, &sme, deposit * 2);
+
+        client.deposit(&investor, &usdc_id, &deposit);
+
+        let principal = (deposit as u128 * fund_ratio as u128 / 100) as i128;
+        if principal > 0 {
+            let due_date = env.ledger().timestamp() + 86_400;
+            client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+        }
+
+        let tt = client.get_token_totals(&usdc_id);
+        prop_assert!(
+            tt.pool_value >= tt.total_deployed,
+            "Invariant violated: pool_value={} < total_deployed={}",
+            tt.pool_value,
+            tt.total_deployed
+        );
+    }
+
+    /// Invariant: Interest is monotonically non-decreasing with elapsed time.
+    #[test]
+    fn prop_interest_monotonic(
+        principal in 1_000_000i128..1_000_000_000i128,
+        t1_days in 1u64..180u64,
+        t2_days in 181u64..365u64,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, principal * 2);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.deposit(&investor, &usdc_id, &principal);
+        let due_date = env.ledger().timestamp() + t2_days * 86_400 + 1;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        env.ledger().with_mut(|l| l.timestamp += t1_days * 86_400);
+        let repayment_at_t1 = client.estimate_repayment(&1u64);
+
+        env.ledger().with_mut(|l| l.timestamp += (t2_days - t1_days) * 86_400);
+        let repayment_at_t2 = client.estimate_repayment(&1u64);
+
+        prop_assert!(
+            repayment_at_t2 >= repayment_at_t1,
+            "Interest not monotonic: t1_repayment={} > t2_repayment={}",
+            repayment_at_t1,
+            repayment_at_t2
+        );
+    }
+
+    /// Invariant: available_liquidity == pool_value - total_deployed always.
+    #[test]
+    fn prop_available_liquidity_identity(
+        deposit in 1_000_000i128..5_000_000_000i128,
+        fund_ratio in 0u32..80u32,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, deposit);
+        mint(&env, &usdc_id, &sme, deposit);
+
+        client.deposit(&investor, &usdc_id, &deposit);
+
+        if fund_ratio > 0 {
+            let principal = (deposit as u128 * fund_ratio as u128 / 100) as i128;
+            if principal > 0 {
+                let due_date = env.ledger().timestamp() + 86_400;
+                client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+            }
+        }
+
+        let tt = client.get_token_totals(&usdc_id);
+        let computed_liquidity = tt.pool_value - tt.total_deployed;
+        let reported_liquidity = client.available_liquidity(&usdc_id);
+        prop_assert_eq!(
+            computed_liquidity,
+            reported_liquidity,
+            "Liquidity identity broken"
+        );
+    }
+
+    /// Invariant: After full repayment, total_deployed returns to zero.
+    #[test]
+    fn prop_total_deployed_clears_on_repayment(
+        principal in 1_000_000i128..1_000_000_000i128,
+        hold_days in 1u64..30u64,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+
+        client.deposit(&investor, &usdc_id, &principal);
+        let due_date = env.ledger().timestamp() + hold_days * 86_400 + 1;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        env.ledger().with_mut(|l| l.timestamp += hold_days * 86_400);
+        client.repay_invoice(&1u64, &sme);
+
+        let tt = client.get_token_totals(&usdc_id);
+        prop_assert_eq!(tt.total_deployed, 0i128, "total_deployed should be 0 after repayment");
+        prop_assert!(tt.pool_value > principal, "pool_value should have grown with interest");
+    }
+
+    // ---- Exchange rate (multi-currency) ----
 
     /// Fuzz test: Deposit amounts
     #[test]
@@ -295,5 +427,80 @@ mod deterministic_fuzz {
 
         // Compound should be slightly higher than simple for 1 year
         assert!(compound_repayment >= simple_repayment);
+    }
+
+    // ---- #111: Exchange rate tests ----
+
+    #[test]
+    fn test_exchange_rate_default_is_par() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share) = setup(&env);
+        // default exchange rate should be 10000 bps (1:1 USD)
+        assert_eq!(client.get_exchange_rate(&usdc_id), 10_000u32);
+    }
+
+    #[test]
+    fn test_exchange_rate_set_and_get() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share) = setup(&env);
+        // e.g. EURC at 1.08 USD = 10800 bps
+        client.set_exchange_rate(&admin, &usdc_id, &10_800u32);
+        assert_eq!(client.get_exchange_rate(&usdc_id), 10_800u32);
+    }
+
+    // ---- #109: KYC / investor whitelist tests ----
+
+    #[test]
+    fn test_kyc_not_required_by_default() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share) = setup(&env);
+        let investor = Address::generate(&env);
+
+        // deposit should succeed without any KYC approval
+        mint(&env, &usdc_id, &investor, 1_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000);
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.pool_value, 1_000_000);
+    }
+
+    #[test]
+    fn test_kyc_approved_investor_can_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_kyc_required(&admin, &true);
+        client.set_investor_kyc(&admin, &investor, &true);
+
+        mint(&env, &usdc_id, &investor, 1_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000);
+        let tt = client.get_token_totals(&usdc_id);
+        assert_eq!(tt.pool_value, 1_000_000);
+    }
+
+    #[test]
+    fn test_kyc_status_query() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc, _share) = setup(&env);
+        let investor = Address::generate(&env);
+
+        // not approved by default
+        assert!(!client.get_investor_kyc(&investor));
+        assert!(!client.kyc_required());
+
+        client.set_kyc_required(&admin, &true);
+        assert!(client.kyc_required());
+
+        client.set_investor_kyc(&admin, &investor, &true);
+        assert!(client.get_investor_kyc(&investor));
+
+        // revoke
+        client.set_investor_kyc(&admin, &investor, &false);
+        assert!(!client.get_investor_kyc(&investor));
     }
 }

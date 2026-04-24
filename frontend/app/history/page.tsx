@@ -8,6 +8,7 @@ import {
   POOL_CONTRACT_ID,
   scValToNative,
   formatUSDC,
+  fromStroops,
   truncateAddress,
 } from '@/lib/stellar';
 
@@ -183,6 +184,35 @@ function formatTs(ts: string): string {
   });
 }
 
+function exportCSV(events: HistoryEvent[]) {
+  const header = ['Date', 'Type', 'Invoice ID', 'Amount (USD)', 'Interest (USD)', 'Address', 'Tx Hash'];
+  const rows = events.map((e) => [
+    e.timestamp ? new Date(e.timestamp).toISOString() : '',
+    KIND_LABELS[e.kind],
+    e.invoiceId !== undefined ? e.invoiceId.toString() : '',
+    e.amount !== undefined ? fromStroops(e.amount).toFixed(7) : '',
+    e.interest !== undefined ? fromStroops(e.interest).toFixed(7) : '',
+    e.address ?? '',
+    e.txHash,
+  ]);
+
+  const csv = [header, ...rows]
+    .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `astera-history-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportPDF() {
+  window.print();
+}
+
 export default function HistoryPage() {
   const { wallet } = useStore();
   const [events, setEvents] = useState<HistoryEvent[]>([]);
@@ -273,9 +303,27 @@ export default function HistoryPage() {
   return (
     <div className="min-h-screen pt-24 pb-16 px-6">
       <div className="max-w-3xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-1">Transaction History</h1>
-          <p className="text-brand-muted">On-chain activity for your wallet</p>
+        <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold mb-1">Transaction History</h1>
+            <p className="text-brand-muted">On-chain activity for your wallet</p>
+          </div>
+          {events.length > 0 && (
+            <div className="flex gap-2 print:hidden">
+              <button
+                onClick={() => exportCSV(events)}
+                className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium hover:border-brand-gold/50 hover:text-brand-gold transition-colors"
+              >
+                Export CSV
+              </button>
+              <button
+                onClick={exportPDF}
+                className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium hover:border-brand-gold/50 hover:text-brand-gold transition-colors"
+              >
+                Export PDF
+              </button>
+            </div>
+          )}
         </div>
 
         {!wallet.connected ? (

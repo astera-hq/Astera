@@ -87,6 +87,7 @@ pub enum DataKey {
     DailyInvoiceResetTime(Address),
     ProposedWasmHash,
     UpgradeScheduledAt,
+    GracePeriodDays,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -650,6 +651,33 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::StorageStats)
             .unwrap_or_default()
+    }
+
+    pub fn set_grace_period(env: Env, admin: Address, days: u32) {
+        admin.require_auth();
+        bump_instance(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if days > 90 {
+            panic!("grace period cannot exceed 90 days");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::GracePeriodDays, &days);
+    }
+
+    pub fn get_grace_period(env: Env) -> u32 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS)
     }
 
     pub fn set_pool(env: Env, admin: Address, pool: Address) {

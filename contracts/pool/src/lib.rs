@@ -80,6 +80,11 @@ pub enum DataKey {
     Paused,
     ProposedWasmHash,
     UpgradeScheduledAt,
+    // #111: exchange rate for each accepted token (bps of USD, e.g. 10000 = 1:1 USD)
+    ExchangeRate(Address),
+    // #109: KYC / investor whitelist
+    KycRequired,
+    InvestorKyc(Address),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -306,6 +311,23 @@ impl FundingPool {
         }
         Self::assert_accepted_token(&env, &token);
 
+        // #109: enforce KYC check when required
+        let kyc_required: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::KycRequired)
+            .unwrap_or(false);
+        if kyc_required {
+            let approved: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::InvestorKyc(investor.clone()))
+                .unwrap_or(false);
+            if !approved {
+                panic!("investor not KYC approved");
+            }
+        }
+
         // Transfer tokens first
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&investor, &env.current_contract_address(), &amount);
@@ -470,7 +492,6 @@ impl FundingPool {
             token: token.clone(),
             principal,
             funded_at: env.ledger().timestamp(),
-            factoring_fee: 0, // No factoring fee in fund_invoice
             due_date,
             factoring_fee,
             repaid: false,
@@ -543,12 +564,6 @@ impl FundingPool {
             .instance()
             .get(&token_totals_key)
             .unwrap_or_default();
-            
-        let mut stats: PoolStorageStats = env
-            .storage()
-            .instance()
-            .get(&DataKey::StorageStats)
-            .unwrap_or_default();
 
         // Update values
         record.repaid = true;
@@ -556,9 +571,12 @@ impl FundingPool {
         tt.pool_value += total_interest as i128; // yield added back to pool NAV
         tt.total_fee_revenue += record.factoring_fee;
         tt.total_paid_out += total_due;
-        env.storage().instance().set(&DataKey::TokenTotals(record.token.clone()), &tt);
 
-        let mut stats: PoolStorageStats = env.storage().instance().get(&DataKey::StorageStats).unwrap_or_default();
+        let mut stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
         stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
 
         // Batch write: update all storage at once
@@ -731,6 +749,78 @@ impl FundingPool {
             }
         }
         panic!("token not accepted");
+    }
+
+    // ---- #111: Exchange rate methods ----
+
+    /// Set the USD exchange rate for a token (in bps, e.g. 10000 = 1:1 with USD).
+    /// Used to normalise pool value across stablecoins for display/reporting.
+    pub fn set_exchange_rate(env: Env, admin: Address, token: Address, rate_bps: u32) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        Self::assert_accepted_token(&env, &token);
+        if rate_bps == 0 {
+            panic!("rate must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ExchangeRate(token.clone()), &rate_bps);
+        env.events()
+            .publish((EVT, symbol_short!("set_rate")), (admin, token, rate_bps));
+    }
+
+    /// Returns the USD exchange rate for `token` in bps (defaults to 10000 = 1:1).
+    pub fn get_exchange_rate(env: Env, token: Address) -> u32 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::ExchangeRate(token))
+            .unwrap_or(10_000u32)
+    }
+
+    // ---- #109: Investor KYC / whitelist methods ----
+
+    /// Toggle whether KYC is required before depositing.
+    pub fn set_kyc_required(env: Env, admin: Address, required: bool) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::KycRequired, &required);
+        env.events()
+            .publish((EVT, symbol_short!("kyc_req")), (admin, required));
+    }
+
+    /// Returns whether KYC is currently required.
+    pub fn kyc_required(env: Env) -> bool {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::KycRequired)
+            .unwrap_or(false)
+    }
+
+    /// Approve or revoke a specific investor's KYC status.
+    pub fn set_investor_kyc(env: Env, admin: Address, investor: Address, approved: bool) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvestorKyc(investor.clone()), &approved);
+        env.events()
+            .publish((EVT, symbol_short!("kyc_set")), (admin, investor, approved));
+    }
+
+    /// Returns whether `investor` has been KYC-approved.
+    pub fn get_investor_kyc(env: Env, investor: Address) -> bool {
+        bump_instance(&env);
+        env.storage()
+            .persistent()
+            .get(&DataKey::InvestorKyc(investor))
+            .unwrap_or(false)
     }
 
     pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {

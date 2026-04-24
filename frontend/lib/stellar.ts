@@ -19,6 +19,9 @@ export const INVOICE_CONTRACT_ID = process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID ?
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
 export const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
+// #111: additional stablecoin support
+export const USDT_TOKEN_ID = process.env.NEXT_PUBLIC_USDT_TOKEN_ID ?? '';
+export const USDP_TOKEN_ID = process.env.NEXT_PUBLIC_USDP_TOKEN_ID ?? '';
 
 // ---- RPC Connection Pool ----
 
@@ -239,6 +242,8 @@ export function truncateAddress(addr: string): string {
 export function stablecoinLabel(tokenId: string): string {
   if (tokenId === USDC_TOKEN_ID) return 'USDC';
   if (tokenId === EURC_TOKEN_ID) return 'EURC';
+  if (USDT_TOKEN_ID && tokenId === USDT_TOKEN_ID) return 'USDT';
+  if (USDP_TOKEN_ID && tokenId === USDP_TOKEN_ID) return 'USDP';
   return truncateAddress(tokenId);
 }
 

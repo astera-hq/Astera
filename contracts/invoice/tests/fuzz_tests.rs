@@ -22,6 +22,101 @@ fn setup(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address) {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
+    // ---- #110: Invoice contract invariants ----
+
+    /// Invariant: Invoice ID is always sequential and equals count after creation.
+    #[test]
+    fn prop_invoice_id_is_sequential(count in 1u64..9u64) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _pool, sme) = setup(&env);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        for i in 0..count {
+            let id = client.create_invoice(
+                &sme,
+                &String::from_str(&env, "Debtor"),
+                &1_000_000i128,
+                &due_date,
+                &String::from_str(&env, "desc"),
+                &String::from_str(&env, "hash"),
+            );
+            prop_assert_eq!(id, i + 1, "Invoice ID must equal creation index");
+        }
+        prop_assert_eq!(
+            client.get_invoice_count(),
+            count,
+            "Invoice count must match number created"
+        );
+    }
+
+    /// Invariant: A newly created invoice is always in Pending status.
+    #[test]
+    fn prop_new_invoice_is_pending(amount in 1i128..1_000_000_000i128) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _pool, sme) = setup(&env);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &amount,
+            &due_date,
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "hash"),
+        );
+
+        let invoice = client.get_invoice(&id);
+        prop_assert!(
+            matches!(invoice.status, invoice::InvoiceStatus::Pending),
+            "Newly created invoice must be Pending"
+        );
+    }
+
+    /// Invariant: Funded invoice amount equals the originally created amount.
+    #[test]
+    fn prop_funded_invoice_preserves_amount(amount in 1_000_000i128..1_000_000_000i128) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, pool, sme) = setup(&env);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &amount,
+            &due_date,
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "hash"),
+        );
+        client.mark_funded(&id, &pool);
+
+        let invoice = client.get_invoice(&id);
+        prop_assert_eq!(invoice.amount, amount, "Funded invoice amount must be preserved");
+        prop_assert!(
+            matches!(invoice.status, invoice::InvoiceStatus::Funded),
+            "Invoice must be Funded after mark_funded"
+        );
+    }
+
+    /// Invariant: Grace period setting is always within [0, 90] and read back correctly.
+    #[test]
+    fn prop_grace_period_roundtrip(grace in 0u32..90u32) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+
+        client.set_grace_period(&admin, &grace);
+        prop_assert_eq!(client.get_grace_period(), grace, "Grace period round-trip failed");
+    }
+
     /// Fuzz test: Invoice creation with random valid amounts
     #[test]
     fn fuzz_invoice_creation_amounts(amount in 1i128..1_000_000_000_000i128) {
@@ -240,11 +335,11 @@ mod deterministic_fuzz {
         let due_date = env.ledger().timestamp() + 86_400;
 
         // Create 10 invoices rapidly (within daily limit)
-        for i in 0..10 {
+        for i in 0u64..10u64 {
             let id = client.create_invoice(
                 &sme,
                 &String::from_str(&env, "Debtor"),
-                &((i + 1) * 1_000_000i128),
+                &((i as i128 + 1) * 1_000_000i128),
                 &due_date,
                 &String::from_str(&env, &format!("Invoice #{}", i)),
                 &String::from_str(&env, &format!("hash{}", i)),

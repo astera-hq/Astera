@@ -12,6 +12,8 @@ import {
   buildDepositTx,
   buildWithdrawTx,
   submitTx,
+  getKycRequired,
+  getInvestorKyc,
 } from '@/lib/contracts';
 import { toStroops, formatUSDC, stablecoinLabel, USDC_TOKEN_ID } from '@/lib/stellar';
 import type { PoolTokenTotals } from '@/lib/types';
@@ -29,6 +31,10 @@ export default function InvestPage() {
   const [selectedToken, setSelectedToken] = useState<string>('');
   const [tokenTotals, setTokenTotals] = useState<PoolTokenTotals | null>(null);
 
+  // #109: KYC status
+  const [kycRequired, setKycRequired] = useState(false);
+  const [kycApproved, setKycApproved] = useState(false);
+
   useEffect(() => {
     loadPool();
   }, []);
@@ -43,6 +49,25 @@ export default function InvestPage() {
       loadPosition(wallet.address, selectedToken);
     }
   }, [wallet.address, wallet.connected, selectedToken]);
+
+  useEffect(() => {
+    async function loadKyc() {
+      try {
+        const required = await getKycRequired();
+        setKycRequired(required);
+        if (required && wallet.address) {
+          const approved = await getInvestorKyc(wallet.address);
+          setKycApproved(approved);
+        } else {
+          setKycApproved(true);
+        }
+      } catch {
+        // non-fatal — KYC state is informational
+      }
+    }
+    if (POOL_CONFIGURED) loadKyc();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wallet.address, wallet.connected]);
 
   function pickDefaultToken(tokens: string[]): string {
     if (tokens.length === 0) return '';
@@ -191,6 +216,19 @@ export default function InvestPage() {
               </div>
             ) : (
               <>
+                {/* #109: KYC status banner */}
+                {kycRequired && !kycApproved && (
+                  <div className="mb-4 p-3 bg-yellow-900/20 border border-yellow-700/40 rounded-xl text-yellow-400 text-xs">
+                    KYC verification required. Your address is not yet approved to deposit. Contact
+                    the pool administrator to complete verification.
+                  </div>
+                )}
+                {kycRequired && kycApproved && (
+                  <div className="mb-4 p-3 bg-green-900/20 border border-green-700/40 rounded-xl text-green-400 text-xs">
+                    KYC verified — you are approved to deposit.
+                  </div>
+                )}
+
                 <div className="flex rounded-xl overflow-hidden border border-brand-border mb-6">
                   {(['deposit', 'withdraw'] as const).map((m) => (
                     <button
@@ -272,7 +310,7 @@ export default function InvestPage() {
 
                   <button
                     type="submit"
-                    disabled={txLoading || !amount || !selectedToken}
+                    disabled={txLoading || !amount || !selectedToken || (mode === 'deposit' && kycRequired && !kycApproved)}
                     className="w-full py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 capitalize"
                   >
                     {txLoading ? 'Processing...' : `${mode} ${stablecoinLabel(selectedToken)}`}

@@ -434,4 +434,126 @@ export async function buildMarkDefaultedTx(admin: string, invoiceId: number): Pr
   return prepared.toXDR();
 }
 
+// ---- #109: KYC / investor whitelist ----
+
+export async function getKycRequired(): Promise<boolean> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'kyc_required',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Boolean(scValToNative(result!.retval));
+}
+
+export async function getInvestorKyc(investor: string): Promise<boolean> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_investor_kyc',
+    [new Address(investor).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Boolean(scValToNative(result!.retval));
+}
+
+export async function buildSetKycRequiredTx(admin: string, required: boolean): Promise<string> {
+  const account = await rpc.getAccount(admin);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'set_kyc_required',
+        new Address(admin).toScVal(),
+        nativeToScVal(required, { type: 'bool' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildSetInvestorKycTx(
+  admin: string,
+  investor: string,
+  approved: boolean,
+): Promise<string> {
+  const account = await rpc.getAccount(admin);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'set_investor_kyc',
+        new Address(admin).toScVal(),
+        new Address(investor).toScVal(),
+        nativeToScVal(approved, { type: 'bool' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- #111: Exchange rate ----
+
+export async function getExchangeRate(token: string): Promise<number> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_exchange_rate',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Number(scValToNative(result!.retval));
+}
+
+export async function buildSetExchangeRateTx(
+  admin: string,
+  token: string,
+  rateBps: number,
+): Promise<string> {
+  const account = await rpc.getAccount(admin);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'set_exchange_rate',
+        new Address(admin).toScVal(),
+        new Address(token).toScVal(),
+        nativeToScVal(rateBps, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
 export { submitTx };
