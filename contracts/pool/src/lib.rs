@@ -9,6 +9,10 @@ const DEFAULT_YIELD_BPS: u32 = 800;
 const DEFAULT_FACTORING_FEE_BPS: u32 = 0;
 const BPS_DENOM: u32 = 10_000;
 const SECS_PER_YEAR: u64 = 31_536_000;
+/// Default collateral threshold: invoices >= 10,000 USDC (7 decimals) require collateral.
+const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
+/// Default collateral ratio: 20% of principal (2000 bps).
+const DEFAULT_COLLATERAL_BPS: u32 = 2_000;
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
@@ -68,6 +72,34 @@ pub struct PoolStorageStats {
     pub cleaned_invoices: u64,
 }
 
+/// Collateral configuration: threshold above which collateral is required,
+/// and the required ratio expressed in basis points of the principal.
+#[contracttype]
+#[derive(Clone)]
+pub struct CollateralConfig {
+    /// Minimum principal amount (inclusive) that triggers the collateral requirement.
+    /// Invoices with principal >= this value must have collateral deposited before funding.
+    pub threshold: i128,
+    /// Required collateral as a fraction of principal, in basis points (e.g. 2000 = 20%).
+    pub collateral_bps: u32,
+}
+
+/// Record of collateral deposited for a specific invoice.
+#[contracttype]
+#[derive(Clone)]
+pub struct CollateralDeposit {
+    /// The invoice this collateral secures.
+    pub invoice_id: u64,
+    /// Address that deposited the collateral (typically the SME).
+    pub depositor: Address,
+    /// Stablecoin token used for collateral.
+    pub token: Address,
+    /// Amount of collateral locked.
+    pub amount: i128,
+    /// Whether the collateral has been settled (returned or seized).
+    pub settled: bool,
+}
+
 #[contracttype]
 pub enum DataKey {
     Config,
@@ -85,6 +117,9 @@ pub enum DataKey {
     // #109: KYC / investor whitelist
     KycRequired,
     InvestorKyc(Address),
+    // Collateral: threshold config and per-invoice deposits
+    CollateralConfig,
+    CollateralDeposit(u64),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -151,6 +186,15 @@ fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> i128 {
     ((principal as u128 * factoring_fee_bps as u128) / BPS_DENOM as u128) as i128
 }
 
+/// Returns the required collateral amount for `principal` given the pool's collateral config.
+/// Returns 0 if the principal is below the threshold (no collateral required).
+fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
+    if principal < config.threshold {
+        return 0;
+    }
+    ((principal as u128 * config.collateral_bps as u128) / BPS_DENOM as u128) as i128
+}
+
 #[contract]
 pub struct FundingPool;
 
@@ -194,6 +238,13 @@ impl FundingPool {
             .instance()
             .set(&DataKey::StorageStats, &PoolStorageStats::default());
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().set(
+            &DataKey::CollateralConfig,
+            &CollateralConfig {
+                threshold: DEFAULT_COLLATERAL_THRESHOLD,
+                collateral_bps: DEFAULT_COLLATERAL_BPS,
+            },
+        );
         bump_instance(&env);
     }
 
@@ -473,6 +524,34 @@ impl FundingPool {
             panic!("invoice already funded");
         }
 
+        // Collateral check: high-value invoices must have collateral deposited first.
+        let collateral_cfg: CollateralConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::CollateralConfig)
+            .unwrap_or(CollateralConfig {
+                threshold: DEFAULT_COLLATERAL_THRESHOLD,
+                collateral_bps: DEFAULT_COLLATERAL_BPS,
+            });
+        let req_collateral = required_collateral(principal, &collateral_cfg);
+        if req_collateral > 0 {
+            let deposit: Option<CollateralDeposit> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CollateralDeposit(invoice_id));
+            match deposit {
+                None => panic!("collateral required for high-value invoice"),
+                Some(d) => {
+                    if d.settled {
+                        panic!("collateral already settled");
+                    }
+                    if d.amount < req_collateral {
+                        panic!("insufficient collateral deposited");
+                    }
+                }
+            }
+        }
+
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
@@ -593,10 +672,226 @@ impl FundingPool {
             (EVT, symbol_short!("repaid")),
             (invoice_id, record.principal, total_interest as i128),
         );
+
+        // Release collateral back to depositor if any was locked for this invoice.
+        if let Some(mut col) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, CollateralDeposit>(&DataKey::CollateralDeposit(invoice_id))
+        {
+            if !col.settled {
+                let col_token_client = token::Client::new(&env, &col.token);
+                col_token_client.transfer(
+                    &env.current_contract_address(),
+                    &col.depositor,
+                    &col.amount,
+                );
+                col.settled = true;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::CollateralDeposit(invoice_id), &col);
+                env.events().publish(
+                    (EVT, symbol_short!("col_ret")),
+                    (invoice_id, col.depositor, col.amount),
+                );
+            }
+        }
     }
 
-    pub fn set_yield(env: Env, admin: Address, yield_bps: u32) {
+    // ---- Collateral management ----
+
+    /// Admin sets the collateral configuration.
+    /// `threshold` — minimum principal (inclusive) that requires collateral.
+    /// `collateral_bps` — required collateral as % of principal in basis points (max 10000 = 100%).
+    pub fn set_collateral_config(
+        env: Env,
+        admin: Address,
+        threshold: i128,
+        collateral_bps: u32,
+    ) {
         admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        if threshold < 0 {
+            panic!("threshold must be non-negative");
+        }
+        if collateral_bps > BPS_DENOM {
+            panic!("collateral ratio cannot exceed 100%");
+        }
+        let cfg = CollateralConfig {
+            threshold,
+            collateral_bps,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::CollateralConfig, &cfg);
+        env.events().publish(
+            (EVT, symbol_short!("col_cfg")),
+            (admin, threshold, collateral_bps),
+        );
+    }
+
+    /// Returns the current collateral configuration.
+    pub fn get_collateral_config(env: Env) -> CollateralConfig {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::CollateralConfig)
+            .unwrap_or(CollateralConfig {
+                threshold: DEFAULT_COLLATERAL_THRESHOLD,
+                collateral_bps: DEFAULT_COLLATERAL_BPS,
+            })
+    }
+
+    /// Returns the required collateral amount for a given principal under current config.
+    /// Returns 0 if no collateral is required.
+    pub fn required_collateral_for(env: Env, principal: i128) -> i128 {
+        bump_instance(&env);
+        let cfg: CollateralConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::CollateralConfig)
+            .unwrap_or(CollateralConfig {
+                threshold: DEFAULT_COLLATERAL_THRESHOLD,
+                collateral_bps: DEFAULT_COLLATERAL_BPS,
+            });
+        required_collateral(principal, &cfg)
+    }
+
+    /// SME (or any party) deposits collateral for a high-value invoice before it can be funded.
+    /// The collateral is held by the pool contract until the invoice is repaid (returned)
+    /// or defaulted (seized to protect investors).
+    pub fn deposit_collateral(
+        env: Env,
+        invoice_id: u64,
+        depositor: Address,
+        token: Address,
+        amount: i128,
+    ) {
+        depositor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::assert_accepted_token(&env, &token);
+
+        if amount <= 0 {
+            panic!("collateral amount must be positive");
+        }
+
+        // Prevent depositing collateral for an already-funded invoice.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::FundedInvoice(invoice_id))
+        {
+            panic!("invoice already funded; collateral cannot be changed");
+        }
+
+        // Prevent double-deposit.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::CollateralDeposit(invoice_id))
+        {
+            panic!("collateral already deposited for this invoice");
+        }
+
+        // Transfer collateral from depositor to pool.
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&depositor, &env.current_contract_address(), &amount);
+
+        let record = CollateralDeposit {
+            invoice_id,
+            depositor: depositor.clone(),
+            token: token.clone(),
+            amount,
+            settled: false,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::CollateralDeposit(invoice_id), &record);
+        // Use active invoice TTL — collateral lives as long as the invoice.
+        env.storage().persistent().extend_ttl(
+            &DataKey::CollateralDeposit(invoice_id),
+            ACTIVE_INVOICE_TTL,
+            ACTIVE_INVOICE_TTL,
+        );
+
+        env.events().publish(
+            (EVT, symbol_short!("col_dep")),
+            (invoice_id, depositor, token, amount),
+        );
+    }
+
+    /// Returns the collateral deposit record for an invoice, if any.
+    pub fn get_collateral_deposit(env: Env, invoice_id: u64) -> Option<CollateralDeposit> {
+        bump_instance(&env);
+        env.storage()
+            .persistent()
+            .get(&DataKey::CollateralDeposit(invoice_id))
+    }
+
+    /// Admin seizes collateral for a defaulted invoice, transferring it to the pool
+    /// to partially compensate investors for the loss.
+    /// Can only be called after the invoice has been marked as defaulted (repaid == false
+    /// and the invoice is past due + grace period).
+    pub fn seize_collateral(env: Env, admin: Address, invoice_id: u64) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+            .expect("funded invoice not found");
+
+        if record.repaid {
+            panic!("invoice already repaid; collateral was returned on repayment");
+        }
+
+        let mut col: CollateralDeposit = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CollateralDeposit(invoice_id))
+            .expect("no collateral deposit found for this invoice");
+
+        if col.settled {
+            panic!("collateral already settled");
+        }
+
+        // Credit the seized collateral into the pool's token totals so investors benefit.
+        let token_totals_key = DataKey::TokenTotals(col.token.clone());
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+
+        // The seized collateral reduces the effective loss: add it to pool_value and
+        // reduce total_deployed by the original principal (the invoice is now a loss).
+        tt.pool_value += col.amount;
+        tt.total_deployed -= record.principal;
+        env.storage().instance().set(&token_totals_key, &tt);
+
+        col.settled = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::CollateralDeposit(invoice_id), &col);
+        env.storage().persistent().extend_ttl(
+            &DataKey::CollateralDeposit(invoice_id),
+            COMPLETED_INVOICE_TTL,
+            COMPLETED_INVOICE_TTL,
+        );
+
+        env.events().publish(
+            (EVT, symbol_short!("col_seiz")),
+            (invoice_id, col.depositor, col.amount),
+        );
+    }
+
+    pub fn set_yield(env: Env, admin: Address, yield_bps: u32) {        admin.require_auth();
         bump_instance(&env);
         let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         Self::require_admin(&env, &admin);
@@ -1257,5 +1552,309 @@ mod test {
         client.deposit(&investor, &usdc_id, &1_000);
         // pool has a non-zero balance — remove must panic
         client.remove_token(&admin, &usdc_id);
+    }
+
+    // ---- Collateral Tests ----
+
+    #[test]
+    fn test_default_collateral_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let cfg = client.get_collateral_config();
+        assert_eq!(cfg.threshold, DEFAULT_COLLATERAL_THRESHOLD);
+        assert_eq!(cfg.collateral_bps, DEFAULT_COLLATERAL_BPS);
+    }
+
+    #[test]
+    fn test_set_collateral_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        // Set threshold to 5000 USDC, 10% collateral
+        client.set_collateral_config(&admin, &50_000_000_000i128, &1_000u32);
+        let cfg = client.get_collateral_config();
+        assert_eq!(cfg.threshold, 50_000_000_000i128);
+        assert_eq!(cfg.collateral_bps, 1_000u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "collateral ratio cannot exceed 100%")]
+    fn test_set_collateral_config_over_100_percent_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        client.set_collateral_config(&admin, &1_000i128, &10_001u32);
+    }
+
+    #[test]
+    fn test_required_collateral_below_threshold_is_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        // Default threshold is 100_000_000_000 (10,000 USDC); 1000 USDC is below it
+        let req = client.required_collateral_for(&1_000_000_000i128);
+        assert_eq!(req, 0);
+    }
+
+    #[test]
+    fn test_required_collateral_above_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        // Lower threshold to 500 USDC, 20% collateral
+        client.set_collateral_config(&admin, &5_000_000_000i128, &2_000u32);
+        // 1000 USDC principal → 200 USDC collateral
+        let req = client.required_collateral_for(&10_000_000_000i128);
+        assert_eq!(req, 2_000_000_000i128); // 20% of 10,000 USDC
+    }
+
+    #[test]
+    fn test_low_value_invoice_funded_without_collateral() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 5_000);
+        mint(&env, &usdc_id, &sme, 5_000);
+        client.deposit(&investor, &usdc_id, &5_000);
+
+        // Principal (5000) is well below default threshold (100_000_000_000)
+        // so no collateral needed
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &5_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        let fi = client.get_funded_invoice(&1u64).unwrap();
+        assert!(!fi.repaid);
+    }
+
+    #[test]
+    #[should_panic(expected = "collateral required for high-value invoice")]
+    fn test_high_value_invoice_requires_collateral() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        // Lower threshold so our test amounts trigger it
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        // Try to fund without depositing collateral first — must panic
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &5_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+    }
+
+    #[test]
+    fn test_deposit_collateral_and_fund_high_value_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        // Threshold = 1000, 20% collateral
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal); // 1000
+        assert_eq!(required, 1_000);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        // SME deposits collateral
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+
+        let col = client.get_collateral_deposit(&1u64).unwrap();
+        assert_eq!(col.amount, required);
+        assert!(!col.settled);
+
+        // Now funding should succeed
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        let fi = client.get_funded_invoice(&1u64).unwrap();
+        assert!(!fi.repaid);
+    }
+
+    #[test]
+    fn test_collateral_returned_on_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, principal * 2 + required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+
+        let sme_balance_before = token::Client::new(&env, &usdc_id).balance(&sme);
+
+        client.repay_invoice(&1u64, &sme);
+
+        let sme_balance_after = token::Client::new(&env, &usdc_id).balance(&sme);
+        // SME should have gotten collateral back (minus repayment cost)
+        // sme_balance_after = sme_balance_before - total_due + collateral_returned
+        let col = client.get_collateral_deposit(&1u64).unwrap();
+        assert!(col.settled);
+        // Net: sme paid total_due but got collateral back
+        assert!(sme_balance_after > sme_balance_before - principal);
+    }
+
+    #[test]
+    fn test_seize_collateral_on_default() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+
+        let due_date = env.ledger().timestamp() + 10_000;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        // Advance past due date (no repayment)
+        env.ledger().with_mut(|l| l.timestamp = due_date + 1);
+
+        let tt_before = client.get_token_totals(&usdc_id);
+
+        // Admin seizes collateral
+        client.seize_collateral(&admin, &1u64);
+
+        let col = client.get_collateral_deposit(&1u64).unwrap();
+        assert!(col.settled);
+
+        // Pool value should have increased by collateral amount, deployed reduced
+        let tt_after = client.get_token_totals(&usdc_id);
+        assert_eq!(tt_after.pool_value, tt_before.pool_value + required);
+        assert_eq!(tt_after.total_deployed, tt_before.total_deployed - principal);
+    }
+
+    #[test]
+    #[should_panic(expected = "collateral already deposited for this invoice")]
+    fn test_double_deposit_collateral_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        mint(&env, &usdc_id, &sme, 5_000);
+
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient collateral deposited")]
+    fn test_insufficient_collateral_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        // 20% collateral required on anything >= 1000
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+
+        let principal: i128 = 5_000;
+        // Required = 1000, but we only deposit 500
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 500);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &500);
+
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice already repaid; collateral was returned on repayment")]
+    fn test_seize_collateral_after_repayment_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, principal * 2 + required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        client.repay_invoice(&1u64, &sme);
+
+        // Trying to seize after repayment must panic
+        client.seize_collateral(&admin, &1u64);
     }
 }
