@@ -2,7 +2,12 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useStore } from '@/lib/store';
-import { getInvoice, getInvoiceCount, buildInitCoFundingTx, submitTx } from '@/lib/contracts';
+import {
+  getMultipleInvoices,
+  getInvoiceCount,
+  buildInitCoFundingTx,
+  submitTx,
+} from '@/lib/contracts';
 import { formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 
@@ -26,12 +31,7 @@ export default function AdminInvoicesPage() {
     const endId = Math.max(1, startId - batchSize + 1);
     const ids = Array.from({ length: startId - endId + 1 }, (_, i) => startId - i);
 
-    const fetched = await Promise.all(
-      ids.map(async (id) => {
-        const inv = await getInvoice(id);
-        return inv;
-      }),
-    );
+    const fetched = await getMultipleInvoices(ids);
 
     return fetched.filter((inv) => inv.status === 'Pending');
   }, []);

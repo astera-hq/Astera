@@ -55,7 +55,7 @@ export default function InvoiceCard({ id, metadata, fundedAmount }: Props) {
         <span
           className={`text-xs font-medium px-2.5 py-1 rounded-full flex-shrink-0 badge-${metadata.status.toLowerCase()}`}
         >
-          {statusLabel[metadata.status]}
+          {statusLabel[metadata.status] ?? metadata.status}
         </span>
       </div>
 

@@ -34,10 +34,14 @@ impl ShareToken {
             panic!("amount must be positive");
         }
         let balance = Self::balance(env.clone(), to.clone());
-        env.storage().persistent().set(&DataKey::Balance(to.clone()), &(balance + amount));
-        
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to.clone()), &(balance + amount));
+
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
-        env.storage().instance().set(&DataKey::TotalSupply, &(total + amount));
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &(total + amount));
     }
 
     pub fn burn(env: Env, from: Address, amount: i128) {
@@ -50,10 +54,14 @@ impl ShareToken {
         if balance < amount {
             panic!("insufficient balance");
         }
-        env.storage().persistent().set(&DataKey::Balance(from.clone()), &(balance - amount));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(from.clone()), &(balance - amount));
 
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
-        env.storage().instance().set(&DataKey::TotalSupply, &(total - amount));
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &(total - amount));
     }
 
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
@@ -65,18 +73,28 @@ impl ShareToken {
         if balance_from < amount {
             panic!("insufficient balance");
         }
-        env.storage().persistent().set(&DataKey::Balance(from), &(balance_from - amount));
-        
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(from), &(balance_from - amount));
+
         let balance_to = Self::balance(env.clone(), to.clone());
-        env.storage().persistent().set(&DataKey::Balance(to), &(balance_to + amount));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to), &(balance_to + amount));
     }
 
     pub fn balance(env: Env, id: Address) -> i128 {
-        env.storage().persistent().get(&DataKey::Balance(id)).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&DataKey::Balance(id))
+            .unwrap_or(0)
     }
 
     pub fn total_supply(env: Env) -> i128 {
-        env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0)
     }
 
     pub fn decimals(env: Env) -> u32 {

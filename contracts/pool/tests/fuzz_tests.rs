@@ -373,6 +373,57 @@ mod deterministic_fuzz {
         assert!(client.available_liquidity(&usdc_id) < 2_000_000_000i128);
     }
 
+    #[test]
+    fn test_fund_multiple_invoices_updates_state_once() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, admin, usdc_id, _share) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme1 = Address::generate(&env);
+        let sme2 = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000_000_000i128);
+        mint(&env, &usdc_id, &sme1, 10_000_000_000i128);
+        mint(&env, &usdc_id, &sme2, 10_000_000_000i128);
+
+        client.deposit(&investor, &usdc_id, &10_000_000_000i128);
+
+        let due_date = env.ledger().timestamp() + 86_400;
+        let requests = soroban_sdk::vec![
+            &env,
+            pool::FundingRequest {
+                invoice_id: 1u64,
+                principal: 2_000_000_000i128,
+                sme: sme1.clone(),
+                due_date,
+                token: usdc_id.clone(),
+            },
+            pool::FundingRequest {
+                invoice_id: 2u64,
+                principal: 3_000_000_000i128,
+                sme: sme2.clone(),
+                due_date,
+                token: usdc_id.clone(),
+            },
+        ];
+
+        client.fund_multiple_invoices(&admin, &requests);
+
+        let first = client.get_funded_invoice(&1u64).unwrap();
+        let second = client.get_funded_invoice(&2u64).unwrap();
+        let totals = client.get_token_totals(&usdc_id);
+        let stats = client.get_storage_stats();
+
+        assert_eq!(first.principal, 2_000_000_000i128);
+        assert_eq!(second.principal, 3_000_000_000i128);
+        assert_eq!(totals.total_deployed, 5_000_000_000i128);
+        assert_eq!(stats.total_funded_invoices, 2);
+        assert_eq!(stats.active_funded_invoices, 2);
+        assert_eq!(client.available_liquidity(&usdc_id), 5_000_000_000i128);
+    }
+
     /// Deterministic fuzz test: Compound vs simple interest
     #[test]
     fn test_compound_vs_simple_interest() {

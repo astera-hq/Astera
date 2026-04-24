@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short,
-    token, Address, BytesN, Env, Symbol, Vec, IntoVal,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, IntoVal,
+    Symbol, Vec,
 };
 
 const DEFAULT_YIELD_BPS: u32 = 800;
@@ -58,6 +58,16 @@ pub struct FundedInvoice {
     pub factoring_fee: i128,
     pub due_date: u64,
     pub repaid: bool,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FundingRequest {
+    pub invoice_id: u64,
+    pub principal: i128,
+    pub sme: Address,
+    pub due_date: u64,
+    pub token: Address,
 }
 
 #[contracttype]
@@ -149,6 +159,82 @@ fn calculate_interest(
 
 fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> i128 {
     ((principal as u128 * factoring_fee_bps as u128) / BPS_DENOM as u128) as i128
+}
+
+fn assert_accepted_token_from_list(tokens: &Vec<Address>, token: &Address) {
+    for i in 0..tokens.len() {
+        if tokens.get(i).unwrap() == *token {
+            return;
+        }
+    }
+    panic!("token not accepted");
+}
+
+fn fund_invoice_request(
+    env: &Env,
+    config: &PoolConfig,
+    accepted_tokens: &Vec<Address>,
+    stats: &mut PoolStorageStats,
+    request: &FundingRequest,
+) {
+    if request.principal <= 0 {
+        panic!("principal must be positive");
+    }
+    assert_accepted_token_from_list(accepted_tokens, &request.token);
+
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::FundedInvoice(request.invoice_id))
+    {
+        panic!("invoice already funded");
+    }
+
+    let token_totals_key = DataKey::TokenTotals(request.token.clone());
+    let mut tt: PoolTokenTotals = env
+        .storage()
+        .instance()
+        .get(&token_totals_key)
+        .unwrap_or_default();
+    let available = tt.pool_value - tt.total_deployed;
+    if available < request.principal {
+        panic!("insufficient available liquidity");
+    }
+
+    let factoring_fee = calculate_factoring_fee(request.principal, config.factoring_fee_bps);
+    let record = FundedInvoice {
+        invoice_id: request.invoice_id,
+        sme: request.sme.clone(),
+        token: request.token.clone(),
+        principal: request.principal,
+        funded_at: env.ledger().timestamp(),
+        due_date: request.due_date,
+        factoring_fee,
+        repaid: false,
+    };
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::FundedInvoice(request.invoice_id), &record);
+    set_funded_invoice_ttl(env, request.invoice_id, false);
+
+    tt.total_deployed += request.principal;
+    env.storage().instance().set(&token_totals_key, &tt);
+
+    let token_client = token::Client::new(env, &request.token);
+    token_client.transfer(
+        &env.current_contract_address(),
+        &request.sme,
+        &request.principal,
+    );
+
+    stats.total_funded_invoices += 1;
+    stats.active_funded_invoices += 1;
+
+    env.events().publish(
+        (EVT, symbol_short!("funded")),
+        (request.invoice_id, request.sme.clone(), request.principal),
+    );
 }
 
 #[contract]
@@ -335,18 +421,14 @@ impl FundingPool {
         // Batch read: get both token totals and share token in one go
         let token_totals_key = DataKey::TokenTotals(token.clone());
         let share_token_key = DataKey::ShareToken(token.clone());
-        
+
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
             .get(&token_totals_key)
             .unwrap_or_default();
 
-        let share_token: Address = env
-            .storage()
-            .instance()
-            .get(&share_token_key)
-            .unwrap();
+        let share_token: Address = env.storage().instance().get(&share_token_key).unwrap();
 
         // Calculate shares (single external call)
         let total_shares: i128 = env.invoke_contract(
@@ -354,7 +436,7 @@ impl FundingPool {
             &Symbol::new(&env, "total_supply"),
             Vec::new(&env),
         );
-        
+
         let shares_to_mint = if total_shares == 0 || tt.pool_value == 0 {
             amount
         } else {
@@ -363,11 +445,9 @@ impl FundingPool {
 
         // Update pool value
         tt.pool_value += amount;
-        
+
         // Batch write: update token totals
-        env.storage()
-            .instance()
-            .set(&token_totals_key, &tt);
+        env.storage().instance().set(&token_totals_key, &tt);
 
         // Mint shares (single external call)
         let mut mint_args = Vec::new(&env);
@@ -392,13 +472,9 @@ impl FundingPool {
         // Batch read: get share token and token totals
         let share_token_key = DataKey::ShareToken(token.clone());
         let token_totals_key = DataKey::TokenTotals(token.clone());
-        
-        let share_token: Address = env
-            .storage()
-            .instance()
-            .get(&share_token_key)
-            .unwrap();
-            
+
+        let share_token: Address = env.storage().instance().get(&share_token_key).unwrap();
+
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
@@ -435,9 +511,7 @@ impl FundingPool {
 
         // Update pool value and write once
         tt.pool_value -= amount;
-        env.storage()
-            .instance()
-            .set(&token_totals_key, &tt);
+        env.storage().instance().set(&token_totals_key, &tt);
 
         // Transfer tokens
         let token_client = token::Client::new(&env, &token);
@@ -460,68 +534,55 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
-        Self::assert_accepted_token(&env, &token);
-
-        if principal <= 0 {
-            panic!("principal must be positive");
-        }
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::FundedInvoice(invoice_id))
-        {
-            panic!("invoice already funded");
-        }
-
-        let mut tt: PoolTokenTotals = env
+        let config = get_config_cached(&env);
+        let accepted_tokens: Vec<Address> = env
             .storage()
             .instance()
-            .get(&DataKey::TokenTotals(token.clone()))
-            .unwrap_or_default();
-        let available = tt.pool_value - tt.total_deployed;
-        if available < principal {
-            panic!("insufficient available liquidity");
-        }
-
-        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
-        let factoring_fee = calculate_factoring_fee(principal, config.factoring_fee_bps);
-
-        let record = FundedInvoice {
-            invoice_id,
-            sme: sme.clone(),
-            token: token.clone(),
-            principal,
-            funded_at: env.ledger().timestamp(),
-            due_date,
-            factoring_fee,
-            repaid: false,
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::FundedInvoice(invoice_id), &record);
-        set_funded_invoice_ttl(&env, invoice_id, false);
-
-        tt.total_deployed += principal;
-        env.storage()
-            .instance()
-            .set(&DataKey::TokenTotals(token.clone()), &tt);
-
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&env.current_contract_address(), &sme, &principal);
-
+            .get(&DataKey::AcceptedTokens)
+            .expect("not initialized");
         let mut stats: PoolStorageStats = env
             .storage()
             .instance()
             .get(&DataKey::StorageStats)
             .unwrap_or_default();
-        stats.total_funded_invoices += 1;
-        stats.active_funded_invoices += 1;
+        let request = FundingRequest {
+            invoice_id,
+            principal,
+            sme,
+            due_date,
+            token,
+        };
+        fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
+    }
 
-        env.events().publish(
-            (EVT, symbol_short!("funded")),
-            (invoice_id, sme.clone(), principal),
-        );
+    pub fn fund_multiple_invoices(env: Env, admin: Address, requests: Vec<FundingRequest>) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        if requests.len() == 0 {
+            panic!("no invoices provided");
+        }
+
+        let config = get_config_cached(&env);
+        let accepted_tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AcceptedTokens)
+            .expect("not initialized");
+        let mut stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+
+        for i in 0..requests.len() {
+            let request = requests.get(i).unwrap();
+            fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request);
+        }
+
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
     }
 
     pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address) {
@@ -580,13 +641,9 @@ impl FundingPool {
         stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
 
         // Batch write: update all storage at once
-        env.storage()
-            .persistent()
-            .set(&funded_invoice_key, &record);
+        env.storage().persistent().set(&funded_invoice_key, &record);
         set_funded_invoice_ttl(&env, invoice_id, true);
-        env.storage()
-            .instance()
-            .set(&token_totals_key, &tt);
+        env.storage().instance().set(&token_totals_key, &tt);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         env.events().publish(
@@ -1236,7 +1293,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let token_admin2 = Address::generate(&env);
-        let new_token = env.register_stellar_asset_contract_v2(token_admin2).address();
+        let new_token = env
+            .register_stellar_asset_contract_v2(token_admin2)
+            .address();
         let new_share = env.register(DummyShare, ());
         client.add_token(&admin, &new_token, &new_share);
         let tokens = client.accepted_tokens();

@@ -8,6 +8,7 @@ import {
   nativeToScVal,
   scValToNative,
   Address,
+  xdr,
 } from './stellar';
 import { TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc } from '@stellar/stellar-sdk';
 import type {
@@ -32,6 +33,20 @@ export async function getInvoice(id: number): Promise<Invoice> {
 
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
   return scValToNative(result!.retval) as Invoice;
+}
+
+export async function getMultipleInvoices(ids: number[]): Promise<Invoice[]> {
+  if (ids.length === 0) return [];
+
+  const sim = await simulateTx(
+    INVOICE_CONTRACT_ID,
+    'get_multiple_invoices',
+    [xdr.ScVal.scvVec(ids.map((id) => nativeToScVal(BigInt(id), { type: 'u64' })))],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return scValToNative(result!.retval) as Invoice[];
 }
 
 export async function getInvoiceMetadata(id: number): Promise<InvoiceMetadata> {
@@ -299,6 +314,33 @@ export async function buildCommitToInvoiceTx(params: {
         new Address(params.investor).toScVal(),
         nativeToScVal(params.invoiceId, { type: 'u64' }),
         nativeToScVal(params.amount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildRepayTx(params: { payer: string; invoiceId: number }): Promise<string> {
+  const account = await rpc.getAccount(params.payer);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'repay_invoice',
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        new Address(params.payer).toScVal(),
       ),
     )
     .setTimeout(30)

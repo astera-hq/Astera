@@ -2,6 +2,7 @@
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol,
+    Vec,
 };
 
 const LEDGERS_PER_DAY: u32 = 17_280;
@@ -154,6 +155,13 @@ fn concat_prefix_u64(env: &Env, prefix: &[u8], id: u64) -> String {
     buf[..plen].copy_from_slice(prefix);
     let dlen = write_u64_decimal(&mut buf[plen..], id);
     String::from_bytes(env, &buf[..plen + dlen])
+}
+
+fn load_invoice(env: &Env, id: u64) -> Invoice {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Invoice(id))
+        .expect("invoice not found")
 }
 
 #[contract]
@@ -606,19 +614,21 @@ impl InvoiceContract {
 
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
         bump_instance(&env);
-        env.storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .expect("invoice not found")
+        load_invoice(&env, id)
+    }
+
+    pub fn get_multiple_invoices(env: Env, ids: Vec<u64>) -> Vec<Invoice> {
+        bump_instance(&env);
+        let mut invoices: Vec<Invoice> = Vec::new(&env);
+        for i in 0..ids.len() {
+            invoices.push_back(load_invoice(&env, ids.get(i).unwrap()));
+        }
+        invoices
     }
 
     /// SEP-oriented metadata for invoice id `id` (same ledger fields as `get_invoice`).
     pub fn get_metadata(env: Env, id: u64) -> InvoiceMetadata {
-        let inv: Invoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+        let inv = load_invoice(&env, id);
 
         let name = concat_prefix_u64(&env, b"Astera Invoice #", inv.id);
         let symbol = concat_prefix_u64(&env, b"INV-", inv.id);
@@ -1469,7 +1479,14 @@ mod test {
 
         // Create exactly MAX_INVOICES_PER_DAY (10) invoices — should all succeed
         for _ in 0..10 {
-            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &d,
+                &100i128,
+                &due,
+                &desc,
+                &String::from_str(&env, "h"),
+            );
         }
     }
 
@@ -1487,7 +1504,14 @@ mod test {
 
         // Create 11 invoices — the 11th must panic
         for _ in 0..11 {
-            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &d,
+                &100i128,
+                &due,
+                &desc,
+                &String::from_str(&env, "h"),
+            );
         }
     }
 
@@ -1504,7 +1528,14 @@ mod test {
         // Exhaust today's limit
         for _ in 0..10 {
             let due = env.ledger().timestamp() + 50_000;
-            client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+            client.create_invoice(
+                &sme,
+                &d,
+                &100i128,
+                &due,
+                &desc,
+                &String::from_str(&env, "h"),
+            );
         }
 
         // Advance 24h+1s
@@ -1512,7 +1543,14 @@ mod test {
 
         // Should succeed again after reset
         let due = env.ledger().timestamp() + 50_000;
-        let id = client.create_invoice(&sme, &d, &100i128, &due, &desc, &String::from_str(&env, "h"));
+        let id = client.create_invoice(
+            &sme,
+            &d,
+            &100i128,
+            &due,
+            &desc,
+            &String::from_str(&env, "h"),
+        );
         assert!(id > 0);
     }
 }

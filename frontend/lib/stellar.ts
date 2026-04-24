@@ -271,31 +271,56 @@ export async function simulateTx(
 }
 
 /** Submit a signed XDR transaction */
-export async function submitTx(signedXDR: string) {
+export type TransactionProgress = {
+  status: 'pending' | 'confirmed' | 'failed';
+  hash: string;
+  error?: string;
+};
+
+/** Submit a signed XDR transaction */
+export async function submitTx(
+  signedXDR: string,
+  onProgress?: (progress: TransactionProgress) => void,
+) {
   return rpcExecute(async (server) => {
     const tx = TransactionBuilder.fromXDR(signedXDR, NETWORK);
     const response = await server.sendTransaction(tx);
 
     if (response.status === 'ERROR') {
-      throw new Error(`Transaction failed: ${JSON.stringify(response)}`);
+      const error = `Transaction failed: ${JSON.stringify(response)}`;
+      onProgress?.({ status: 'failed', hash: response.hash, error });
+      throw new Error(error);
     }
 
-    // Poll for confirmation using the same pooled connection
+    onProgress?.({ status: 'pending', hash: response.hash });
     let result = await server.getTransaction(response.hash);
     let attempts = 0;
 
-    while (result.status === 'NOT_FOUND' && attempts < 20) {
+    while (
+      (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') &&
+      attempts < 20
+    ) {
+      onProgress?.({ status: 'pending', hash: response.hash });
       await new Promise((r) => setTimeout(r, 1500));
       result = await server.getTransaction(response.hash);
       attempts++;
     }
 
-    if (result.status === 'FAILED') {
-      throw new Error('Transaction failed on-chain');
+    if (String(result.status) === 'FAILED') {
+      const error = 'Transaction failed on-chain';
+      onProgress?.({ status: 'failed', hash: response.hash, error });
+      throw new Error(error);
     }
 
+    if (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') {
+      const error = 'Transaction confirmation timed out';
+      onProgress?.({ status: 'failed', hash: response.hash, error });
+      throw new Error(error);
+    }
+
+    onProgress?.({ status: 'confirmed', hash: response.hash });
     return result;
   });
 }
 
-export { nativeToScVal, scValToNative, Address };
+export { nativeToScVal, scValToNative, Address, xdr };

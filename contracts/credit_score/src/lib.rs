@@ -475,10 +475,8 @@ impl CreditScoreContract {
         env.storage()
             .instance()
             .set(&DataKey::InvoiceContract, &invoice_contract);
-        env.events().publish(
-            (EVT, symbol_short!("set_inv")),
-            (admin, invoice_contract),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("set_inv")), (admin, invoice_contract));
     }
 
     pub fn set_pool_contract(env: Env, admin: Address, pool_contract: Address) {
@@ -1406,7 +1404,8 @@ mod test {
         assert!(
             data.score >= MIN_SCORE,
             "score {} dropped below floor {}",
-            data.score, MIN_SCORE
+            data.score,
+            MIN_SCORE
         );
     }
 
@@ -1422,14 +1421,22 @@ mod test {
 
         for i in 1..=50u64 {
             // Pay early to maximize score
-            client.record_payment(&pool, &i, &sme, &100_000_000_000i128, &due_date, &(due_date - 86_400));
+            client.record_payment(
+                &pool,
+                &i,
+                &sme,
+                &100_000_000_000i128,
+                &due_date,
+                &(due_date - 86_400),
+            );
         }
 
         let data = client.get_credit_score(&sme);
         assert!(
             data.score <= MAX_SCORE,
             "score {} exceeded ceiling {}",
-            data.score, MAX_SCORE
+            data.score,
+            MAX_SCORE
         );
     }
 
@@ -1439,13 +1446,25 @@ mod test {
         env.mock_all_auths();
         let (client, _admin, _inv, _pool) = setup(&env);
 
-        assert_eq!(client.get_score_band(&MIN_SCORE), String::from_str(&env, "Very Poor"));
-        assert_eq!(client.get_score_band(&MAX_SCORE), String::from_str(&env, "Excellent"));
+        assert_eq!(
+            client.get_score_band(&MIN_SCORE),
+            String::from_str(&env, "Very Poor")
+        );
+        assert_eq!(
+            client.get_score_band(&MAX_SCORE),
+            String::from_str(&env, "Excellent")
+        );
         assert_eq!(client.get_score_band(&500), String::from_str(&env, "Poor"));
         assert_eq!(client.get_score_band(&580), String::from_str(&env, "Fair"));
         assert_eq!(client.get_score_band(&670), String::from_str(&env, "Good"));
-        assert_eq!(client.get_score_band(&740), String::from_str(&env, "Very Good"));
-        assert_eq!(client.get_score_band(&800), String::from_str(&env, "Excellent"));
+        assert_eq!(
+            client.get_score_band(&740),
+            String::from_str(&env, "Very Good")
+        );
+        assert_eq!(
+            client.get_score_band(&800),
+            String::from_str(&env, "Excellent")
+        );
     }
 
     #[test]
