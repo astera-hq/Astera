@@ -65,6 +65,16 @@ pub struct FundedInvoice {
 }
 
 #[contracttype]
+#[derive(Clone)]
+pub struct FundingRequest {
+    pub invoice_id: u64,
+    pub principal: i128,
+    pub sme: Address,
+    pub due_date: u64,
+    pub token: Address,
+}
+
+#[contracttype]
 #[derive(Clone, Default)]
 pub struct PoolStorageStats {
     pub total_funded_invoices: u64,
@@ -499,12 +509,8 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
-        Self::assert_accepted_token(&env, &token);
-
-        if principal <= 0 {
-            panic!("principal must be positive");
-        }
-        if env
+        let config = get_config_cached(&env);
+        let accepted_tokens: Vec<Address> = env
             .storage()
             .persistent()
             .has(&DataKey::FundedInvoice(invoice_id))
@@ -543,52 +549,46 @@ impl FundingPool {
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
-            .get(&DataKey::TokenTotals(token.clone()))
+            .get(&DataKey::StorageStats)
             .unwrap_or_default();
-        let available = tt.pool_value - tt.total_deployed;
-        if available < principal {
-            panic!("insufficient available liquidity");
+        let request = FundingRequest {
+            invoice_id,
+            principal,
+            sme,
+            due_date,
+            token,
+        };
+        fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request);
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+    }
+
+    pub fn fund_multiple_invoices(env: Env, admin: Address, requests: Vec<FundingRequest>) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        if requests.len() == 0 {
+            panic!("no invoices provided");
         }
 
-        let config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
-        let factoring_fee = calculate_factoring_fee(principal, config.factoring_fee_bps);
-
-        let record = FundedInvoice {
-            invoice_id,
-            sme: sme.clone(),
-            token: token.clone(),
-            principal,
-            funded_at: env.ledger().timestamp(),
-            due_date,
-            factoring_fee,
-            repaid: false,
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::FundedInvoice(invoice_id), &record);
-        set_funded_invoice_ttl(&env, invoice_id, false);
-
-        tt.total_deployed += principal;
-        env.storage()
+        let config = get_config_cached(&env);
+        let accepted_tokens: Vec<Address> = env
+            .storage()
             .instance()
-            .set(&DataKey::TokenTotals(token.clone()), &tt);
-
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&env.current_contract_address(), &sme, &principal);
-
+            .get(&DataKey::AcceptedTokens)
+            .expect("not initialized");
         let mut stats: PoolStorageStats = env
             .storage()
             .instance()
             .get(&DataKey::StorageStats)
             .unwrap_or_default();
-        stats.total_funded_invoices += 1;
-        stats.active_funded_invoices += 1;
-        env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        env.events().publish(
-            (EVT, symbol_short!("funded")),
-            (invoice_id, sme.clone(), principal),
-        );
+        for i in 0..requests.len() {
+            let request = requests.get(i).unwrap();
+            fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request);
+        }
+
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
     }
 
     pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address) {

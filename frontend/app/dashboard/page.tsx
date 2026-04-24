@@ -2,32 +2,40 @@
 
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
 import InvoiceCard from '@/components/InvoiceCard';
 import CreditScore from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
-import { getInvoice, getInvoiceCount, getInvoiceMetadata, getFundedInvoice } from '@/lib/contracts';
+import {
+  getMultipleInvoices,
+  getInvoiceCount,
+  getInvoiceMetadata,
+  getFundedInvoice,
+} from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice, InvoiceMetadata } from '@/lib/types';
 
 type DashboardRow = { invoice: Invoice; metadata: InvoiceMetadata };
 
 type StatusFilter = Invoice['status'] | 'All';
-type SortOption = 'newest' | 'oldest' | 'highest' | 'due-soonest';
+type SortOption = 'created-desc' | 'created-asc' | 'amount-desc' | 'due-asc';
 
 const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
-  { value: 'newest', label: 'Newest first' },
-  { value: 'oldest', label: 'Oldest first' },
-  { value: 'highest', label: 'Highest amount' },
-  { value: 'due-soonest', label: 'Due soonest' },
+  { value: 'created-desc', label: 'Created date (newest)' },
+  { value: 'created-asc', label: 'Created date (oldest)' },
+  { value: 'amount-desc', label: 'Amount (highest)' },
+  { value: 'due-asc', label: 'Due date (soonest)' },
 ];
 
 /** Number of invoices to load per page */
 const PAGE_SIZE = 20;
 
 export default function DashboardPage() {
+  const router = useRouter();
+  const pathname = usePathname();
   const { wallet } = useStore();
   const [invoices, setInvoices] = useState<DashboardRow[]>([]);
   const [committedMap, setCommittedMap] = useState<Record<number, bigint>>({});
@@ -38,7 +46,8 @@ export default function DashboardPage() {
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
-  const [sort, setSort] = useState<SortOption>('newest');
+  const [sort, setSort] = useState<SortOption>('created-desc');
+  const [hydrated, setHydrated] = useState(false);
 
   /** Total number of on-chain invoices (not just the user's) */
   const [totalOnChainCount, setTotalOnChainCount] = useState(0);
@@ -49,6 +58,41 @@ export default function DashboardPage() {
 
   /** Ref used to preserve scroll position when loading more */
   const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get('q') ?? '';
+    const status = params.get('status');
+    const initialStatus = STATUS_TABS.includes(status as StatusFilter)
+      ? (status as StatusFilter)
+      : 'All';
+    const initialSort = params.get('sort');
+    const initialSortValue = SORT_OPTIONS.some((opt) => opt.value === initialSort)
+      ? (initialSort as SortOption)
+      : 'created-desc';
+
+    setSearch(q);
+    setStatusFilter(initialStatus);
+    setSort(initialSortValue);
+  }, [hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+
+    const params = new URLSearchParams();
+    if (search.trim()) params.set('q', search.trim());
+    if (statusFilter !== 'All') params.set('status', statusFilter);
+    if (sort !== 'created-desc') params.set('sort', sort);
+
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  }, [hydrated, pathname, router, search, sort, statusFilter]);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -66,14 +110,11 @@ export default function DashboardPage() {
       const endId = Math.max(1, startId - batchSize + 1);
       const ids = Array.from({ length: startId - endId + 1 }, (_, i) => startId - i);
 
-      const fetched = await Promise.all(
-        ids.map(async (id) => {
-          const invoice = await getInvoice(id);
-          return { id, invoice };
-        }),
-      );
+      const fetched = await getMultipleInvoices(ids);
 
-      const mine = fetched.filter((row) => row.invoice.owner === wallet.address);
+      const mine = fetched
+        .map((invoice, index) => ({ id: ids[index], invoice }))
+        .filter((row) => row.invoice.owner === wallet.address);
       const rows: DashboardRow[] = await Promise.all(
         mine.map(async ({ id, invoice }) => ({
           invoice,
@@ -191,13 +232,13 @@ export default function DashboardPage() {
     }
 
     switch (sort) {
-      case 'newest':
+      case 'created-desc':
         result.sort((a, b) => b.invoice.createdAt - a.invoice.createdAt);
         break;
-      case 'oldest':
+      case 'created-asc':
         result.sort((a, b) => a.invoice.createdAt - b.invoice.createdAt);
         break;
-      case 'highest':
+      case 'amount-desc':
         result.sort((a, b) =>
           b.metadata.amount > a.metadata.amount
             ? 1
@@ -206,7 +247,7 @@ export default function DashboardPage() {
               : 0,
         );
         break;
-      case 'due-soonest':
+      case 'due-asc':
         result.sort((a, b) => a.metadata.dueDate - b.metadata.dueDate);
         break;
     }
@@ -410,7 +451,8 @@ export default function DashboardPage() {
                         </button>
                         <p className="text-xs text-brand-muted mt-2">
                           Showing {invoices.length} invoice{invoices.length !== 1 ? 's' : ''}
-                          {totalOnChainCount > 0 && ` · Scanned ${scannedCount} of ${totalOnChainCount} on-chain`}
+                          {totalOnChainCount > 0 &&
+                            ` · Scanned ${scannedCount} of ${totalOnChainCount} on-chain`}
                         </p>
                       </div>
                     )}

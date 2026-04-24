@@ -1,4 +1,11 @@
-export type InvoiceStatus = 'Pending' | 'Funded' | 'Paid' | 'Defaulted';
+export type InvoiceStatus =
+  | 'Pending'
+  | 'AwaitingVerification'
+  | 'Verified'
+  | 'Disputed'
+  | 'Funded'
+  | 'Paid'
+  | 'Defaulted';
 
 /** On-chain view from `get_metadata` (SEP-oriented display fields). */
 export interface InvoiceMetadata {

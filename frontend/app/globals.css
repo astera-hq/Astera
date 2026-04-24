@@ -78,6 +78,15 @@ body {
 .badge-defaulted {
   @apply bg-red-900/40 text-red-400 border border-red-800/50;
 }
+.badge-verified {
+  @apply bg-cyan-900/40 text-cyan-400 border border-cyan-800/50;
+}
+.badge-awaitingverification {
+  @apply bg-slate-900/40 text-slate-400 border border-slate-800/50;
+}
+.badge-disputed {
+  @apply bg-orange-900/40 text-orange-400 border border-orange-800/50;
+}
 
 /* Light mode badge overrides */
 :root.light .badge-pending {
@@ -91,4 +100,13 @@ body {
 }
 :root.light .badge-defaulted {
   @apply bg-red-100 text-red-700 border border-red-300;
+}
+:root.light .badge-verified {
+  @apply bg-cyan-100 text-cyan-700 border border-cyan-300;
+}
+:root.light .badge-awaitingverification {
+  @apply bg-slate-100 text-slate-700 border border-slate-300;
+}
+:root.light .badge-disputed {
+  @apply bg-orange-100 text-orange-700 border border-orange-300;
 }

@@ -350,4 +350,47 @@ mod deterministic_fuzz {
         // Note: 11th invoice would fail (daily limit exceeded) but we can't test panic without std
         assert_eq!(client.get_invoice_count(), 10);
     }
+
+    #[test]
+    fn test_get_multiple_invoices_preserves_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _pool, sme) = setup(&env);
+        let due_date = env.ledger().timestamp() + 86_400;
+
+        let id1 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor A"),
+            &1_000_000i128,
+            &due_date,
+            &String::from_str(&env, "desc-a"),
+            &String::from_str(&env, "hash-a"),
+        );
+        let id2 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor B"),
+            &2_000_000i128,
+            &due_date,
+            &String::from_str(&env, "desc-b"),
+            &String::from_str(&env, "hash-b"),
+        );
+        let id3 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor C"),
+            &3_000_000i128,
+            &due_date,
+            &String::from_str(&env, "desc-c"),
+            &String::from_str(&env, "hash-c"),
+        );
+
+        let ids = soroban_sdk::vec![&env, id3, id1, id2];
+        let invoices = client.get_multiple_invoices(&ids);
+
+        assert_eq!(invoices.len(), 3);
+        assert_eq!(invoices.get(0).unwrap().id, id3);
+        assert_eq!(invoices.get(1).unwrap().id, id1);
+        assert_eq!(invoices.get(2).unwrap().id, id2);
+    }
 }

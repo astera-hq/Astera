@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import type { FormEvent } from 'react';
 import { useStore } from '@/lib/store';
 import PoolStats from '@/components/PoolStats';
 import { APYCalculator } from '@/components/APYCalculator';
@@ -26,6 +27,9 @@ export default function InvestPage() {
   const [txLoading, setTxLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [txStatus, setTxStatus] = useState<'idle' | 'pending' | 'confirmed' | 'failed'>('idle');
+  const [txHash, setTxHash] = useState<string | null>(null);
+  const [txError, setTxError] = useState<string | null>(null);
 
   const [acceptedTokens, setAcceptedTokens] = useState<string[]>([]);
   const [selectedToken, setSelectedToken] = useState<string>('');
@@ -66,7 +70,7 @@ export default function InvestPage() {
       }
     }
     if (POOL_CONFIGURED) loadKyc();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet.address, wallet.connected]);
 
   function pickDefaultToken(tokens: string[]): string {
@@ -113,13 +117,15 @@ export default function InvestPage() {
 
   const POOL_CONFIGURED = Boolean(process.env.NEXT_PUBLIC_POOL_CONTRACT_ID);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function submitTransaction() {
     if (!wallet.address || !amount || !selectedToken) return;
 
     setTxLoading(true);
     setError(null);
     setSuccess(null);
+    setTxStatus('pending');
+    setTxHash(null);
+    setTxError(null);
 
     try {
       const stroops = toStroops(parseFloat(amount));
@@ -136,11 +142,16 @@ export default function InvestPage() {
       });
       if (signError) throw new Error(signError.message);
 
-      await submitTx(signedTxXdr);
+      await submitTx(signedTxXdr, (progress) => {
+        setTxStatus(progress.status);
+        setTxHash(progress.hash);
+        setTxError(progress.error ?? null);
+      });
       const sym = stablecoinLabel(selectedToken);
       setSuccess(
         `${mode === 'deposit' ? 'Deposited' : 'Withdrew'} ${formatUSDC(stroops)} ${sym} successfully.`,
       );
+      setTxStatus('confirmed');
       setAmount('');
       await loadPool();
       await loadTokenTotals(selectedToken);
@@ -148,9 +159,16 @@ export default function InvestPage() {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Transaction failed.';
       setError(msg);
+      setTxStatus('failed');
+      setTxError(msg);
     } finally {
       setTxLoading(false);
     }
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    await submitTransaction();
   }
 
   return (
@@ -308,13 +326,56 @@ export default function InvestPage() {
                     </div>
                   )}
 
+                  {txStatus !== 'idle' && (
+                    <div
+                      className={`p-4 rounded-xl border text-sm space-y-2 ${
+                        txStatus === 'confirmed'
+                          ? 'bg-green-900/20 border-green-800/50 text-green-300'
+                          : txStatus === 'failed'
+                            ? 'bg-red-900/20 border-red-800/50 text-red-300'
+                            : 'bg-blue-900/20 border-blue-800/50 text-blue-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-medium capitalize">{txStatus}</span>
+                        {txHash && (
+                          <a
+                            href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-xs underline underline-offset-2"
+                          >
+                            View on explorer
+                          </a>
+                        )}
+                      </div>
+                      {txHash && <p className="font-mono text-xs break-all">{txHash}</p>}
+                      {txError && txStatus === 'failed' && <p>{txError}</p>}
+                    </div>
+                  )}
+
                   <button
                     type="submit"
-                    disabled={txLoading || !amount || !selectedToken || (mode === 'deposit' && kycRequired && !kycApproved)}
+                    disabled={
+                      txLoading ||
+                      !amount ||
+                      !selectedToken ||
+                      (mode === 'deposit' && kycRequired && !kycApproved)
+                    }
                     className="w-full py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 capitalize"
                   >
                     {txLoading ? 'Processing...' : `${mode} ${stablecoinLabel(selectedToken)}`}
                   </button>
+                  {txStatus === 'failed' && (
+                    <button
+                      type="button"
+                      onClick={() => void submitTransaction()}
+                      disabled={txLoading || !amount || !selectedToken}
+                      className="w-full py-3 border border-brand-border text-white font-semibold rounded-xl hover:border-brand-gold/50 transition-colors disabled:opacity-60"
+                    >
+                      Retry transaction
+                    </button>
+                  )}
                 </form>
 
                 <div className="mt-6 p-4 bg-brand-dark border border-brand-border rounded-xl text-xs text-brand-muted space-y-1">
