@@ -2308,6 +2308,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "GracePeriodDays"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 7
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Initialized"
                             }
                           ]

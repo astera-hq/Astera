@@ -99,7 +99,7 @@ fn calculate_score(
 
     score += (paid_on_time as i32 * PTS_PAID_ON_TIME as i32) as i64;
     score += (paid_late as i32 * PTS_PAID_LATE as i32) as i64;
-    score += (defaulted as i32 * PTS_DEFAULTED as i32) as i64;
+    score += (defaulted as i32 * PTS_DEFAULTED) as i64;
 
     if total_invoices >= 5 {
         score += PTS_NEW_INVOICE as i64;
@@ -556,8 +556,7 @@ impl CreditScoreContract {
             .instance()
             .get(&DataKey::ProposedWasmHash)
             .expect("no wasm hash proposed");
-        let wasm_hash_bytes: BytesN<32> = wasm_hash.try_into().unwrap();
-        env.deployer().update_current_contract_wasm(wasm_hash_bytes);
+        env.deployer().update_current_contract_wasm(wasm_hash);
         env.events()
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }

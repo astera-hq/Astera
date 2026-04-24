@@ -755,8 +755,7 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::ProposedWasmHash)
             .expect("no wasm hash proposed");
-        let wasm_hash_bytes: BytesN<32> = wasm_hash.try_into().unwrap();
-        env.deployer().update_current_contract_wasm(wasm_hash_bytes);
+        env.deployer().update_current_contract_wasm(wasm_hash);
         env.events()
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
