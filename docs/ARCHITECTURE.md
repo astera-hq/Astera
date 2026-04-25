@@ -156,6 +156,7 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - `GracePeriodDays` → Number of days (default 7) before marked-as-defaulted invoices can trigger
 - `DailyInvoiceCount(Address)` → Rate limiting counter per creator
 - `DailyInvoiceResetTime(Address)` → Timestamp for rate limit reset
+- `DailyInvoiceLimit` → Admin-configurable per-address daily invoice cap
 
 **Invoice Status Enum**:
 - `Pending` — Created, awaiting optional oracle verification
@@ -186,7 +187,7 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - `unpaused` (admin) — Contract unpaused
 - `upgraded` (admin, timestamp) — Contract code upgraded
 
-**Rate Limiting**: Max 10 invoices per address per day (counter resets daily based on timestamp)
+**Rate Limiting**: Defaults to 10 invoices per address per day, but the admin can now tune that cap with `set_daily_invoice_limit(limit)`. Counters still reset on a rolling 24-hour window based on ledger timestamp.
 
 **Upgrade Mechanism**: Implements `propose_upgrade(admin, wasm_hash)` + `execute_upgrade(admin)` with 24-hour timelock
 
@@ -208,6 +209,8 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 **Key State Variables** (stored via `DataKey` enum):
 - `Config` → PoolConfig: admin, invoice_contract, yield_bps, factoring_fee_bps, compound_interest flag
 - `AcceptedTokens` → Vec<Address> of whitelisted stablecoin contract addresses
+- `ExchangeRate(Address)` → Current admin-set USD-normalized rate per accepted token
+- `ExchangeRateBounds(Address)` → Min/max guardrails that exchange-rate updates must respect
 - `TokenTotals(Address)` → Per-token aggregates: pool_value, total_deployed, total_paid_out, total_fee_revenue
 - `FundedInvoice(u64)` → Record of funded invoice: sme, token, principal, funded_at, factoring_fee, due_date, repaid flag
 - `ShareToken(Address)` → Address of share token contract for each accepted token
@@ -249,6 +252,12 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - **Simple Interest**: `interest = principal × (yield_bps / 10000) × (elapsed_seconds / 31536000)`
 - **Compound Interest**: Applied daily, calculated with iteration over day boundaries
 - Default: 8% APY simple interest (800 basis points)
+- Implementation detail: the current contract uses checked intermediate arithmetic so oversized principals or durations fail predictably instead of overflowing silently.
+
+**Exchange Rate Validation**:
+- `set_rate_bounds(token, min_bps, max_bps)` defines the allowed update range for each accepted token.
+- `set_exchange_rate(token, rate_bps)` now rejects values outside those bounds.
+- A live oracle integration is still planned as a future enhancement rather than an active dependency in the current contract.
 
 **Storage Architecture** (ADR-0004):
 - Instance storage: Config, AcceptedTokens, TokenTotals, ShareToken references, stats
@@ -1422,6 +1431,106 @@ env.events().publish((EVT, symbol_short!("set_comp")), (admin, compound));
 env.events().publish((EVT, symbol_short!("cleanup")), invoice_id);
 env.events().publish((EVT, symbol_short!("upg_prop")), (admin, hash, execute_timestamp));
 env.events().publish((EVT, symbol_short!("upgraded")), (admin, timestamp));
+```
+
+---
+
+## Mermaid Reference Diagrams
+
+The following diagrams are provided as contributor-oriented visual references for the main contract interaction flows.
+
+### 1. Invoice Lifecycle State Machine
+This diagram shows the major invoice states and the calls that move an invoice between them.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : create_invoice()
+    Pending --> AwaitingVerification : oracle configured
+    Pending --> Cancelled : cancel_invoice()
+    Pending --> Expired : expiration window elapsed
+    AwaitingVerification --> Verified : verify_invoice(approved)
+    AwaitingVerification --> Disputed : verify_invoice(rejected)
+    Disputed --> Verified : resolve_dispute(approved)
+    Disputed --> Defaulted : resolve_dispute(rejected)
+    Verified --> Funded : mark_funded()
+    Funded --> Paid : mark_paid()/repay_invoice()
+    Funded --> Defaulted : mark_defaulted()
+    Paid --> [*]
+    Defaulted --> [*]
+    Cancelled --> [*]
+    Expired --> [*]
+```
+
+### 2. Investment Flow Sequence Diagram
+This diagram shows how investor deposits travel through the frontend, pool contract, and share token contract.
+
+```mermaid
+sequenceDiagram
+    participant Investor
+    participant Frontend
+    participant Pool as Pool Contract
+    participant Share as Share Token
+
+    Investor->>Frontend: Submit deposit(token, amount)
+    Frontend->>Pool: deposit(investor, token, amount)
+    Pool->>Pool: validate token, KYC, pause state
+    Pool->>Share: mint(investor, shares_to_mint)
+    Pool-->>Frontend: deposit complete
+    Frontend-->>Investor: updated balance and share state
+```
+
+### 3. Invoice Funding Flow Sequence Diagram
+This diagram shows how pool liquidity is deployed to an invoice and disbursed to the SME.
+
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant Pool as Pool Contract
+    participant Invoice as Invoice Contract
+    participant SME
+
+    Admin->>Pool: fund_invoice(invoice_id, principal, sme, due_date, token)
+    Pool->>Pool: validate liquidity, collateral, token acceptance
+    Pool->>SME: transfer principal
+    Pool->>Invoice: mark_funded(invoice_id)
+    Invoice-->>Pool: funded state recorded
+    Pool-->>Admin: funding complete
+```
+
+### 4. Repayment Flow Sequence Diagram
+This diagram shows how repayment updates pool accounting and feeds the credit-history path.
+
+```mermaid
+sequenceDiagram
+    participant SME
+    participant Pool as Pool Contract
+    participant Credit as Credit Score Contract
+    participant Investors
+
+    SME->>Pool: repay_invoice(invoice_id, amount)
+    Pool->>Pool: calculate interest + fee
+    Pool->>Pool: update funded invoice and token totals
+    Pool->>Credit: record payment history
+    Pool-->>Investors: earnings reflected in share value
+    Pool-->>SME: repayment accepted
+```
+
+### 5. Cross-Contract Dependency Diagram
+This diagram shows the high-level dependency graph across the main contracts and the frontend.
+
+```mermaid
+flowchart LR
+    Frontend[Frontend]
+    Invoice[Invoice Contract]
+    Pool[Pool Contract]
+    Credit[Credit Score Contract]
+    Share[Share Token Contract]
+
+    Frontend --> Invoice
+    Frontend --> Pool
+    Pool --> Invoice
+    Pool --> Share
+    Pool --> Credit
 ```
 
 ---

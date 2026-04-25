@@ -47,6 +47,13 @@ pub struct PoolTokenTotals {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct ExchangeRateBounds {
+    pub min_bps: u32,
+    pub max_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub struct InvestorPosition {
     pub deposited: i128,
     pub available: i128,
@@ -130,6 +137,7 @@ pub enum DataKey {
     UpgradeScheduledAt,
     // #111: exchange rate for each accepted token (bps of USD, e.g. 10000 = 1:1 USD)
     ExchangeRate(Address),
+    ExchangeRateBounds(Address),
     // #109: KYC / investor whitelist
     KycRequired,
     InvestorKyc(Address),
@@ -183,17 +191,36 @@ fn calculate_interest(
 ) -> u128 {
     let denominator = BPS_DENOM as u128 * SECS_PER_YEAR as u128;
     if !is_compound {
-        return (principal * yield_bps as u128 * elapsed_secs as u128) / denominator;
+        // Use checked intermediates so very large principals or durations fail
+        // predictably instead of overflowing before the final division.
+        let numerator = principal
+            .checked_mul(yield_bps as u128)
+            .and_then(|value| value.checked_mul(elapsed_secs as u128))
+            .expect("interest calculation overflow");
+        return numerator / denominator;
     }
     let elapsed_days = elapsed_secs / 86400;
     let mut amount = principal;
     let daily_rate_num = yield_bps as u128 * 86400;
     for _ in 0..elapsed_days {
-        amount += (amount * daily_rate_num) / denominator;
+        let accrued = amount
+            .checked_mul(daily_rate_num)
+            .expect("interest calculation overflow")
+            / denominator;
+        amount = amount
+            .checked_add(accrued)
+            .expect("interest calculation overflow");
     }
     let remaining_secs = elapsed_secs % 86400;
     if remaining_secs > 0 {
-        amount += (amount * yield_bps as u128 * remaining_secs as u128) / denominator;
+        let accrued = amount
+            .checked_mul(yield_bps as u128)
+            .and_then(|value| value.checked_mul(remaining_secs as u128))
+            .expect("interest calculation overflow")
+            / denominator;
+        amount = amount
+            .checked_add(accrued)
+            .expect("interest calculation overflow");
     }
     amount - principal
 }
@@ -1229,6 +1256,36 @@ impl FundingPool {
 
     /// Set the USD exchange rate for a token (in bps, e.g. 10000 = 1:1 with USD).
     /// Used to normalise pool value across stablecoins for display/reporting.
+    /// Oracle-backed validation is a planned follow-up; for now the admin must
+    /// set explicit per-token bounds before changing a rate.
+    pub fn set_rate_bounds(
+        env: Env,
+        admin: Address,
+        token: Address,
+        min_bps: u32,
+        max_bps: u32,
+    ) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        Self::assert_accepted_token(&env, &token);
+        if min_bps == 0 || max_bps == 0 {
+            panic!("rate bounds must be positive");
+        }
+        if min_bps > max_bps {
+            panic!("invalid rate bounds");
+        }
+
+        env.storage().instance().set(
+            &DataKey::ExchangeRateBounds(token.clone()),
+            &ExchangeRateBounds { min_bps, max_bps },
+        );
+        env.events().publish(
+            (EVT, symbol_short!("bounds")),
+            (admin, token, min_bps, max_bps),
+        );
+    }
+
     pub fn set_exchange_rate(env: Env, admin: Address, token: Address, rate_bps: u32) {
         admin.require_auth();
         bump_instance(&env);
@@ -1236,6 +1293,17 @@ impl FundingPool {
         Self::assert_accepted_token(&env, &token);
         if rate_bps == 0 {
             panic!("rate must be positive");
+        }
+        let bounds: ExchangeRateBounds = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExchangeRateBounds(token.clone()))
+            .unwrap_or(ExchangeRateBounds {
+                min_bps: 10_000u32,
+                max_bps: 10_000u32,
+            });
+        if rate_bps < bounds.min_bps || rate_bps > bounds.max_bps {
+            panic!("rate out of bounds");
         }
         env.storage()
             .instance()
@@ -1251,6 +1319,17 @@ impl FundingPool {
             .instance()
             .get(&DataKey::ExchangeRate(token))
             .unwrap_or(10_000u32)
+    }
+
+    pub fn get_rate_bounds(env: Env, token: Address) -> ExchangeRateBounds {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::ExchangeRateBounds(token))
+            .unwrap_or(ExchangeRateBounds {
+                min_bps: 10_000u32,
+                max_bps: 10_000u32,
+            })
     }
 
     // ---- #109: Investor KYC / whitelist methods ----
@@ -2174,9 +2253,59 @@ mod test {
     fn test_set_exchange_rate_non_admin_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        client.set_rate_bounds(&admin, &usdc_id, &9_500u32, &10_500u32);
         let attacker = Address::generate(&env);
         client.set_exchange_rate(&attacker, &usdc_id, &10_000u32);
+    }
+
+    #[test]
+    fn test_set_exchange_rate_within_bounds_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+
+        client.set_rate_bounds(&admin, &usdc_id, &9_500u32, &10_500u32);
+        client.set_exchange_rate(&admin, &usdc_id, &10_200u32);
+
+        assert_eq!(client.get_exchange_rate(&usdc_id), 10_200u32);
+        let bounds = client.get_rate_bounds(&usdc_id);
+        assert_eq!(bounds.min_bps, 9_500u32);
+        assert_eq!(bounds.max_bps, 10_500u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate out of bounds")]
+    fn test_set_exchange_rate_outside_bounds_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+
+        client.set_rate_bounds(&admin, &usdc_id, &9_500u32, &10_500u32);
+        client.set_exchange_rate(&admin, &usdc_id, &10_600u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid rate bounds")]
+    fn test_set_rate_bounds_invalid_order_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+
+        client.set_rate_bounds(&admin, &usdc_id, &10_500u32, &9_500u32);
+    }
+
+    #[test]
+    fn test_yield_calc_no_overflow_large_principal() {
+        let interest = calculate_interest(1_000_000_000_000_000u128, 5_000u32, 5 * SECS_PER_YEAR, false);
+        assert!(interest > 0);
+        assert!(interest < 3_000_000_000_000_000u128);
+    }
+
+    #[test]
+    fn test_yield_calc_precision_small_amounts() {
+        let interest = calculate_interest(1u128, 800u32, 86_400u64, false);
+        assert_eq!(interest, 0u128);
     }
 
     #[test]

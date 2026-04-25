@@ -11,6 +11,8 @@ Astera is a real-world assets (RWA) platform on Stellar that enables SMEs to tok
 ### Invoice Contract
 - [`initialize`](#initialize-invoice)
 - [`create_invoice`](#create_invoice)
+- [`set_daily_invoice_limit`](#set_daily_invoice_limit)
+- [`get_daily_invoice_limit`](#get_daily_invoice_limit)
 - [`mark_funded`](#mark_funded)
 - [`mark_paid`](#mark_paid)
 - [`mark_defaulted`](#mark_defaulted)
@@ -28,6 +30,10 @@ Astera is a real-world assets (RWA) platform on Stellar that enables SMEs to tok
 - [`commit_to_invoice`](#commit_to_invoice)
 - [`repay_invoice`](#repay_invoice)
 - [`withdraw`](#withdraw)
+- [`set_rate_bounds`](#set_rate_bounds)
+- [`get_rate_bounds`](#get_rate_bounds)
+- [`set_exchange_rate`](#set_exchange_rate)
+- [`get_exchange_rate`](#get_exchange_rate)
 - [`set_yield`](#set_yield)
 - [`get_config`](#get_config)
 - [`accepted_tokens`](#accepted_tokens)
@@ -260,6 +266,7 @@ SME creates a new tokenized invoice on-chain. The owner must sign the transactio
 |-------|-----------|------------------|
 | `"amount must be positive"` | `amount <= 0` | `create_invoice` |
 | `"due date must be in the future"` | `due_date <= env.ledger().timestamp()` | `create_invoice` |
+| `"daily invoice limit exceeded"` | Per-address daily creation counter has reached the configured limit | `create_invoice` |
 
 #### Access Control
 
@@ -312,6 +319,53 @@ stellar contract invoke \
 **Validation:**
 - Amount must be positive (rejects zero and negative)
 - Due date must be in the future (rejects past or current timestamps)
+- The per-address creation count must remain below the configured daily limit
+
+---
+
+### `set_daily_invoice_limit`
+
+Admin updates the per-address invoice creation cap used by `create_invoice`. If no value is set, the historical default of 10 invoices per day is used.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `admin` | `Address` | Yes | Admin address; must sign the transaction |
+| `limit` | `u32` | Yes | New daily limit; must be between 1 and 1000 |
+
+#### Returns
+
+`()` — No return value.
+
+#### Errors
+
+| Error | Condition | Affected Methods |
+|-------|-----------|------------------|
+| `"unauthorized"` | Caller is not the stored admin | `set_daily_invoice_limit` |
+| `"daily invoice limit must be positive"` | `limit == 0` | `set_daily_invoice_limit` |
+| `"daily invoice limit too high"` | `limit > 1000` | `set_daily_invoice_limit` |
+
+#### Access Control
+
+Requires `admin.require_auth()` and stored-admin verification.
+
+---
+
+### `get_daily_invoice_limit`
+
+Returns the active daily invoice creation cap. If no override has been stored, this returns the default value of `10`.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+
+#### Returns
+
+`u32` — The configured daily limit, or `10` when unset.
 
 ---
 
@@ -1285,6 +1339,102 @@ stellar contract invoke \
 
 ---
 
+### `set_rate_bounds`
+
+Admin defines the minimum and maximum allowed exchange rate for a token. These bounds are enforced by `set_exchange_rate` and provide a lightweight guardrail until live oracle validation is introduced.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `admin` | `Address` | Yes | Admin address; must sign the transaction |
+| `token` | `Address` | Yes | Accepted token whose exchange-rate guardrails are being set |
+| `min_bps` | `u32` | Yes | Minimum allowed rate in basis points |
+| `max_bps` | `u32` | Yes | Maximum allowed rate in basis points |
+
+#### Returns
+
+`()` — No return value.
+
+#### Errors
+
+| Error | Condition | Affected Methods |
+|-------|-----------|------------------|
+| `"unauthorized"` | Caller is not the stored admin | `set_rate_bounds` |
+| `"token not accepted"` | Token is not on the whitelist | `set_rate_bounds` |
+| `"rate bounds must be positive"` | `min_bps == 0` or `max_bps == 0` | `set_rate_bounds` |
+| `"invalid rate bounds"` | `min_bps > max_bps` | `set_rate_bounds` |
+
+---
+
+### `get_rate_bounds`
+
+Returns the current exchange-rate bounds for a token. Tokens without explicit bounds fall back to a narrow `10000..10000` 1:1 default.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `token` | `Address` | Yes | Accepted token address |
+
+#### Returns
+
+`ExchangeRateBounds` — Struct containing `min_bps` and `max_bps`.
+
+---
+
+### `set_exchange_rate`
+
+Admin updates the normalized exchange rate for a token, subject to the configured bounds for that token.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `admin` | `Address` | Yes | Admin address; must sign the transaction |
+| `token` | `Address` | Yes | Accepted token address |
+| `rate_bps` | `u32` | Yes | New exchange rate in basis points vs USD normalization |
+
+#### Returns
+
+`()` — No return value.
+
+#### Errors
+
+| Error | Condition | Affected Methods |
+|-------|-----------|------------------|
+| `"unauthorized"` | Caller is not the stored admin | `set_exchange_rate` |
+| `"token not accepted"` | Token is not on the whitelist | `set_exchange_rate` |
+| `"rate must be positive"` | `rate_bps == 0` | `set_exchange_rate` |
+| `"rate out of bounds"` | `rate_bps` falls outside stored bounds for the token | `set_exchange_rate` |
+
+#### Notes
+
+- The current implementation uses configured bounds rather than a live oracle feed.
+- Oracle-backed validation is planned as a future enhancement, not part of the active contract interface today.
+
+---
+
+### `get_exchange_rate`
+
+Returns the current exchange rate for a token. Tokens without an explicit override fall back to `10000` (1:1).
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `token` | `Address` | Yes | Accepted token address |
+
+#### Returns
+
+`u32` — The current rate in basis points.
+
+---
+
 ### `set_yield`
 
 Admin updates the pool yield rate (in basis points). Affects how much interest SMEs will owe when they repay invoices.
@@ -1808,4 +1958,3 @@ Refer to the contract source code for the complete event schemas.
 - **Persistent Storage**: Slower, unlimited capacity; used for Invoice records, investor positions, and funded invoice details
 
 Queries against persistent storage may have latency; batch queries when possible.
-

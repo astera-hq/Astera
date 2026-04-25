@@ -12,6 +12,7 @@ const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
 const MAX_INVOICES_PER_DAY: u32 = 10;
+const MAX_DAILY_INVOICE_LIMIT: u32 = 1_000;
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7; // 7 days default grace period
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
@@ -94,6 +95,7 @@ pub enum DataKey {
     GracePeriodDays,
     MaxInvoiceAmount,
     ExpirationDurationSecs,
+    DailyInvoiceLimit,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -332,7 +334,13 @@ impl InvoiceContract {
             panic!("due date must be in the future");
         }
 
-        // Rate limiting: max 10 invoices per day per address
+        // Rate limiting: use the configured daily limit when present, otherwise
+        // fall back to the historical default of 10 invoices per address.
+        let daily_limit: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DailyInvoiceLimit)
+            .unwrap_or(MAX_INVOICES_PER_DAY);
         let now = env.ledger().timestamp();
         let daily_count_key = DataKey::DailyInvoiceCount(owner.clone());
         let daily_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
@@ -346,8 +354,8 @@ impl InvoiceContract {
             env.storage().instance().set(&daily_reset_key, &now);
         }
 
-        if daily_count >= MAX_INVOICES_PER_DAY {
-            panic!("daily invoice limit exceeded: max 10 per day");
+        if daily_count >= daily_limit {
+            panic!("daily invoice limit exceeded");
         }
 
         daily_count += 1;
@@ -410,6 +418,39 @@ impl InvoiceContract {
             .publish((EVT, symbol_short!("created")), (id, owner, amount));
 
         id
+    }
+
+    pub fn set_daily_invoice_limit(env: Env, admin: Address, limit: u32) {
+        admin.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if limit == 0 {
+            panic!("daily invoice limit must be positive");
+        }
+        if limit > MAX_DAILY_INVOICE_LIMIT {
+            panic!("daily invoice limit too high");
+        }
+
+        env.storage().instance().set(&DataKey::DailyInvoiceLimit, &limit);
+        env.events()
+            .publish((EVT, symbol_short!("set_limit")), (admin, limit));
+    }
+
+    pub fn get_daily_invoice_limit(env: Env) -> u32 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::DailyInvoiceLimit)
+            .unwrap_or(MAX_INVOICES_PER_DAY)
     }
 
     pub fn verify_invoice(env: Env, id: u64, oracle: Address, approved: bool, reason: String) {
@@ -1799,6 +1840,66 @@ mod test {
             &String::from_str(&env, "h"),
         );
         assert!(id > 0);
+    }
+
+    #[test]
+    fn test_daily_invoice_limit_defaults_to_ten() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+
+        assert_eq!(client.get_daily_invoice_limit(), 10);
+    }
+
+    #[test]
+    fn test_admin_can_set_daily_invoice_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _pool, sme) = setup(&env);
+
+        client.set_daily_invoice_limit(&admin, &20u32);
+        assert_eq!(client.get_daily_invoice_limit(), 20);
+
+        let due = env.ledger().timestamp() + 50_000;
+        let d = String::from_str(&env, "D");
+        let desc = String::from_str(&env, "i");
+        let hash = String::from_str(&env, "h");
+
+        for _ in 0..20 {
+            client.create_invoice(&sme, &d, &100i128, &due, &desc, &hash);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_set_daily_invoice_limit_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _sme) = setup(&env);
+        let intruder = Address::generate(&env);
+
+        client.set_daily_invoice_limit(&intruder, &20u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "daily invoice limit must be positive")]
+    fn test_set_daily_invoice_limit_zero_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+
+        client.set_daily_invoice_limit(&admin, &0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "daily invoice limit too high")]
+    fn test_set_daily_invoice_limit_above_max_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+
+        client.set_daily_invoice_limit(&admin, &1_001u32);
     }
 
     // ---- Max Invoice Amount Tests ----
