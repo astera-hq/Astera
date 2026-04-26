@@ -25,6 +25,11 @@ const adminLinks = [
     icon: 'M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z',
   },
   {
+    href: '/admin/analytics',
+    label: 'Analytics',
+    icon: 'M3 13h2v8H3v-8zm4-4h2v12H7V9zm4-4h2v16h-2V5zm4 6h2v10h-2V11zm4 3h2v7h-2v-7z',
+  },
+  {
     href: '/admin/monitoring',
     label: 'Monitoring',
     icon: 'M21 3H3C1.89 3 1 3.89 1 5v14c0 1.11.89 2 2 2h18c1.11 0 2-.89 2-2V5c0-1.11-.89-2-2-2zm0 16H3V5h18v14zM11 7h2v6h-2V7zm0 8h2v2h-2v-2z',
