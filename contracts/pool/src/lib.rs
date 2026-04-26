@@ -484,6 +484,7 @@ impl FundingPool {
     pub fn deposit(env: Env, investor: Address, token: Address, amount: i128) {
         investor.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -556,6 +557,7 @@ impl FundingPool {
     pub fn withdraw(env: Env, investor: Address, token: Address, shares: i128) {
         investor.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         if shares <= 0 {
             panic!("shares must be positive");
         }
@@ -1029,6 +1031,7 @@ impl FundingPool {
     pub fn set_yield(env: Env, admin: Address, yield_bps: u32) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         Self::require_admin(&env, &admin);
         if yield_bps > 5_000 {
@@ -1106,6 +1109,7 @@ impl FundingPool {
     pub fn set_compound_interest(env: Env, admin: Address, compound: bool) {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
         let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
         config.compound_interest = compound;
@@ -2590,5 +2594,45 @@ mod test {
 
         let tt = client.get_token_totals(&usdc_id);
         assert_eq!(tt.pool_value, 500);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_deposit_when_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.pause(&admin);
+        mint(&env, &usdc_id, &investor, 1000);
+        client.deposit(&investor, &usdc_id, &1000); // Should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_withdraw_when_paused_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 1000);
+        client.deposit(&investor, &usdc_id, &1000);
+        client.pause(&admin);
+        client.withdraw(&investor, &usdc_id, &500); // Should panic
+    }
+
+    #[test]
+    fn test_pause_events_emitted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        client.unpause(&admin);
+        assert!(!client.is_paused());
     }
 }

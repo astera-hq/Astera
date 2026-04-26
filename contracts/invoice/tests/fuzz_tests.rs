@@ -394,6 +394,4 @@ mod deterministic_fuzz {
         assert_eq!(invoices.get(1).unwrap().id, id1);
         assert_eq!(invoices.get(2).unwrap().id, id2);
     }
-
-    
 }

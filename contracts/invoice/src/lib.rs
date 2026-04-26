@@ -219,46 +219,46 @@ pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
-pub fn initialize(
-    env: Env,
-    admin: Address,
-    pool: Address,
-    max_invoice_amount: i128,
-    expiration_duration_secs: u64,
-    grace_period_days: u32, // new param
-) {
-    if env.storage().instance().has(&DataKey::Initialized) {
-        panic!("already initialized");
-    }
-    if max_invoice_amount <= 0 {
-        panic!("max invoice amount must be positive");
-    }
-    if expiration_duration_secs == 0 {
-        panic!("expiration duration must be non-zero");
-    }
-    if grace_period_days > 90 {
-        panic!("grace period cannot exceed 90 days");
-    }
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        pool: Address,
+        max_invoice_amount: i128,
+        expiration_duration_secs: u64,
+        grace_period_days: u32, // new param
+    ) {
+        if env.storage().instance().has(&DataKey::Initialized) {
+            panic!("already initialized");
+        }
+        if max_invoice_amount <= 0 {
+            panic!("max invoice amount must be positive");
+        }
+        if expiration_duration_secs == 0 {
+            panic!("expiration duration must be non-zero");
+        }
+        if grace_period_days > 90 {
+            panic!("grace period cannot exceed 90 days");
+        }
 
-    env.storage().instance().set(&DataKey::Admin, &admin);
-    env.storage().instance().set(&DataKey::Pool, &pool);
-    env.storage().instance().set(&DataKey::InvoiceCount, &0u64);
-    env.storage().instance().set(&DataKey::Initialized, &true);
-    env.storage()
-      .instance()
-      .set(&DataKey::StorageStats, &StorageStats::default());
-    env.storage().instance().set(&DataKey::Paused, &false);
-    env.storage()
-      .instance()
-      .set(&DataKey::GracePeriodDays, &grace_period_days); // use param
-    env.storage()
-      .instance()
-      .set(&DataKey::MaxInvoiceAmount, &max_invoice_amount);
-    env.storage()
-      .instance()
-      .set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
-    bump_instance(&env);
-}
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Pool, &pool);
+        env.storage().instance().set(&DataKey::InvoiceCount, &0u64);
+        env.storage().instance().set(&DataKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageStats, &StorageStats::default());
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::GracePeriodDays, &grace_period_days); // use param
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxInvoiceAmount, &max_invoice_amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
+        bump_instance(&env);
+    }
 
     pub fn pause(env: Env, admin: Address) {
         admin.require_auth();
@@ -647,59 +647,62 @@ pub fn initialize(
         env.events().publish((EVT, symbol_short!("paid")), id);
     }
 
-pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
-    pool.require_auth();
-    require_not_paused(&env);
-    bump_instance(&env);
+    pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
+        pool.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
 
-    let authorized_pool: Address = env
-      .storage()
-      .instance()
-      .get(&DataKey::Pool)
-      .expect("not initialized");
-    if pool!= authorized_pool {
-        panic!("unauthorized pool");
+        let authorized_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pool)
+            .expect("not initialized");
+        if pool != authorized_pool {
+            panic!("unauthorized pool");
+        }
+
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
+
+        if invoice.status != InvoiceStatus::Funded {
+            panic!("invoice is not funded");
+        }
+
+        let grace_period_days: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
+        let now = env.ledger().timestamp();
+        let default_at = invoice.due_date + grace_period_secs;
+
+        if now < default_at {
+            panic!(
+                "grace period has not elapsed: default available at {}",
+                default_at
+            );
+        }
+
+        invoice.status = InvoiceStatus::Defaulted;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        set_invoice_ttl(&env, id, true);
+
+        let mut stats: StorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        stats.active_invoices = stats.active_invoices.saturating_sub(1);
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+
+        env.events().publish((EVT, symbol_short!("default")), id);
     }
-
-    let mut invoice: Invoice = env
-      .storage()
-      .persistent()
-      .get(&DataKey::Invoice(id))
-      .expect("invoice not found");
-
-    if invoice.status!= InvoiceStatus::Funded {
-        panic!("invoice is not funded");
-    }
-
-    let grace_period_days: u32 = env
-      .storage()
-      .instance()
-      .get(&DataKey::GracePeriodDays)
-      .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
-    let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
-    let now = env.ledger().timestamp();
-    let default_at = invoice.due_date + grace_period_secs;
-
-    if now < default_at {
-        panic!("grace period has not elapsed: default available at {}", default_at);
-    }
-
-    invoice.status = InvoiceStatus::Defaulted;
-    env.storage()
-      .persistent()
-      .set(&DataKey::Invoice(id), &invoice);
-    set_invoice_ttl(&env, id, true);
-
-    let mut stats: StorageStats = env
-      .storage()
-      .instance()
-      .get(&DataKey::StorageStats)
-      .unwrap_or_default();
-    stats.active_invoices = stats.active_invoices.saturating_sub(1);
-    env.storage().instance().set(&DataKey::StorageStats, &stats);
-
-    env.events().publish((EVT, symbol_short!("default")), id);
-}
 
     pub fn cancel_invoice(env: Env, id: u64, owner: Address) {
         owner.require_auth();
@@ -994,33 +997,33 @@ pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 
-    
     pub fn check_default_warning(env: Env, id: u64) -> bool {
-    let invoice: Invoice = env
-      .storage()
-      .persistent()
-      .get(&DataKey::Invoice(id))
-      .expect("invoice not found");
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .expect("invoice not found");
 
-    if invoice.status!= InvoiceStatus::Funded {
-        return false;
+        if invoice.status != InvoiceStatus::Funded {
+            return false;
+        }
+
+        let grace_period_days: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriodDays)
+            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let default_at = invoice.due_date + grace_period_days as u64 * SECS_PER_DAY;
+        let now = env.ledger().timestamp();
+
+        // Within 24h of default
+        if now >= invoice.due_date && now < default_at && default_at - now <= SECS_PER_DAY {
+            env.events()
+                .publish((EVT, symbol_short!("def_warn")), (id, default_at));
+            return true;
+        }
+        false
     }
-
-    let grace_period_days: u32 = env
-      .storage()
-      .instance()
-      .get(&DataKey::GracePeriodDays)
-      .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
-    let default_at = invoice.due_date + grace_period_days as u64 * SECS_PER_DAY;
-    let now = env.ledger().timestamp();
-
-    // Within 24h of default
-    if now >= invoice.due_date && now < default_at && default_at - now <= SECS_PER_DAY {
-        env.events().publish((EVT, symbol_short!("def_warn")), (id, default_at));
-        return true;
-    }
-    false
-}
 }
 
 #[cfg(test)]
@@ -1037,7 +1040,13 @@ mod test {
         let admin = Address::generate(env);
         let pool = Address::generate(env);
         let sme = Address::generate(env);
-        client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &u32::MAX);
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &u32::MAX,
+        );
         (client, admin, pool, sme)
     }
 
@@ -1956,7 +1965,13 @@ mod test {
         let pool = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.initialize(&admin, &pool, &1_000i128, &DEFAULT_EXPIRATION_DURATION_SECS, &u32::MAX);
+        client.initialize(
+            &admin,
+            &pool,
+            &1_000i128,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &u32::MAX,
+        );
 
         client.create_invoice(
             &sme,
@@ -2111,7 +2126,8 @@ mod test {
             &admin,
             &pool_id,
             &i128::MAX,
-            &DEFAULT_EXPIRATION_DURATION_SECS, &u32::MAX
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &u32::MAX,
         );
         let hash = String::from_str(&env, "h");
 
@@ -2141,80 +2157,126 @@ mod test {
     }
 
     #[test]
-#[should_panic(expected = "grace period has not elapsed")]
-fn test_mark_defaulted_during_grace_period_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().with_mut(|l| l.timestamp = 100_000);
+    #[should_panic(expected = "grace period has not elapsed")]
+    fn test_mark_defaulted_during_grace_period_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
 
-    let contract_id = env.register(InvoiceContract, ());
-    let client = InvoiceContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let pool = Address::generate(&env);
-    let sme = Address::generate(&env);
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pool = Address::generate(&env);
+        let sme = Address::generate(&env);
 
-    // 7 day grace period
-    client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &7u32);
+        // 7 day grace period
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &7u32,
+        );
 
-    let due_date = 100_000 + 86400; // 1 day from now
-    let id = client.create_invoice(
-        &sme,
-        &String::from_str(&env, "D"),
-        &1_000i128,
-        &due_date,
-        &String::from_str(&env, "x"),
-        &String::from_str(&env, "h"),
-    );
-    client.mark_funded(&id, &pool);
+        let due_date = 100_000 + 86400; // 1 day from now
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.mark_funded(&id, &pool);
 
-    // Move to 2 days past due = still in 7 day grace period
-    env.ledger().with_mut(|l| l.timestamp = due_date + 2 * 86400);
-    client.mark_defaulted(&id, &pool); // should panic
-}
+        // Move to 2 days past due = still in 7 day grace period
+        env.ledger()
+            .with_mut(|l| l.timestamp = due_date + 2 * 86400);
+        client.mark_defaulted(&id, &pool); // should panic
+    }
 
-#[test]
-fn test_mark_defaulted_after_grace_period_succeeds() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().with_mut(|l| l.timestamp = 100_000);
+    #[test]
+    fn test_mark_defaulted_after_grace_period_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
 
-    let contract_id = env.register(InvoiceContract, ());
-    let client = InvoiceContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let pool = Address::generate(&env);
-    let sme = Address::generate(&env);
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pool = Address::generate(&env);
+        let sme = Address::generate(&env);
 
-    client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &7u32);
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &7u32,
+        );
 
-    let due_date = 100_000 + 86400;
-    let id = client.create_invoice(&sme, &String::from_str(&env, "D"), &1_000i128, &due_date, &String::from_str(&env, "x"), &String::from_str(&env, "h"));
-    client.mark_funded(&id, &pool);
+        let due_date = 100_000 + 86400;
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &due_date,
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.mark_funded(&id, &pool);
 
-    // Move to 8 days past due = grace period elapsed
-    env.ledger().with_mut(|l| l.timestamp = due_date + 8 * 86400);
-    client.mark_defaulted(&id, &pool);
-    assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
-}
+        // Move to 8 days past due = grace period elapsed
+        env.ledger()
+            .with_mut(|l| l.timestamp = due_date + 8 * 86400);
+        client.mark_defaulted(&id, &pool);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
+    }
 
+    #[test]
+    fn test_set_grace_period_updates_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup_with_grace(&env, 7);
 
-#[test]
-fn test_set_grace_period_updates_value() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin, _pool, _sme) = setup_with_grace(&env, 7);
+        client.set_grace_period(&admin, &14u32);
+        assert_eq!(client.get_grace_period(), 14u32);
+    }
 
-    client.set_grace_period(&admin, &14u32);
-    assert_eq!(client.get_grace_period(), 14u32);
-}
+    // helper for tests
+    fn setup_with_grace(
+        env: &Env,
+        grace_days: u32,
+    ) -> (InvoiceContractClient<'_>, Address, Address, Address) {
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let pool = Address::generate(env);
+        let sme = Address::generate(env);
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &grace_days,
+        );
+        (client, admin, pool, sme)
+    }
 
-// helper for tests
-fn setup_with_grace(env: &Env, grace_days: u32) -> (InvoiceContractClient<'_>, Address, Address, Address) {
-    let contract_id = env.register(InvoiceContract, ());
-    let client = InvoiceContractClient::new(env, &contract_id);
-    let admin = Address::generate(env);
-    let pool = Address::generate(env);
-    let sme = Address::generate(env);
-    client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS, &grace_days);
-    (client, admin, pool, sme)
-}
+    #[test]
+    fn test_pause_blocks_funding_and_payment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, sme) = setup(&env);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+        client.pause(&admin);
+        assert!(client.is_paused());
+    }
 }
