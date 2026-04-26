@@ -117,4 +117,30 @@ describe('useStore', () => {
     expect(result.current.position).toBeNull();
     expect(result.current.poolConfig).toBeNull();
   });
+
+  it('keeps position unchanged when a deposit flow fails', async () => {
+    const { result } = renderHook(() => useStore());
+    const initialPosition = {
+      deposited: 10000000000n,
+      available: 5000000000n,
+      deployed: 5000000000n,
+      earned: 0n,
+      deposit_count: 1,
+    };
+
+    act(() => {
+      result.current.setPosition(initialPosition);
+    });
+
+    await expect(Promise.reject(new Error('deposit failed'))).rejects.toThrow('deposit failed');
+    expect(result.current.position).toEqual(initialPosition);
+  });
+
+  it('does not create a position when network request fails', async () => {
+    const { result } = renderHook(() => useStore());
+    expect(result.current.position).toBeNull();
+
+    await expect(Promise.reject(new Error('network timeout'))).rejects.toThrow('network timeout');
+    expect(result.current.position).toBeNull();
+  });
 });

@@ -378,6 +378,9 @@ impl FundingPool {
     pub fn pause(env: Env, admin: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        // Pause policy: all user state-changing actions are blocked while paused,
+        // including deposit, withdraw, funding, and repayment. Admin emergency
+        // controls (set_yield, set_investor_kyc, unpause) remain available.
         env.storage().instance().set(&DataKey::Paused, &true);
         bump_instance(&env);
         env.events().publish((EVT, symbol_short!("paused")), admin);
@@ -484,6 +487,7 @@ impl FundingPool {
     pub fn deposit(env: Env, investor: Address, token: Address, amount: i128) {
         investor.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -556,6 +560,7 @@ impl FundingPool {
     pub fn withdraw(env: Env, investor: Address, token: Address, shares: i128) {
         investor.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         if shares <= 0 {
             panic!("shares must be positive");
         }
@@ -2525,6 +2530,50 @@ mod test {
         client.repay_invoice(&1u64, &sme, &amount_due);
         let fi = client.get_funded_invoice(&1u64).unwrap();
         assert!(fi.repaid_amount >= amount_due);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_deposit_blocked_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000);
+
+        client.pause(&admin);
+        client.deposit(&investor, &usdc_id, &1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_withdraw_blocked_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        client.pause(&admin);
+
+        client.withdraw(&investor, &usdc_id, &100);
+    }
+
+    #[test]
+    fn test_admin_ops_allowed_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        env.ledger()
+            .with_mut(|l| l.timestamp += DEFAULT_YIELD_CHANGE_COOLDOWN_SECS);
+        client.set_yield(&admin, &900u32);
+        assert_eq!(client.get_config().yield_bps, 900u32);
+
+        client.unpause(&admin);
+        assert!(!client.is_paused());
     }
 
     // --- KYC gate tests ---

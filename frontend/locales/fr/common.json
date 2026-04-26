@@ -17,6 +17,9 @@
     "status": {
       "all": "Tout",
       "pending": "En attente",
+      "awaitingverification": "En attente de verification",
+      "verified": "Verifie",
+      "disputed": "Conteste",
       "funded": "Financé",
       "paid": "Payé",
       "defaulted": "En défaut"
@@ -25,7 +28,9 @@
       "createdDesc": "Date de création (plus récente)",
       "createdAsc": "Date de création (plus ancienne)",
       "amountDesc": "Montant (le plus élevé)",
-      "dueAsc": "Date d'échéance (la plus proche)"
+      "amountAsc": "Montant (le plus bas)",
+      "dueAsc": "Date d'échéance (la plus proche)",
+      "dueDesc": "Date d'échéance (la plus lointaine)"
     },
     "noInvoices": "Pas encore de factures.",
     "createFirst": "Créez votre première facture →",

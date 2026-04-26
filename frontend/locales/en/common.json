@@ -17,6 +17,9 @@
     "status": {
       "all": "All",
       "pending": "Pending",
+      "awaitingverification": "Awaiting Verification",
+      "verified": "Verified",
+      "disputed": "Disputed",
       "funded": "Funded",
       "paid": "Paid",
       "defaulted": "Defaulted"
@@ -25,7 +28,9 @@
       "createdDesc": "Created date (newest)",
       "createdAsc": "Created date (oldest)",
       "amountDesc": "Amount (highest)",
-      "dueAsc": "Due date (soonest)"
+      "amountAsc": "Amount (lowest)",
+      "dueAsc": "Due date (soonest)",
+      "dueDesc": "Due date (latest)"
     },
     "noInvoices": "No invoices yet.",
     "createFirst": "Create your first invoice →",

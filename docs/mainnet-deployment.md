@@ -678,6 +678,9 @@ Create an incident response runbook:
 
 ## Step 10: Rollback Procedures
 
+For the contract timelock upgrade workflow and migration planning, see the
+[Contract Upgrade Guide](./contract-upgrade-guide.md).
+
 ### Contract Upgrade Strategy
 
 If you need to fix bugs or upgrade contracts:

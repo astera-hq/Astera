@@ -191,6 +191,8 @@ For production deployment, see the comprehensive [Mainnet Deployment Guide](docs
 - Rollback and emergency procedures
 - Post-deployment verification steps
 
+For upgrade runbooks and migration safety checks, see the [Contract Upgrade Guide](docs/contract-upgrade-guide.md).
+
 **⚠️ Important:** Mainnet deployment involves real assets. Complete all security audits and testing before deploying to production.
 
 ---
