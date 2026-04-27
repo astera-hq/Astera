@@ -238,6 +238,32 @@ export function truncateAddress(addr: string): string {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
+// ---- Stellar Explorer Deep Links (#228) ----
+
+export type ExplorerEntity = 'account' | 'transaction' | 'contract' | 'ledger';
+export type StellarNetwork = 'testnet' | 'mainnet';
+
+const EXPLORER_BASES: Record<StellarNetwork, string> = {
+  testnet: 'https://stellar.expert/explorer/testnet',
+  mainnet: 'https://stellar.expert/explorer/public',
+};
+
+/**
+ * Build a deep link to stellar.expert for any on-chain entity.
+ *
+ * @param type    - 'account' | 'transaction' | 'contract' | 'ledger'
+ * @param id      - The entity identifier (address, hash, or ledger number)
+ * @param network - 'testnet' (default) or 'mainnet'
+ */
+export function explorerUrl(
+  type: ExplorerEntity,
+  id: string,
+  network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ?? 'testnet',
+): string {
+  const base = EXPLORER_BASES[network] ?? EXPLORER_BASES.testnet;
+  return `${base}/${type}/${encodeURIComponent(id)}`;
+}
+
 // ---- BigInt handling ----
 //
 // Contract responses decoded via `scValToNative` may include `bigint` values

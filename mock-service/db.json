@@ -1,9 +1,179 @@
 {
   "invoices": [
-    { "id": 1, "amount": 1000, "status": "funded" },
-    { "id": 2, "amount": 5000, "status": "open" }
+    {
+      "id": 1,
+      "owner": "GDEV1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+      "debtor": "Acme Corp",
+      "amount": 10000000000,
+      "due_date": 1800000000,
+      "description": "Web development services Q1 2026",
+      "status": "Pending",
+      "created_at": 1700000000,
+      "funded_at": 0,
+      "paid_at": 0,
+      "grace_period_override": null,
+      "verification_hash": "",
+      "oracle_verified": false
+    },
+    {
+      "id": 2,
+      "owner": "GDEV1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+      "debtor": "Beta Industries",
+      "amount": 50000000000,
+      "due_date": 1800086400,
+      "description": "Equipment supply contract",
+      "status": "AwaitingVerification",
+      "created_at": 1700010000,
+      "funded_at": 0,
+      "paid_at": 0,
+      "grace_period_override": null,
+      "verification_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "oracle_verified": false
+    },
+    {
+      "id": 3,
+      "owner": "GDEV2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC",
+      "debtor": "Gamma Ltd",
+      "amount": 25000000000,
+      "due_date": 1800172800,
+      "description": "Consulting retainer March 2026",
+      "status": "Verified",
+      "created_at": 1700020000,
+      "funded_at": 0,
+      "paid_at": 0,
+      "grace_period_override": null,
+      "verification_hash": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
+      "oracle_verified": true
+    },
+    {
+      "id": 4,
+      "owner": "GDEV1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+      "debtor": "Delta Manufacturing",
+      "amount": 100000000000,
+      "due_date": 1800259200,
+      "description": "Raw materials purchase order #2026-04",
+      "status": "Funded",
+      "created_at": 1700030000,
+      "funded_at": 1700100000,
+      "paid_at": 0,
+      "grace_period_override": 14,
+      "verification_hash": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+      "oracle_verified": true
+    },
+    {
+      "id": 5,
+      "owner": "GDEV2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC",
+      "debtor": "Epsilon Retail",
+      "amount": 15000000000,
+      "due_date": 1750000000,
+      "description": "Marketing campaign Q4 2025",
+      "status": "Paid",
+      "created_at": 1699000000,
+      "funded_at": 1699100000,
+      "paid_at": 1750100000,
+      "grace_period_override": null,
+      "verification_hash": "d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5",
+      "oracle_verified": true
+    },
+    {
+      "id": 6,
+      "owner": "GDEV3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD",
+      "debtor": "Zeta Logistics",
+      "amount": 80000000000,
+      "due_date": 1720000000,
+      "description": "Freight contract — defaulted",
+      "status": "Defaulted",
+      "created_at": 1698000000,
+      "funded_at": 1698100000,
+      "paid_at": 0,
+      "grace_period_override": null,
+      "verification_hash": "e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6",
+      "oracle_verified": true
+    },
+    {
+      "id": 7,
+      "owner": "GDEV1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+      "debtor": "Eta Services",
+      "amount": 30000000000,
+      "due_date": 1800345600,
+      "description": "IT support contract — under dispute",
+      "status": "Disputed",
+      "created_at": 1700050000,
+      "funded_at": 1700200000,
+      "paid_at": 0,
+      "grace_period_override": null,
+      "dispute_reason": "Work not delivered as agreed in scope",
+      "verification_hash": "f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1",
+      "oracle_verified": true
+    },
+    {
+      "id": 8,
+      "owner": "GDEV2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC",
+      "debtor": "Theta Wholesale",
+      "amount": 5000000000,
+      "due_date": 1680000000,
+      "description": "Small trade invoice — expired",
+      "status": "Expired",
+      "created_at": 1679000000,
+      "funded_at": 0,
+      "paid_at": 0,
+      "grace_period_override": null,
+      "verification_hash": "",
+      "oracle_verified": false
+    }
   ],
-  "users": [
-    { "id": 1, "name": "Local Dev SME" }
+  "pool": {
+    "id": "CPOOLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "yield_bps": 800,
+    "total_deposited": 500000000000,
+    "total_deployed": 210000000000,
+    "total_repaid": 15000000000,
+    "investor_count": 2
+  },
+  "pool_token_totals": {
+    "total_shares": 500000000000,
+    "total_usdc": 500000000000,
+    "share_price_usdc": 1000000
+  },
+  "investors": [
+    {
+      "id": "GINV1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+      "shares": 300000000000,
+      "usdc_deposited": 300000000000,
+      "commitments": [
+        { "invoice_id": 4, "amount": 100000000000, "status": "active" },
+        { "invoice_id": 5, "amount": 15000000000, "status": "completed" },
+        { "invoice_id": 7, "amount": 30000000000, "status": "active" }
+      ]
+    },
+    {
+      "id": "GINV2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAF",
+      "shares": 200000000000,
+      "usdc_deposited": 200000000000,
+      "commitments": []
+    }
+  ],
+  "credit_scores": [
+    {
+      "sme": "GDEV1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+      "score": 750,
+      "grade": "Excellent",
+      "invoices_paid": 12,
+      "invoices_defaulted": 0
+    },
+    {
+      "sme": "GDEV2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC",
+      "score": 520,
+      "grade": "Fair",
+      "invoices_paid": 3,
+      "invoices_defaulted": 1
+    },
+    {
+      "sme": "GDEV3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD",
+      "score": 500,
+      "grade": "No History",
+      "invoices_paid": 0,
+      "invoices_defaulted": 0
+    }
   ]
 }

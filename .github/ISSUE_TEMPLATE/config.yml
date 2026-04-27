@@ -1,5 +1,11 @@
-blank_issues: false
+blank_issues_enabled: true
 contact_links:
+  - name: Ask a Question / Start a Discussion
+    url: https://github.com/astera-hq/Astera/discussions
+    about: For questions and open-ended discussion, use GitHub Discussions rather than issues.
   - name: Drips Wave Program
     url: https://docs.drips.network/wave
-    about: Learn more about the Drips Wave contribution program
+    about: Learn more about the Drips Wave contribution program.
+  - name: Security Vulnerabilities
+    url: https://github.com/astera-hq/Astera/blob/main/SECURITY.md
+    about: Please report security issues privately — do NOT open a public issue.

@@ -20,9 +20,24 @@ import type {
   FundedInvoice,
 } from './types';
 
+// ── Mock mode (#229) ─────────────────────────────────────────────────────────
+// Set NEXT_PUBLIC_USE_MOCK=true to read from the local json-server instead of
+// making live Soroban RPC calls. Useful for frontend-only development when no
+// Stellar node is available. See mock-service/README.md for setup instructions.
+
+const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK === 'true';
+const MOCK_API_URL = process.env.NEXT_PUBLIC_MOCK_API_URL ?? 'http://localhost:4000';
+
+async function mockFetch<T>(path: string): Promise<T> {
+  const res = await fetch(`${MOCK_API_URL}${path}`);
+  if (!res.ok) throw new Error(`Mock API error: ${res.status} ${path}`);
+  return res.json() as Promise<T>;
+}
+
 // ---- Invoice Contract ----
 
 export async function getInvoice(id: number): Promise<Invoice> {
+  if (USE_MOCK) return mockFetch<Invoice>(`/invoices/${id}`);
   const sim = await simulateTx(
     INVOICE_CONTRACT_ID,
     'get_invoice',
