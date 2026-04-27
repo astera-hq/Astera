@@ -231,3 +231,11 @@ Branch protection for `main` should be configured so that:
 To apply, in GitHub: **Settings → Branches → Branch protection rules → Add rule** for
 `main`, enable **Require status checks to pass before merging**, and select
 `Build & test Soroban contracts` from the list of checks.
+
+## 💰 Bounty Contribution
+
+- **Task:** Add SME onboarding verification — prevent duplicate SME accounts
+- **Reward:** $10
+- **Source:** GitHub-Paid
+- **Date:** 2026-04-27
+
