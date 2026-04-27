@@ -322,3 +322,5 @@ export default function PortfolioPage() {
     </div>
   );
 }
+  /* Bounty contribution */
+}
