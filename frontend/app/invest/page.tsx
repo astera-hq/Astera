@@ -375,3 +375,5 @@ export default function InvestPage() {
     </div>
   );
 }
+  /* Bounty contribution */
+}
