@@ -1,0 +1,106 @@
+# APPROACH for #221 (based on reconnaissance):
+# - CI uses 'cargo test --workspace' in 'test' job
+# - Root Cargo.toml already has criterion = "0.5" in [workspace.dependencies]
+# - Target functions located in:
+#   * deposit() - contracts/pool/src/lib.rs:108
+#   * repay_invoice() - contracts/pool/src/lib.rs:309
+#   * commit_to_invoice() - contracts/pool/src/lib.rs:207
+#   * create_invoice() - contracts/invoice/src/lib.rs:127
+#   * record_payment() - NOT FOUND (using mark_paid as alternative at contracts/invoice/src/lib.rs:189)
+# - Benchmarks already exist at benchmarks/benches/contract_benchmarks.rs
+# - Artifacts follow pattern: contract-benchmarks-${{ github.sha }}
+
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test and Benchmark Contracts
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run contract tests with timing
+        id: test
+        run: |
+          START=$(date +%s)
+          cargo test --workspace 2>&1 | tee test-output.txt
+          END=$(date +%s)
+          ELAPSED=$((END-START))
+          echo "contract_test_duration_s=${ELAPSED}" >> $GITHUB_OUTPUT
+          echo "Test suite completed in ${ELAPSED} seconds"
+
+      - name: Check test execution time
+        run: |
+          ELAPSED=${{ steps.test.outputs.contract_test_duration_s }}
+          MAX_SECONDS=120
+          echo "Test duration: ${ELAPSED}s"
+          if [ "${ELAPSED}" -gt "${MAX_SECONDS}" ]; then
+            echo "⚠️  WARNING: Tests took ${ELAPSED}s, exceeding ${MAX_SECONDS}s threshold"
+          else
+            echo "✅ Tests completed within ${MAX_SECONDS}s threshold"
+          fi
+
+      - name: Run benchmarks
+        run: cargo bench --bench contract_benchmarks
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-benchmarks-${{ github.sha }}
+          path: |
+            target/criterion/
+            test-output.txt
+          retention-days: 30
+
+  lint:
+    name: Lint and Format
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --check --all
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
