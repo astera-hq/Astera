@@ -53,5 +53,3 @@ export default function ThemeProvider({ children }: { children: React.ReactNode 
 
   return <ThemeContext.Provider value={{ theme, toggleTheme }}>{children}</ThemeContext.Provider>;
 }
-  /* Added by bounty-bot */
-}

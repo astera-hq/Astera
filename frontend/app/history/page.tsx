@@ -187,7 +187,15 @@ function formatTs(ts: string): string {
 }
 
 function exportCSV(events: HistoryEvent[]) {
-  const header = ['Date', 'Type', 'Invoice ID', 'Amount (USD)', 'Interest (USD)', 'Address', 'Tx Hash'];
+  const header = [
+    'Date',
+    'Type',
+    'Invoice ID',
+    'Amount (USD)',
+    'Interest (USD)',
+    'Address',
+    'Tx Hash',
+  ];
   const rows = events.map((e) => [
     e.timestamp ? new Date(e.timestamp).toISOString() : '',
     KIND_LABELS[e.kind],
@@ -301,7 +309,7 @@ export default function HistoryPage() {
   }
 
   return (
-    <div className="min-h-screen pt-24 pb-16 px-6">
+    <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-3xl mx-auto">
         <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -413,6 +421,4 @@ export default function HistoryPage() {
       </div>
     </div>
   );
-}
-  /* Added by bounty-bot */
 }

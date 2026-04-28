@@ -166,10 +166,10 @@ export default function AdminExchangeRatesPage() {
       <div className="p-4 bg-brand-dark border border-brand-border rounded-xl text-xs text-brand-muted space-y-1">
         <p>• Default rate is 10000 bps (100% of USD = 1:1).</p>
         <p>• EURC at 1.08 USD would be entered as 108 (= 10800 bps internally).</p>
-        <p>• Rates are used for display/reporting only; pool accounting stays in native token units.</p>
+        <p>
+          • Rates are used for display/reporting only; pool accounting stays in native token units.
+        </p>
       </div>
     </div>
   );
-}
-  /* Bounty contribution */
 }

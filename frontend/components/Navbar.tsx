@@ -1,9 +1,13 @@
 'use client';
 
+import { useState, useEffect, useRef } from 'react';
 import { useTranslations, useLocale } from 'next-intl';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { setStoredLocale } from '@/lib/i18n';
+import NotificationBell from '@/components/NotificationBell';
+import ThemeToggle from '@/components/ThemeToggle';
+import WalletConnect from '@/components/WalletConnect';
 
 function LanguageSelector() {
   const locale = useLocale();

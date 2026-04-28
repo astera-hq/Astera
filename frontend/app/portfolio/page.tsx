@@ -165,7 +165,9 @@ export default function PortfolioPage() {
           disabled={loading}
           className="flex items-center gap-2 px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm text-white hover:bg-brand-border transition-colors disabled:opacity-50"
         >
-          {loading ? <span className="w-4 h-4 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" /> : null}
+          {loading ? (
+            <span className="w-4 h-4 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" />
+          ) : null}
           Refresh
         </button>
       </div>
@@ -321,6 +323,4 @@ export default function PortfolioPage() {
       )}
     </div>
   );
-}
-  /* Bounty contribution */
 }

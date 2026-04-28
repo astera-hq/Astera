@@ -1,11 +1,10 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef, startTransition } from 'react';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { usePathname, useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
-import { useDebounce } from '@/lib/hooks';
 import InvoiceCard from '@/components/InvoiceCard';
 import { StatCardSkeleton, InvoiceCardSkeleton } from '@/components/Skeleton';
 import CreditScore from '@/components/CreditScore';
@@ -52,9 +51,6 @@ export default function DashboardPage() {
   const [sort, setSort] = useState<SortOption>('created-desc');
   const [hydrated, setHydrated] = useState(false);
 
-  /** Debounced search value (300ms) to avoid excessive filtering on every keystroke */
-  const debouncedSearch = useDebounce(search, 300);
-
   const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
 
   const SORT_OPTIONS: { value: SortOption; label: string }[] = [
@@ -96,10 +92,12 @@ export default function DashboardPage() {
       ? (initialSort as SortOption)
       : 'created-desc';
 
-    setSearch(q);
-    setDebouncedSearch(q);
-    setStatusFilters(initialStatuses);
-    setSort(initialSortValue);
+    startTransition(() => {
+      setSearch(q);
+      setDebouncedSearch(q);
+      setStatusFilters(initialStatuses);
+      setSort(initialSortValue);
+    });
   }, [hydrated]);
 
   useEffect(() => {
@@ -114,12 +112,12 @@ export default function DashboardPage() {
 
     const params = new URLSearchParams();
     if (debouncedSearch.trim()) params.set('q', debouncedSearch.trim());
-    if (statusFilter !== 'All') params.set('status', statusFilter);
+    if (statusFilters.length > 0) params.set('status', statusFilters.join(','));
     if (sort !== 'created-desc') params.set('sort', sort);
 
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  }, [hydrated, pathname, router, debouncedSearch, sort, statusFilter]);
+  }, [hydrated, pathname, router, debouncedSearch, sort, statusFilters]);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -289,30 +287,30 @@ export default function DashboardPage() {
     }
 
     return result;
-  }, [invoices, debouncedSearch, statusFilter, sort]);
+  }, [invoices, debouncedSearch, statusFilters, sort]);
 
   const isFiltered = debouncedSearch.trim() !== '' || statusFilters.length > 0;
 
   return (
-    <div className="min-h-screen pt-24 pb-16 px-6">
+    <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
-        <div className="flex items-center justify-between mb-8">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
           <div>
-            <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
-            <p className="text-brand-muted">{t('description')}</p>
+            <h1 className="text-2xl sm:text-3xl font-bold mb-1">{t('title')}</h1>
+            <p className="text-brand-muted text-sm">{t('description')}</p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <button
               onClick={() => setShowOnboarding(true)}
-              className="px-4 py-2 text-brand-muted hover:text-white transition-colors text-sm"
+              className="min-h-[44px] px-4 py-2 text-brand-muted hover:text-white transition-colors text-sm"
             >
               {t('help')}
             </button>
             {wallet.connected && (
               <Link
                 href="/invoice/new"
-                className="px-5 py-2.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors"
+                className="min-h-[44px] flex items-center px-5 py-2.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors text-sm"
               >
                 {t('newInvoice')}
               </Link>
@@ -333,7 +331,11 @@ export default function DashboardPage() {
               {/* Quick stats */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                 {[
-                  { label: t('stats.totalVolume'), value: formatUSDC(stats.totalVolume), highlight: true },
+                  {
+                    label: t('stats.totalVolume'),
+                    value: formatUSDC(stats.totalVolume),
+                    highlight: true,
+                  },
                   { label: t('stats.pending'), value: stats.pending.toString() },
                   { label: t('stats.funded'), value: stats.funded.toString() },
                   { label: t('stats.paid'), value: stats.paid.toString() },
@@ -387,11 +389,11 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Status tabs + Sort */}
-                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                <div className="flex flex-col gap-3 mb-4">
                   <div className="flex gap-1 flex-wrap">
                     <button
                       onClick={() => setStatusFilters([])}
-                      className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                      className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
                         statusFilters.length === 0
                           ? 'bg-brand-gold text-brand-dark'
                           : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
@@ -404,10 +406,12 @@ export default function DashboardPage() {
                         key={tab}
                         onClick={() =>
                           setStatusFilters((prev) =>
-                            prev.includes(tab) ? prev.filter((item) => item !== tab) : [...prev, tab],
+                            prev.includes(tab)
+                              ? prev.filter((item) => item !== tab)
+                              : [...prev, tab],
                           )
                         }
-                        className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                        className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
                           statusFilters.includes(tab)
                             ? 'bg-brand-gold text-brand-dark'
                             : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
@@ -421,7 +425,7 @@ export default function DashboardPage() {
                   <select
                     value={sort}
                     onChange={(e) => setSort(e.target.value as SortOption)}
-                    className="bg-brand-dark border border-brand-border rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-gold cursor-pointer"
+                    className="w-full sm:w-auto bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-gold cursor-pointer min-h-[36px]"
                   >
                     {SORT_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>

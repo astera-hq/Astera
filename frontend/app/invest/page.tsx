@@ -172,7 +172,7 @@ export default function InvestPage() {
   }
 
   return (
-    <div className="min-h-screen pt-24 pb-16 px-6">
+    <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-5xl mx-auto">
         <div className="mb-8">
           <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
@@ -208,7 +208,11 @@ export default function InvestPage() {
                       highlight: true,
                     },
                     { label: t('stats.currentlyDeployed'), value: formatUSDC(position.deployed) },
-                    { label: t('stats.totalEarned'), value: formatUSDC(position.earned), highlight: true },
+                    {
+                      label: t('stats.totalEarned'),
+                      value: formatUSDC(position.earned),
+                      highlight: true,
+                    },
                   ].map((r) => (
                     <div key={r.label} className="flex justify-between items-center text-sm">
                       <span className="text-brand-muted">{r.label}</span>
@@ -302,11 +306,13 @@ export default function InvestPage() {
                     </div>
                     {mode === 'withdraw' && position && (
                       <p className="text-xs text-brand-muted mt-1">
-                        {t('available', { amount: formatUSDC(position.available), token: stablecoinLabel(selectedToken) })}
+                        {t('available', {
+                          amount: formatUSDC(position.available),
+                          token: stablecoinLabel(selectedToken),
+                        })}
                       </p>
                     )}
                   </div>
-
 
                   {txStatus !== 'idle' && (
                     <div
@@ -346,7 +352,9 @@ export default function InvestPage() {
                     }
                     className="w-full py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 capitalize"
                   >
-                    {txLoading ? t('processing') : `${t(`modes.${mode}`)} ${stablecoinLabel(selectedToken)}`}
+                    {txLoading
+                      ? t('processing')
+                      : `${t(`modes.${mode}`)} ${stablecoinLabel(selectedToken)}`}
                   </button>
                   {txStatus === 'failed' && (
                     <button
@@ -362,9 +370,7 @@ export default function InvestPage() {
 
                 <div className="mt-6 p-4 bg-brand-dark border border-brand-border rounded-xl text-xs text-brand-muted space-y-1">
                   <p>• {t('notes.stablecoin')}</p>
-                  <p>
-                    • {t('notes.repayment')}
-                  </p>
+                  <p>• {t('notes.repayment')}</p>
                   <p>• {t('notes.withdrawal')}</p>
                 </div>
               </>
@@ -374,6 +380,4 @@ export default function InvestPage() {
       </div>
     </div>
   );
-}
-  /* Bounty contribution */
 }

@@ -20,12 +20,12 @@ const SME_STEPS = [
   {
     title: 'Connect Your Wallet',
     content:
-      'Connect your Freighter wallet to get started. Freighter is a browser extension for the Stellar network — install it from the Chrome Web Store if you haven't already.',
+      "Connect your Freighter wallet to get started. Freighter is a browser extension for the Stellar network — install it from the Chrome Web Store if you haven't already.",
   },
   {
     title: 'Create Your First Invoice',
     content:
-      'Go to the Invoice page and fill in your debtor's name, invoice amount, and due date. You'll need your debtor's information and the amount owed to you.',
+      "Go to the Invoice page and fill in your debtor's name, invoice amount, and due date. You'll need your debtor's information and the amount owed to you.",
   },
   {
     title: 'Wait for Verification',
@@ -35,7 +35,7 @@ const SME_STEPS = [
   {
     title: 'Receive Your Funds',
     content:
-      'Once funded, you'll receive USDC directly to your connected wallet. Repay the invoice when your customer settles — and you're done!',
+      "Once funded, you'll receive USDC directly to your connected wallet. Repay the invoice when your customer settles — and you're done!",
   },
 ];
 
@@ -48,7 +48,7 @@ const INVESTOR_STEPS = [
   {
     title: 'Connect Your Wallet',
     content:
-      'Connect your Freighter wallet to access the investor dashboard. Freighter is a Stellar browser extension — install it if you haven't already.',
+      "Connect your Freighter wallet to access the investor dashboard. Freighter is a Stellar browser extension — install it if you haven't already.",
   },
   {
     title: 'Deposit USDC',
@@ -189,7 +189,7 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
           {role === null ? (
             <div className="space-y-4">
               <p className="text-brand-muted text-sm">
-                Tell us how you'll use Astera so we can show you the right guide.
+                Tell us how you&apos;ll use Astera so we can show you the right guide.
               </p>
               <div className="grid grid-cols-2 gap-4">
                 <button
@@ -197,12 +197,12 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
                   className="flex flex-col items-center gap-3 p-5 bg-brand-card border border-brand-border rounded-xl hover:border-brand-gold transition-colors text-left"
                   aria-label="I am an SME seeking invoice financing"
                 >
-                  <span className="text-3xl" aria-hidden="true">🏢</span>
+                  <span className="text-3xl" aria-hidden="true">
+                    🏢
+                  </span>
                   <div>
                     <p className="font-semibold text-sm">SME / Business</p>
-                    <p className="text-xs text-brand-muted mt-1">
-                      I want to finance my invoices
-                    </p>
+                    <p className="text-xs text-brand-muted mt-1">I want to finance my invoices</p>
                   </div>
                 </button>
                 <button
@@ -210,7 +210,9 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
                   className="flex flex-col items-center gap-3 p-5 bg-brand-card border border-brand-border rounded-xl hover:border-brand-gold transition-colors text-left"
                   aria-label="I am an investor looking to earn yield"
                 >
-                  <span className="text-3xl" aria-hidden="true">💰</span>
+                  <span className="text-3xl" aria-hidden="true">
+                    💰
+                  </span>
                   <div>
                     <p className="font-semibold text-sm">Investor</p>
                     <p className="text-xs text-brand-muted mt-1">
@@ -231,7 +233,10 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
           ) : (
             <>
               {/* Step indicator */}
-              <div className="flex items-center justify-center mb-6" aria-label={`Step ${currentStep + 1} of ${totalSteps}`}>
+              <div
+                className="flex items-center justify-center mb-6"
+                aria-label={`Step ${currentStep + 1} of ${totalSteps}`}
+              >
                 <div className="flex items-center space-x-2">
                   {steps.map((_, index) => (
                     <div
