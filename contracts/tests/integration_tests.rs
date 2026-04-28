@@ -4,6 +4,7 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env, String,
 };
+use std::panic;
 
 // Import contract clients
 mod invoice {
@@ -561,6 +562,146 @@ fn test_collateral_seize_on_default() {
     // SME cannot seize again (collateral already settled)
     let result = pool_client.try_seize_collateral(&admin, &1u64);
     assert_eq!(result, Err(Ok(pool::Error::CollateralAlreadySettled)));
+}
+
+#[test]
+fn test_credit_score_on_time_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    credit_client.initialize(&admin, &invoice_id, &pool);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let before = credit_client.get_credit_score(&sme);
+    credit_client.record_payment(&pool, &inv_id, &sme, &2_000i128, &due_date, &(due_date - 100));
+    let after = credit_client.get_credit_score(&sme);
+    assert_eq!(after.paid_on_time, 1);
+    assert_eq!(after.score - before.score, 30);
+}
+
+#[test]
+fn test_credit_score_late_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    credit_client.initialize(&admin, &invoice_id, &pool);
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let before = credit_client.get_credit_score(&sme);
+    credit_client.record_payment(&pool, &inv_id, &sme, &2_000i128, &due_date, &(due_date + 3600));
+    let after = credit_client.get_credit_score(&sme);
+    assert_eq!(after.paid_late, 1);
+    assert_eq!(after.score - before.score, 15);
+}
+
+#[test]
+fn test_credit_score_default_penalty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    credit_client.initialize(&admin, &invoice_id, &pool);
+    let due_date = 200_000u64;
+    let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let before = credit_client.get_credit_score(&sme);
+    credit_client.record_default(&pool, &inv_id, &sme, &2_000i128, &due_date);
+    let after = credit_client.get_credit_score(&sme);
+    assert_eq!(after.defaulted, 1);
+    assert_eq!(after.score - before.score, -50);
+}
+
+#[test]
+fn test_payment_history_idempotency() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    credit_client.initialize(&admin, &invoice_id, &pool);
+    let due_date = 200_000u64;
+    let inv_id = invoice_client.create_invoice(&sme, &String::from_str(&env, "ACME"), &2_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    credit_client.record_payment(&pool, &inv_id, &sme, &2_000i128, &due_date, &(due_date - 1));
+    let before = credit_client.get_credit_score(&sme);
+    let _ = panic::catch_unwind(|| {
+        credit_client.record_payment(&pool, &inv_id, &sme, &2_000i128, &due_date, &(due_date - 1));
+    });
+    let after = credit_client.get_credit_score(&sme);
+    assert_eq!(before.score, after.score);
+}
+
+#[test]
+fn test_credit_score_multiple_invoices() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    credit_client.initialize(&admin, &invoice_id, &pool);
+    let due_date = 300_000u64;
+    let i1 = invoice_client.create_invoice(&sme, &String::from_str(&env, "A"), &1_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let i2 = invoice_client.create_invoice(&sme, &String::from_str(&env, "B"), &1_000i128, &due_date, &String::from_str(&env, "i2"), &String::from_str(&env, "h2"));
+    let i3 = invoice_client.create_invoice(&sme, &String::from_str(&env, "C"), &1_000i128, &due_date, &String::from_str(&env, "i3"), &String::from_str(&env, "h3"));
+    credit_client.record_payment(&pool, &i1, &sme, &1_000i128, &due_date, &(due_date - 10));
+    credit_client.record_payment(&pool, &i2, &sme, &1_000i128, &due_date, &(due_date - 10));
+    credit_client.record_default(&pool, &i3, &sme, &1_000i128, &due_date);
+    let score = credit_client.get_credit_score(&sme);
+    assert_eq!(score.score, 510);
+}
+
+#[test]
+fn test_get_payment_history() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    invoice_client.initialize(&admin, &pool, &10_000_000_000i128, &(30u64 * 86_400u64));
+    credit_client.initialize(&admin, &invoice_id, &pool);
+    let due_date = 300_000u64;
+    let i1 = invoice_client.create_invoice(&sme, &String::from_str(&env, "A"), &1_000i128, &due_date, &String::from_str(&env, "i1"), &String::from_str(&env, "h1"));
+    let i2 = invoice_client.create_invoice(&sme, &String::from_str(&env, "B"), &1_000i128, &due_date, &String::from_str(&env, "i2"), &String::from_str(&env, "h2"));
+    credit_client.record_payment(&pool, &i1, &sme, &1_000i128, &due_date, &(due_date - 10));
+    credit_client.record_default(&pool, &i2, &sme, &1_000i128, &due_date);
+    let history = credit_client.get_payment_history(&sme);
+    assert_eq!(history.len(), 2);
 }
 
 /// Integration test: Collateral not required below threshold

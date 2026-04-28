@@ -32,6 +32,8 @@ export interface Invoice {
   fundedAt: number;
   paidAt: number;
   poolContract: string;
+  verificationHash?: string;
+  metadataUri?: string | null;
 }
 
 export interface InvestorPosition {

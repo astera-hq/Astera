@@ -24,6 +24,7 @@ const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7; // 7 days default grace period
 const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 30; // per-invoice cap (#230)
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
+const MAX_METADATA_URI_LEN: u32 = 256;
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -61,6 +62,7 @@ pub struct Invoice {
     pub paid_at: u64,
     pub pool_contract: Address,
     pub verification_hash: String,
+    pub metadata_uri: Option<String>,
     pub oracle_verified: bool,
     pub dispute_reason: String,
     /// Timestamp when the invoice entered `Disputed` status, or 0 if never disputed.
@@ -230,6 +232,19 @@ fn require_not_paused(env: &Env) {
     {
         panic!("contract is paused");
     }
+}
+
+fn is_valid_metadata_uri(env: &Env, uri: &String) -> bool {
+    let bytes = uri.to_bytes();
+    if bytes.len() == 0 || bytes.len() > MAX_METADATA_URI_LEN {
+        return false;
+    }
+    let ipfs = String::from_str(env, "ipfs://").to_bytes();
+    let ar = String::from_str(env, "ar://").to_bytes();
+    let https = String::from_str(env, "https://").to_bytes();
+    (bytes.len() >= ipfs.len() && bytes.slice(0..ipfs.len()) == ipfs)
+        || (bytes.len() >= ar.len() && bytes.slice(0..ar.len()) == ar)
+        || (bytes.len() >= https.len() && bytes.slice(0..https.len()) == https)
 }
 
 fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
@@ -590,6 +605,28 @@ impl InvoiceContract {
         description: String,
         verification_hash: String,
     ) -> u64 {
+        Self::create_invoice_with_metadata(
+            env,
+            owner,
+            debtor,
+            amount,
+            due_date,
+            description,
+            verification_hash,
+            None,
+        )
+    }
+
+    pub fn create_invoice_with_metadata(
+        env: Env,
+        owner: Address,
+        debtor: String,
+        amount: i128,
+        due_date: u64,
+        description: String,
+        verification_hash: String,
+        metadata_uri: Option<String>,
+    ) -> u64 {
         owner.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
@@ -694,6 +731,7 @@ impl InvoiceContract {
             paid_at: 0,
             pool_contract: pool_addr,
             verification_hash,
+            metadata_uri: metadata_uri.clone(),
             oracle_verified: false,
             dispute_reason: empty_str,
             disputed_at: 0,
@@ -715,8 +753,10 @@ impl InvoiceContract {
         stats.active_invoices += 1;
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        env.events()
-            .publish((EVT, symbol_short!("created")), (id, owner, amount));
+        env.events().publish(
+            (EVT, symbol_short!("created")),
+            (id, owner, amount, metadata_uri),
+        );
 
         id
     }
@@ -2857,3 +2897,8 @@ mod test {
         (client, admin, pool, owner)
     }
 }
+        if let Some(uri) = metadata_uri.clone() {
+            if !is_valid_metadata_uri(&env, &uri) {
+                panic!("invalid metadata uri");
+            }
+        }
