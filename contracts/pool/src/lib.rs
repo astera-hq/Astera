@@ -55,6 +55,7 @@ pub enum PoolError {
     WithdrawalCooldownActive = 19,
     // #247
     InsufficientCoFundShare = 20,
+    InsufficientLiquidity = 24,
     // #217: withdrawal queue errors
     WithdrawalRequestNotFound = 21,
     AlreadyQueuedForWithdrawal = 22,
@@ -391,7 +392,7 @@ fn fund_invoice_request(
         .unwrap_or_default();
     let available_liquidity = tt.pool_value - tt.total_deployed;
     if available_liquidity < request.principal {
-        return Err(PoolError::InvalidAmount);
+        return Err(PoolError::InsufficientLiquidity);
     }
 
     let now = env.ledger().timestamp();

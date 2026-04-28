@@ -8,6 +8,7 @@ import ConfirmActionModal from '@/components/ConfirmActionModal';
 import {
   getMultipleInvoices,
   getInvoiceCount,
+  getPoolTokenTotals,
   buildInitCoFundingTx,
   submitTx,
 } from '@/lib/contracts';
@@ -32,6 +33,7 @@ export default function AdminInvoicesPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [totalCount, setTotalCount] = useState(0);
+  const [availableLiquidity, setAvailableLiquidity] = useState<bigint | null>(null);
   const [scannedCount, setScannedCount] = useState(0);
   const [modalState, setModalState] = useState<ModalState>({
     isOpen: false,
@@ -93,6 +95,14 @@ export default function AdminInvoicesPage() {
   useEffect(() => {
     loadInvoices();
   }, [loadInvoices]);
+
+  useEffect(() => {
+    const token = process.env.NEXT_PUBLIC_USDC_TOKEN_ID;
+    if (!token) return;
+    getPoolTokenTotals(token)
+      .then((totals) => setAvailableLiquidity(totals.totalDeposited - totals.totalDeployed))
+      .catch(() => setAvailableLiquidity(null));
+  }, []);
 
   function openApproveModal(invoice: Invoice) {
     setModalState({ isOpen: true, invoice, action: 'approve' });
@@ -216,6 +226,11 @@ export default function AdminInvoicesPage() {
                     </td>
                     <td className="px-6 py-4 font-bold text-white whitespace-nowrap">
                       {formatUSDC(inv.amount)}
+                      {availableLiquidity !== null && availableLiquidity < inv.amount && (
+                        <span className="ml-2 inline-flex items-center rounded-full bg-yellow-500/20 px-2 py-0.5 text-[10px] font-semibold text-yellow-300">
+                          Low Liquidity
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex flex-col">
