@@ -190,6 +190,10 @@ Where the `type` is one of:
 | `refactor` | Non-functional code changes |
 | `test` | Adding or updating tests |
 | `style` | Formatting, whitespace (no logic changes) |
+| `ci` | CI/CD changes |
+| `build` | Build system changes |
+| `perf` | Performance improvements |
+| `revert` | Revert previous changes |
 
 Examples:
 
@@ -199,6 +203,12 @@ fix(pool): resolve withdraw edge case
 docs: update API endpoint details
 test(pool): add co-funding edge case tests
 ```
+
+## 📋 Changelog
+
+This project maintains a `CHANGELOG.md` following the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. Releases are versioned using [Semantic Versioning](https://semver.org/spec/v2.0.0.html). When opening a PR that introduces a user-facing change, please ensure the change is reflected in the `Unreleased` section of `CHANGELOG.md` under the appropriate category (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, or `Security`).
+
+Release notes are generated automatically from conventional commits using `git-cliff` when a version tag (`v*`) is pushed.
 
 ---
 
@@ -231,9 +241,11 @@ Before opening a PR, make sure you:
 - [ ] Code is formatted consistently (`cargo fmt`, Prettier)
 - [ ] Linting passes (`cargo clippy`, `npm run lint`)
 - [ ] Commit messages follow Conventional Commits
+- [ ] PR title follows the `type(scope): description` format
 - [ ] PR description clearly explains the change
 - [ ] New public contract functions include tests
 - [ ] No secrets or `.env.local` committed
+- [ ] `CHANGELOG.md` updated under the `Unreleased` section if the change is user-facing
 
 ### PR Description Template
 
