@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useStore, getStoredWalletAddress } from '@/lib/store';
+import { getEnvConfig } from '@/lib/env';
 import toast from 'react-hot-toast';
 import { truncateAddress } from '@/lib/stellar';
 import LoadingSpinner from '@/components/LoadingSpinner';
@@ -17,8 +18,37 @@ const STEP_LABELS: Record<WalletStep, string> = {
 
 const MAX_RETRIES = 2;
 
+// Network mismatch detection function
+async function checkNetworkMismatch(): Promise<{
+  isMismatched: boolean;
+  walletNetwork: string | null;
+  appNetwork: string | null;
+}> {
+  try {
+    const freighter = await import('@stellar/freighter-api');
+    const { network } = await freighter.getNetwork();
+    const envConfig = getEnvConfig();
+    const appNetwork = envConfig.NEXT_PUBLIC_NETWORK;
+
+    const isMatch = network.toLowerCase() === appNetwork.toLowerCase();
+
+    return {
+      isMismatched: !isMatch,
+      walletNetwork: network,
+      appNetwork,
+    };
+  } catch (error) {
+    console.error('[WalletConnect] Failed to check network:', error);
+    return {
+      isMismatched: false,
+      walletNetwork: null,
+      appNetwork: null,
+    };
+  }
+}
+
 export default function WalletConnect() {
-  const { wallet, setWallet, disconnect } = useStore();
+  const { wallet, setWallet, disconnect, setNetworkMismatch } = useStore();
   const [step, setStep] = useState<WalletStep>('idle');
   const [retryCount, setRetryCount] = useState(0);
 
@@ -40,6 +70,10 @@ export default function WalletConnect() {
 
         const { address, error: addrError } = await freighter.getAddress();
         if (addrError || !address) return;
+
+        // Check for network mismatch on auto-reconnect
+        const networkCheck = await checkNetworkMismatch();
+        setNetworkMismatch(networkCheck);
 
         setWallet({ address, connected: true, network: 'testnet' });
       } catch {
@@ -74,6 +108,10 @@ export default function WalletConnect() {
         setStep('idle');
         return;
       }
+
+      // Check for network mismatch
+      const networkCheck = await checkNetworkMismatch();
+      setNetworkMismatch(networkCheck);
 
       setWallet({ address, connected: true, network: 'testnet' });
       toast.success('Wallet connected successfully!');

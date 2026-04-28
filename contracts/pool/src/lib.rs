@@ -55,11 +55,10 @@ pub enum PoolError {
     WithdrawalCooldownActive = 19,
     // #247
     InsufficientCoFundShare = 20,
-    // #233
-    ConcentrationLimitExceeded = 21,
-    // #227
-    YieldChangeNotReady = 22,
-    YieldProposalNotFound = 23,
+    // #217: withdrawal queue errors
+    WithdrawalRequestNotFound = 21,
+    AlreadyQueuedForWithdrawal = 22,
+    InvalidRequestId = 23,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -90,6 +89,16 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithdrawalRequest {
+    pub investor: Address,
+    pub token: Address,
+    pub shares: i128,
+    pub requested_at: u64,
+    pub request_id: u64,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -246,6 +255,10 @@ pub enum DataKey {
     ContractVersion,
     /// Migration level, incremented per migration run (#237).
     MigrationVersion,
+    /// Withdrawal queue for low-liquidity scenarios (#217)
+    WithdrawalQueue(Address),
+    /// Withdrawal request data (#217)
+    WithdrawalRequest(Address, u64), // (investor, request_id)
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -837,6 +850,249 @@ impl FundingPool {
         Ok(())
     }
 
+    /// Request a withdrawal when liquidity is insufficient (#217)
+    /// 
+    /// If liquidity is available, processes immediately like withdraw()
+    /// If not, queues the request for FIFO processing when funds become available
+    pub fn request_withdrawal(env: Env, investor: Address, token: Address, shares: i128) -> PoolResult<u64> {
+        investor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if shares <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        Self::assert_accepted_token(&env, &token)?;
+
+        // Check if investor already has a pending request for this token
+        let queue_key = DataKey::WithdrawalQueue(token.clone());
+        let mut queue: Vec<WithdrawalRequest> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or_default();
+        
+        for request in queue.iter() {
+            if request.investor == investor {
+                return Err(PoolError::AlreadyQueuedForWithdrawal);
+            }
+        }
+
+        Self::non_reentrant_start(&env);
+
+        let share_token_key = DataKey::ShareToken(token.clone());
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let share_token: Address = env
+            .storage()
+            .instance()
+            .get(&share_token_key)
+            .ok_or(PoolError::ShareTokenNotConfigured)?;
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+
+        let mut bal_args = Vec::new(&env);
+        bal_args.push_back(investor.clone().into_val(&env));
+        let share_balance: i128 =
+            env.invoke_contract(&share_token, &Symbol::new(&env, "balance"), bal_args);
+        if share_balance < shares {
+            Self::non_reentrant_end(&env);
+            return Err(PoolError::InvalidAmount);
+        }
+
+        let amount = (shares * tt.pool_value) / tt.total_shares;
+        let available_liquidity = tt.pool_value - tt.total_deployed;
+
+        let now = env.ledger().timestamp();
+        
+        if available_liquidity >= amount {
+            // Sufficient liquidity - process immediately
+            Self::process_immediate_withdrawal(&env, investor, token, shares, amount, tt, share_token)?;
+        } else {
+            // Insufficient liquidity - queue the request
+            let request_id = Self::generate_request_id(&env, &token);
+            let request = WithdrawalRequest {
+                investor: investor.clone(),
+                token: token.clone(),
+                shares,
+                requested_at: now,
+                request_id,
+            };
+            
+            queue.push_back(request);
+            env.storage().persistent().set(&queue_key, &queue);
+            
+            // Store individual request for lookup
+            let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
+            env.storage().persistent().set(&request_key, &request);
+            
+            env.events()
+                .publish((EVT, symbol_short!("withdrawal_queued")), (investor, shares, request_id));
+        }
+
+        Self::non_reentrant_end(&env);
+        Ok(request_id)
+    }
+
+    /// Cancel a pending withdrawal request
+    pub fn cancel_withdrawal_request(env: Env, investor: Address, request_id: u64) -> PoolResult<()> {
+        investor.require_auth();
+        bump_instance(&env);
+        
+        let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
+        let request: WithdrawalRequest = env
+            .storage()
+            .persistent()
+            .get(&request_key)
+            .ok_or(PoolError::WithdrawalRequestNotFound)?;
+        
+        // Remove from queue
+        let queue_key = DataKey::WithdrawalQueue(request.token.clone());
+        let mut queue: Vec<WithdrawalRequest> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or_default();
+        
+        let mut new_queue = Vec::new(&env);
+        for req in queue.iter() {
+            if !(req.investor == investor && req.request_id == request_id) {
+                new_queue.push_back(req);
+            }
+        }
+        env.storage().persistent().set(&queue_key, &new_queue);
+        
+        // Remove individual request
+        env.storage().persistent().remove(&request_key);
+        
+        env.events()
+            .publish((EVT, symbol_short!("withdrawal_cancelled")), (investor, request_id));
+        Ok(())
+    }
+
+    /// Get the current withdrawal queue for a token
+    pub fn get_withdrawal_queue(env: Env, token: Address) -> Vec<WithdrawalRequest> {
+        bump_instance(&env);
+        let queue_key = DataKey::WithdrawalQueue(token);
+        env.storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or_default()
+    }
+
+    /// Process withdrawal immediately (helper function)
+    fn process_immediate_withdrawal(
+        env: &Env,
+        investor: Address,
+        token: Address,
+        shares: i128,
+        amount: i128,
+        mut tt: PoolTokenTotals,
+        share_token: Address,
+    ) -> PoolResult<()> {
+        // Burn shares FIRST
+        let mut burn_args = Vec::new(env);
+        burn_args.push_back(investor.clone().into_val(env));
+        burn_args.push_back(shares.into_val(env));
+        let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "burn"), burn_args);
+
+        // Update state
+        tt.pool_value -= amount;
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        env.storage().instance().set(&token_totals_key, &tt);
+
+        // Transfer LAST
+        let token_client = token::Client::new(env, &token);
+        token_client.transfer(&env.current_contract_address(), &investor, &amount);
+
+        env.events()
+            .publish((EVT, symbol_short!("withdrawal_fulfilled")), (investor, amount, shares));
+        Ok(())
+    }
+
+    /// Generate unique request ID for withdrawal requests
+    fn generate_request_id(env: &Env, token: &Address) -> u64 {
+        let counter_key = DataKey::WithdrawalQueue(token.clone());
+        let current_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&counter_key)
+            .unwrap_or(0);
+        let new_id = current_count + 1;
+        env.storage().persistent().set(&counter_key, &new_id);
+        new_id
+    }
+
+    /// Process withdrawal queue after repayments (call from repay_invoice)
+    fn process_withdrawal_queue(env: &Env, token: Address, available_amount: i128) -> PoolResult<()> {
+        let queue_key = DataKey::WithdrawalQueue(token.clone());
+        let mut queue: Vec<WithdrawalRequest> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or_default();
+        
+        if queue.is_empty() {
+            return Ok(());
+        }
+
+        let mut processed = Vec::new(env);
+        let mut remaining_amount = available_amount;
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token.clone()))
+            .unwrap_or_default();
+
+        for request in queue.iter() {
+            let request_amount = (request.shares * tt.pool_value) / tt.total_shares;
+            if remaining_amount >= request_amount {
+                // Process this request
+                let share_token_key = DataKey::ShareToken(token.clone());
+                let share_token: Address = env
+                    .storage()
+                    .instance()
+                    .get(&share_token_key)
+                    .ok_or(PoolError::ShareTokenNotConfigured)?;
+                
+                // Burn shares
+                let mut burn_args = Vec::new(env);
+                burn_args.push_back(request.investor.clone().into_val(env));
+                burn_args.push_back(request.shares.into_val(env));
+                let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "burn"), burn_args);
+
+                // Update pool totals
+                tt.pool_value -= request_amount;
+                remaining_amount -= request_amount;
+
+                // Transfer tokens
+                let token_client = token::Client::new(env, &token);
+                token_client.transfer(&env.current_contract_address(), &request.investor, &request_amount);
+
+                // Remove individual request
+                let request_key = DataKey::WithdrawalRequest(request.investor.clone(), request.request_id);
+                env.storage().persistent().remove(&request_key);
+
+                env.events()
+                    .publish((EVT, symbol_short!("withdrawal_fulfilled")), 
+                             (request.investor, request_amount, request.shares));
+            } else {
+                // Can't process this request, keep it in queue
+                processed.push_back(request);
+            }
+        }
+
+        // Update queue with remaining unprocessed requests
+        env.storage().persistent().set(&queue_key, &processed);
+        
+        // Update token totals
+        let token_totals_key = DataKey::TokenTotals(token);
+        env.storage().instance().set(&token_totals_key, &tt);
+        
+        Ok(())
+    }
+
     /// Claim accrued yield for `investor` on `token`.
     ///
     /// Uses a reward-per-share accumulator pattern: each fully-repaid invoice
@@ -1122,6 +1378,13 @@ impl FundingPool {
         Self::non_reentrant_end(&env); // <- ADD GUARD END
 
         if fully_repaid {
+            // #217: Process withdrawal queue after repayment
+            let available_amount = total_interest as i128 + record.factoring_fee;
+            if let Err(e) = Self::process_withdrawal_queue(&env, record.token.clone(), available_amount) {
+                // Log error but don't fail the repayment
+                env.logs().add(&format!("Failed to process withdrawal queue: {:?}", e));
+            }
+
             env.events().publish(
                 (EVT, symbol_short!("repaid")),
                 (invoice_id, record.principal, total_interest as i128),

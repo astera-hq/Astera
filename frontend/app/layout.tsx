@@ -3,6 +3,7 @@ import './globals.css';
 import Navbar from '@/components/Navbar';
 import ThemeProvider from '@/components/ThemeProvider';
 import { Toaster } from 'react-hot-toast';
+import { assertEnvValid } from '@/lib/env';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -25,6 +26,9 @@ import { NextIntlClientProvider } from 'next-intl';
 import { getMessages, getLocale } from 'next-intl/server';
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // Validate environment variables early
+  assertEnvValid();
+
   const locale = await getLocale();
   const messages = await getMessages();
 
@@ -39,7 +43,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         />
       </head>
       <body className="min-h-screen bg-[var(--bg)] text-[var(--text-primary)]">
-        <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:bg-brand-primary focus:text-white focus:p-2 focus:rounded">
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:bg-brand-primary focus:text-white focus:p-2 focus:rounded"
+        >
           Skip to main content
         </a>
         <NextIntlClientProvider messages={messages}>

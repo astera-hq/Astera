@@ -8,6 +8,8 @@ import { setStoredLocale } from '@/lib/i18n';
 import NotificationBell from '@/components/NotificationBell';
 import ThemeToggle from '@/components/ThemeToggle';
 import WalletConnect from '@/components/WalletConnect';
+import NetworkIndicator from '@/components/NetworkIndicator';
+import NetworkMismatchBanner from '@/components/NetworkMismatchBanner';
 
 function LanguageSelector() {
   const locale = useLocale();
@@ -19,7 +21,11 @@ function LanguageSelector() {
   };
 
   return (
-    <div className="flex items-center gap-1 bg-brand-card border border-brand-border rounded-lg p-1" role="group" aria-label="Language selector">
+    <div
+      className="flex items-center gap-1 bg-brand-card border border-brand-border rounded-lg p-1"
+      role="group"
+      aria-label="Language selector"
+    >
       <button
         onClick={() => handleLanguageChange('en')}
         aria-pressed={locale === 'en'}
@@ -85,6 +91,7 @@ export default function Navbar() {
 
   return (
     <>
+      <NetworkMismatchBanner />
       <header className="fixed top-0 left-0 right-0 z-50 border-b border-brand-border bg-brand-dark/80 backdrop-blur-md">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between gap-8">
           <Link href="/" className="font-bold text-xl tracking-tight">
@@ -111,6 +118,7 @@ export default function Navbar() {
           {/* Desktop theme toggle + notification bell + wallet button */}
           <div className="hidden md:flex items-center gap-2">
             <LanguageSelector />
+            <NetworkIndicator />
             <NotificationBell />
             <ThemeToggle />
             <WalletConnect />
