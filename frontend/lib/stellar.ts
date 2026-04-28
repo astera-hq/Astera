@@ -358,6 +358,27 @@ export type TransactionProgress = {
   error?: string;
 };
 
+export class ContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContractError';
+  }
+}
+
+export function parseSimulationError(sim: unknown): string {
+  const raw = safeStringify(sim).toLowerCase();
+  if (raw.includes('insufficientliquidity') || raw.includes('insufficient liquidity')) {
+    return 'Not enough liquidity in pool to fund this invoice';
+  }
+  if (raw.includes('unauthorized')) {
+    return 'You are not authorized to perform this action';
+  }
+  if (raw.includes('contractpaused') || raw.includes('contract is paused')) {
+    return 'The protocol is currently paused';
+  }
+  return 'Transaction simulation failed. Please review inputs and try again.';
+}
+
 /** Submit a signed XDR transaction */
 export async function submitTx(
   signedXDR: string,

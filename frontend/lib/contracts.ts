@@ -9,6 +9,8 @@ import {
   scValToNative,
   Address,
   xdr,
+  ContractError,
+  parseSimulationError,
 } from './stellar';
 import { TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc } from '@stellar/stellar-sdk';
 import type {
@@ -109,6 +111,8 @@ export async function buildCreateInvoiceTx(params: {
   amount: bigint;
   dueDate: number;
   description: string;
+  verificationHash?: string;
+  metadataUri?: string;
 }): Promise<string> {
   const account = await rpc.getAccount(params.owner);
   const contract = new Contract(INVOICE_CONTRACT_ID);
@@ -119,12 +123,16 @@ export async function buildCreateInvoiceTx(params: {
   })
     .addOperation(
       contract.call(
-        'create_invoice',
+        'create_invoice_with_metadata',
         new Address(params.owner).toScVal(),
         nativeToScVal(params.debtor, { type: 'string' }),
         nativeToScVal(params.amount, { type: 'i128' }),
         nativeToScVal(params.dueDate, { type: 'u64' }),
         nativeToScVal(params.description, { type: 'string' }),
+        nativeToScVal(params.verificationHash ?? '', { type: 'string' }),
+        params.metadataUri
+          ? nativeToScVal(params.metadataUri, { type: 'string' })
+          : xdr.ScVal.scvVoid(),
       ),
     )
     .setTimeout(30)
@@ -132,7 +140,7 @@ export async function buildCreateInvoiceTx(params: {
 
   const sim = await rpc.simulateTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
-    throw new Error(`Simulation failed: ${sim.error}`);
+    throw new ContractError(parseSimulationError(sim));
   }
 
   const prepared = StellarRpc.assembleTransaction(tx, sim).build();

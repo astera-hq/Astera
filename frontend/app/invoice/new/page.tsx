@@ -13,7 +13,13 @@ const MAX_AMOUNT = 1_000_000;
 const MAX_DUE_DAYS = 365;
 const MAX_DESCRIPTION_LEN = 256;
 
-function validateForm(form: { debtor: string; amount: string; dueDate: string; description: string }) {
+function validateForm(form: {
+  debtor: string;
+  amount: string;
+  dueDate: string;
+  description: string;
+  metadataUri: string;
+}) {
   const errors: Record<string, string> = {};
 
   // Debtor
@@ -59,6 +65,16 @@ function validateForm(form: { debtor: string; amount: string; dueDate: string; d
   if (form.description.length > MAX_DESCRIPTION_LEN) {
     errors.description = `Description must be ${MAX_DESCRIPTION_LEN} characters or fewer.`;
   }
+  if (
+    form.metadataUri &&
+    !(
+      form.metadataUri.startsWith('ipfs://') ||
+      form.metadataUri.startsWith('ar://') ||
+      form.metadataUri.startsWith('https://')
+    )
+  ) {
+    errors.metadataUri = 'Metadata URI must start with ipfs://, ar://, or https://';
+  }
 
   return errors;
 }
@@ -67,7 +83,13 @@ export default function NewInvoicePage() {
   const { wallet } = useStore();
   const router = useRouter();
 
-  const [form, setForm] = useState({ debtor: '', amount: '', dueDate: '', description: '' });
+  const [form, setForm] = useState({
+    debtor: '',
+    amount: '',
+    dueDate: '',
+    description: '',
+    metadataUri: '',
+  });
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
 
@@ -87,7 +109,7 @@ export default function NewInvoicePage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     // Mark all fields touched to show all errors on submit attempt
-    setTouched({ debtor: true, amount: true, dueDate: true, description: true });
+    setTouched({ debtor: true, amount: true, dueDate: true, description: true, metadataUri: true });
     if (!isValid || !wallet.address) return;
 
     setLoading(true);
@@ -101,6 +123,8 @@ export default function NewInvoicePage() {
         amount: amountStroops,
         dueDate: dueTimestamp,
         description: form.description,
+        verificationHash: 'frontend-placeholder-hash',
+        metadataUri: form.metadataUri.trim() || undefined,
       });
 
       const freighter = await import('@stellar/freighter-api');
@@ -218,6 +242,16 @@ export default function NewInvoicePage() {
                 />
                 <ErrorMsg message={touched.description ? errors.description : undefined} />
               </div>
+
+              <Field
+                label="Document Metadata URI (optional)"
+                name="metadataUri"
+                placeholder="ipfs://bafy... or https://..."
+                value={form.metadataUri}
+                onChange={handleChange}
+                onBlur={handleBlur}
+                error={touched.metadataUri ? errors.metadataUri : undefined}
+              />
             </div>
 
             {/* Summary */}
