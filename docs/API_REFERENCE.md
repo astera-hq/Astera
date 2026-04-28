@@ -440,6 +440,62 @@ stellar contract invoke \
 
 ---
 
+### `verify_invoice`
+
+Called by the configured oracle to approve or dispute an invoice. Verifies the supplied oracle hash against the stored `verification_hash` before transitioning status.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `id` | `u64` | Yes | Invoice ID to verify |
+| `oracle` | `Address` | Yes | Stored oracle address |
+| `approved` | `bool` | Yes | Oracle approval flag |
+| `reason` | `String` | Yes | Dispute reason when `approved` is false |
+| `oracle_hash` | `String` | Yes | Oracle-supplied invoice verification hash |
+
+#### Returns
+
+`()` — No return value.
+
+#### Errors
+
+| Error | Condition | Affected Methods |
+|-------|-----------|------------------|
+| `"unauthorized oracle"` | Caller is not the configured oracle | `verify_invoice` |
+| `"invoice not found"` | Invoice ID does not exist | `verify_invoice` |
+| `"invoice is not awaiting verification"` | Invoice is not awaiting verification | `verify_invoice` |
+| `"hash mismatch"` | Oracle hash does not match stored verification hash | `verify_invoice` |
+
+#### Access Control
+
+Requires `oracle.require_auth()` and the oracle must match the stored oracle address.
+
+#### Example Invocation
+
+From test [contracts/invoice/src/lib.rs#L1801](../contracts/invoice/src/lib.rs#L1801):
+
+```rust
+client.verify_invoice(
+    &id,
+    &oracle,
+    &true,
+    &String::from_str(&env, ""),
+    &hash,
+)
+.unwrap();
+```
+
+#### State Changes
+
+- Validates `oracle_hash` against the stored invoice `verification_hash`
+- Updates invoice status to `InvoiceStatus::Verified` when approved
+- Updates invoice status to `InvoiceStatus::Disputed` and stores `dispute_reason` when rejected
+- Publishes an `INVOICE.verified` or `INVOICE.disputed` event
+
+---
+
 ### `mark_paid`
 
 Marks an invoice as repaid in full. Can be called by the invoice owner, the pool contract, or the admin. Transitions invoice status from `Funded` to `Paid`.
@@ -572,6 +628,50 @@ stellar contract invoke \
 - Invoice must exist
 - Invoice must be in `Funded` state (defaulted invoices do not transition further)
 - Caller must be the authorized pool address
+
+---
+
+### `cancel_invoice`
+
+Cancels a non-funded invoice. Can be called by the invoice owner when the invoice is still unfunded, or by the admin for any non-funded invoice state.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `env` | `Env` | Yes | Soroban environment context |
+| `id` | `u64` | Yes | Invoice ID to cancel |
+| `caller` | `Address` | Yes | Invoice owner or admin address |
+
+#### Returns
+
+`()` — No return value.
+
+#### Errors
+
+| Error | Condition | Affected Methods |
+|-------|-----------|------------------|
+| `"unauthorized"` | Caller is not invoice owner or admin | `cancel_invoice` |
+| `"invalid status transition"` | Invoice is funded, paid, or already completed | `cancel_invoice` |
+| `"invoice not found"` | Invoice ID does not exist | `cancel_invoice` |
+
+#### Access Control
+
+Requires `caller.require_auth()` and either invoice ownership or admin privileges.
+
+#### Example Invocation
+
+From test [contracts/invoice/src/lib.rs#L1918](../contracts/invoice/src/lib.rs#L1918):
+
+```rust
+client.cancel_invoice(&id, &sme);
+```
+
+#### State Changes
+
+- Updates invoice status to `InvoiceStatus::Cancelled`
+- Sets a shorter completed TTL
+- Publishes an `INVOICE.cancelled` event
 
 ---
 

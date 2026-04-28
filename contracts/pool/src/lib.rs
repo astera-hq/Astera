@@ -65,6 +65,8 @@ pub enum PoolError {
     Unauthorized = 9,
     StorageCorrupted = 10,
     ShareTokenNotConfigured = 11,
+    InvalidFeeTier = 24,
+    FeeTierNotFound = 25,
     ContractPaused = 12,
     CollateralNotFound = 13,
     CollateralAlreadySettled = 14,
@@ -159,6 +161,30 @@ pub struct PoolTokenTotals {
     pub reward_per_share: i128,
     // #236: protocol fee revenue available for treasury withdrawal (separate from investor pool)
     pub protocol_revenue: i128,
+}
+
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub struct FeeTier {
+    pub min_amount: i128,
+    pub max_amount: i128,
+    pub min_credit_score: u32,
+    pub fee_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct CreditScoreData {
+    pub sme: Address,
+    pub score: u32,
+    pub total_invoices: u32,
+    pub paid_on_time: u32,
+    pub paid_late: u32,
+    pub defaulted: u32,
+    pub total_volume: i128,
+    pub average_payment_days: i64,
+    pub last_updated: u64,
+    pub score_version: u32,
 }
 
 /// Scaling factor for reward_per_share to maintain precision with integer arithmetic.
@@ -271,6 +297,9 @@ pub enum DataKey {
     LastWithdrawalTime(Address, Address),
     // #236: treasury address for protocol revenue withdrawals
     Treasury,
+    CreditScoreContract,
+    FeeTier(u32),
+    FeeTierIds,
     // #247: co-fund share ownership per (invoice_id, investor): stores bps (0-10_000)
     CoFundShare(u64, Address),
     // #233: per-investor deposited amount per token for concentration limit
@@ -286,6 +315,11 @@ pub enum DataKey {
 }
 
 const EVT: Symbol = symbol_short!("POOL");
+
+#[contractclient(name = "CreditScoreClient")]
+pub trait CreditScoreContract {
+    fn get_credit_score(env: Env, sme: Address) -> CreditScoreData;
+}
 
 // Cache for config to reduce storage reads
 fn get_config_cached(env: &Env) -> PoolResult<PoolConfig> {
@@ -373,6 +407,47 @@ fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> i128 {
 
 /// Returns the required collateral amount for `principal` given the pool's collateral config.
 /// Returns 0 if the principal is below the threshold (no collateral required).
+fn get_credit_score_contract(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::CreditScoreContract)
+}
+
+fn fee_tier_matches(tier: &FeeTier, principal: i128, score: u32) -> bool {
+    principal >= tier.min_amount
+        && principal <= tier.max_amount
+        && score >= tier.min_credit_score
+}
+
+fn resolve_factoring_fee(
+    env: &Env,
+    config: &PoolConfig,
+    principal: i128,
+    sme: Address,
+) -> PoolResult<i128> {
+    let mut fee_bps = config.factoring_fee_bps;
+
+    if let Some(cs_contract) = get_credit_score_contract(env) {
+        let credit_client = CreditScoreClient::new(env, &cs_contract);
+        let credit_data = credit_client.get_credit_score(&sme);
+        let mut tier_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeTierIds)
+            .unwrap_or(Vec::new(env));
+
+        for i in 0..tier_ids.len() {
+            let tier_id = tier_ids.get(i).expect("storage corrupted");
+            if let Some(tier) = env.storage().instance().get(&DataKey::FeeTier(*tier_id)) {
+                if fee_tier_matches(&tier, principal, credit_data.score) {
+                    fee_bps = tier.fee_bps;
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(calculate_factoring_fee(principal, fee_bps))
+}
+
 fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
     if principal < config.threshold {
         return 0;
@@ -419,7 +494,7 @@ fn fund_invoice_request(
     }
 
     let now = env.ledger().timestamp();
-    let factoring_fee = calculate_factoring_fee(request.principal, config.factoring_fee_bps);
+    let factoring_fee = resolve_factoring_fee(env, config, request.principal, request.sme.clone())?;
     let funded = FundedInvoice {
         invoice_id: request.invoice_id,
         sme: request.sme.clone(),
@@ -1813,6 +1888,114 @@ impl FundingPool {
         Ok(())
     }
 
+    pub fn set_fee_tier(env: Env, admin: Address, tier_id: u32, tier: FeeTier) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if tier.min_amount < 0 || tier.max_amount < tier.min_amount || tier.fee_bps > BPS_DENOM {
+            return Err(PoolError::InvalidFeeTier);
+        }
+
+        let mut tier_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeTierIds)
+            .unwrap_or(Vec::new(&env));
+        let mut found = false;
+        for i in 0..tier_ids.len() {
+            let existing_id = tier_ids.get(i).expect("storage corrupted");
+            if *existing_id == tier_id {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            tier_ids.push_back(tier_id);
+            env.storage()
+                .instance()
+                .set(&DataKey::FeeTierIds, &tier_ids);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeTier(tier_id), &tier);
+        Ok(())
+    }
+
+    pub fn remove_fee_tier(env: Env, admin: Address, tier_id: u32) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+
+        let mut tier_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeTierIds)
+            .unwrap_or(Vec::new(&env));
+        let mut new_ids: Vec<u32> = Vec::new(&env);
+        let mut removed = false;
+        for i in 0..tier_ids.len() {
+            let existing_id = tier_ids.get(i).expect("storage corrupted");
+            if *existing_id == tier_id {
+                removed = true;
+                continue;
+            }
+            new_ids.push_back(*existing_id);
+        }
+        if !removed {
+            return Err(PoolError::FeeTierNotFound);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeTierIds, &new_ids);
+        env.storage().instance().remove(&DataKey::FeeTier(tier_id));
+        Ok(())
+    }
+
+    pub fn get_fee_tier(env: Env, tier_id: u32) -> Option<FeeTier> {
+        bump_instance(&env);
+        env.storage().instance().get(&DataKey::FeeTier(tier_id))
+    }
+
+    pub fn list_fee_tiers(env: Env) -> Vec<(u32, FeeTier)> {
+        bump_instance(&env);
+        let mut result: Vec<(u32, FeeTier)> = Vec::new(&env);
+        let tier_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeTierIds)
+            .unwrap_or(Vec::new(&env));
+        for i in 0..tier_ids.len() {
+            let tier_id = tier_ids.get(i).expect("storage corrupted");
+            if let Some(tier) = env.storage().instance().get(&DataKey::FeeTier(*tier_id)) {
+                result.push_back((*tier_id, tier));
+            }
+        }
+        result
+    }
+
+    pub fn set_credit_score_contract(
+        env: Env,
+        admin: Address,
+        credit_score_contract: Address,
+    ) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::CreditScoreContract, &credit_score_contract);
+        Ok(())
+    }
+
+    pub fn get_credit_score_contract(env: Env) -> Option<Address> {
+        bump_instance(&env);
+        env.storage().instance().get(&DataKey::CreditScoreContract)
+    }
+
     pub fn set_compound_interest(env: Env, admin: Address, compound: bool) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
@@ -2456,6 +2639,26 @@ mod test {
         }
     }
 
+    #[contract]
+    pub struct DummyCreditScoreContract;
+    #[contractimpl]
+    impl DummyCreditScoreContract {
+        pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreData {
+            CreditScoreData {
+                sme,
+                score: 750,
+                total_invoices: 5,
+                paid_on_time: 5,
+                paid_late: 0,
+                defaulted: 0,
+                total_volume: 1_000_000_000,
+                average_payment_days: 1,
+                last_updated: env.ledger().timestamp(),
+                score_version: 1,
+            }
+        }
+    }
+
     fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
         env.ledger().with_mut(|l| l.timestamp = 100_000);
         let contract_id = env.register(FundingPool, ());
@@ -2594,6 +2797,84 @@ mod test {
         assert_eq!(tt.total_paid_out, expected_total_due);
         // pool_value grew by the yield
         assert!(tt.pool_value >= principal);
+    }
+
+    #[test]
+    fn test_fee_tier_resolution_uses_high_credit_score_lower_fee() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        let credit_score_contract = env.register(DummyCreditScoreContract, ());
+        client
+            .set_credit_score_contract(&admin, &credit_score_contract)
+            .unwrap();
+        client
+            .set_fee_tier(
+                &admin,
+                &1u32,
+                &FeeTier {
+                    min_amount: 0,
+                    max_amount: 1_000_000_000_000,
+                    min_credit_score: 700,
+                    fee_bps: 100,
+                },
+            )
+            .unwrap();
+        client
+            .set_fee_tier(
+                &admin,
+                &2u32,
+                &FeeTier {
+                    min_amount: 0,
+                    max_amount: 1_000_000_000_000,
+                    min_credit_score: 0,
+                    fee_bps: 250,
+                },
+            )
+            .unwrap();
+
+        mint(&env, &usdc_id, &investor, 1_000_000_000);
+        mint(&env, &usdc_id, &sme, 2_000_000_000);
+        client.deposit(&investor, &usdc_id, &1_000_000_000);
+
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &500_000_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 30 * 86_400),
+            &usdc_id,
+        );
+
+        let funded = client.get_funded_invoice(&1u64).unwrap();
+        assert_eq!(funded.factoring_fee, 500_000_000i128 * 100 / BPS_DENOM as i128);
+    }
+
+    #[test]
+    fn test_fee_tier_crud_and_list() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+
+        let tier = FeeTier {
+            min_amount: 0,
+            max_amount: 100_000,
+            min_credit_score: 500,
+            fee_bps: 150,
+        };
+        client.set_fee_tier(&admin, &1u32, &tier).unwrap();
+        let stored = client.get_fee_tier(&1u32).expect("tier exists");
+        assert_eq!(stored.fee_bps, 150);
+
+        let list = client.list_fee_tiers();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.get(0).unwrap().0, 1u32);
+
+        client.remove_fee_tier(&admin, &1u32).unwrap();
+        assert!(client.get_fee_tier(&1u32).is_none());
     }
 
     // ---- Issue #61: Edge-Case Tests ----

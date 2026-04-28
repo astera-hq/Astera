@@ -1,5 +1,15 @@
+import withPWA from 'next-pwa';
+import runtimeCaching from 'next-pwa/cache';
+
 /** @type {import('next').NextConfig} */
-const nextConfig = {
+const nextConfig = withPWA({
+  dest: 'public',
+  disable: process.env.NODE_ENV === 'development',
+  runtimeCaching,
+  buildExcludes: [/middleware-manifest\.json$/],
+  fallbacks: {
+    document: '/offline.html',
+  },
   reactStrictMode: true,
   webpack: (config) => {
     config.resolve.fallback = {
@@ -10,6 +20,6 @@ const nextConfig = {
     };
     return config;
   },
-};
+});
 
 export default nextConfig;

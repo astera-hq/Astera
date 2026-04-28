@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 use soroban_sdk::contractclient;
@@ -38,6 +38,16 @@ pub enum InvoiceStatus {
     Defaulted,
     Cancelled,
     Expired,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum InvoiceError {
+    Unauthorized = 1,
+    InvalidStatusTransition = 2,
+    InvoiceNotFound = 3,
+    HashMismatch = 4,
 }
 
 #[contracttype]
@@ -796,7 +806,14 @@ impl InvoiceContract {
             .unwrap_or(MAX_INVOICES_PER_DAY)
     }
 
-    pub fn verify_invoice(env: Env, id: u64, oracle: Address, approved: bool, reason: String) {
+    pub fn verify_invoice(
+        env: Env,
+        id: u64,
+        oracle: Address,
+        approved: bool,
+        reason: String,
+        oracle_hash: String,
+    ) -> Result<(), InvoiceError> {
         oracle.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
@@ -820,6 +837,10 @@ impl InvoiceContract {
             panic!("invoice is not awaiting verification");
         }
 
+        if invoice.verification_hash != oracle_hash {
+            return Err(InvoiceError::HashMismatch);
+        }
+
         if approved {
             invoice.status = InvoiceStatus::Verified;
             invoice.oracle_verified = true;
@@ -835,10 +856,11 @@ impl InvoiceContract {
         set_invoice_ttl(&env, id, false);
 
         if approved {
-            env.events().publish((EVT, symbol_short!("verified")), id);
+            env.events().publish((EVT, symbol_short!("verified")), (id, oracle_hash));
         } else {
             env.events().publish((EVT, symbol_short!("disputed")), id);
         }
+        Ok(())
     }
 
     pub fn resolve_dispute(env: Env, id: u64, caller: Address, resolution: DisputeResolution) {
@@ -1086,8 +1108,8 @@ impl InvoiceContract {
         env.events().publish((EVT, symbol_short!("default")), id);
     }
 
-    pub fn cancel_invoice(env: Env, id: u64, owner: Address) {
-        owner.require_auth();
+    pub fn cancel_invoice(env: Env, id: u64, caller: Address) {
+        caller.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
 
@@ -1099,11 +1121,36 @@ impl InvoiceContract {
 
         invoice = maybe_expire_pending_invoice(&env, invoice);
 
-        if owner != invoice.owner {
-            panic!("unauthorized");
-        }
-        if invoice.status != InvoiceStatus::Pending {
-            panic!("only pending invoices can be cancelled");
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+
+        let can_cancel = if caller == invoice.owner {
+            matches!(
+                invoice.status,
+                InvoiceStatus::Pending
+                    | InvoiceStatus::AwaitingVerification
+                    | InvoiceStatus::Verified
+            )
+        } else if caller == admin {
+            matches!(
+                invoice.status,
+                InvoiceStatus::Pending
+                    | InvoiceStatus::AwaitingVerification
+                    | InvoiceStatus::Verified
+                    | InvoiceStatus::Disputed
+            )
+        } else {
+            false
+        };
+
+        if !can_cancel {
+            if caller != invoice.owner && caller != admin {
+                panic!("unauthorized");
+            }
+            panic!("invalid status transition");
         }
 
         invoice.status = InvoiceStatus::Cancelled;
@@ -1122,7 +1169,7 @@ impl InvoiceContract {
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         env.events()
-            .publish((EVT, symbol_short!("cancelled")), (id, owner));
+            .publish((EVT, symbol_short!("cancelled")), (id, caller));
     }
 
     pub fn cleanup_invoice(env: Env, id: u64, caller: Address) {
@@ -1838,13 +1885,81 @@ mod test {
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::AwaitingVerification);
 
-        client.verify_invoice(&id, &oracle, &true, &String::from_str(&env, ""));
+        client.verify_invoice(
+            &id,
+            &oracle,
+            &true,
+            &String::from_str(&env, ""),
+            &hash,
+        )
+        .unwrap();
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::Verified);
         assert!(invoice.oracle_verified);
 
         client.mark_funded(&id, &pool);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Funded);
+    }
+
+    #[test]
+    fn test_verify_invoice_hash_mismatch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+
+        let oracle = Address::generate(&env);
+        client.set_oracle(&admin, &oracle);
+
+        let hash = String::from_str(&env, "verification_hash");
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "desc"),
+            &hash,
+        );
+
+        let result = client.try_verify_invoice(
+            &id,
+            &oracle,
+            &true,
+            &String::from_str(&env, ""),
+            &String::from_str(&env, "wrong_hash"),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_invoice_zero_hash_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, sme) = setup(&env);
+
+        let oracle = Address::generate(&env);
+        client.set_oracle(&admin, &oracle);
+
+        let hash = String::from_str(&env, "verification_hash");
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "desc"),
+            &hash,
+        );
+
+        let zero_hash = String::from_str(&env, "");
+        let result = client.try_verify_invoice(
+            &id,
+            &oracle,
+            &true,
+            &String::from_str(&env, ""),
+            &zero_hash,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1867,7 +1982,14 @@ mod test {
         );
 
         let reason = String::from_str(&env, "Invalid invoice data");
-        client.verify_invoice(&id, &oracle, &false, &reason);
+        client.verify_invoice(
+            &id,
+            &oracle,
+            &false,
+            &reason,
+            &String::from_str(&env, ""),
+        )
+        .unwrap();
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::Disputed);
 
@@ -2268,7 +2390,13 @@ mod test {
         );
 
         let rogue = Address::generate(&env);
-        client.verify_invoice(&id, &rogue, &true, &String::from_str(&env, ""));
+        client.verify_invoice(
+            &id,
+            &rogue,
+            &true,
+            &String::from_str(&env, ""),
+            &String::from_str(&env, ""),
+        );
     }
 
     #[test]
@@ -2891,7 +3019,14 @@ mod test {
         );
 
         // Verify and fund so the invoice reaches Funded status.
-        client.verify_invoice(&id, &oracle, &true, &String::from_str(env, ""));
+        client.verify_invoice(
+            &id,
+            &oracle,
+            &true,
+            &String::from_str(env, ""),
+            &String::from_str(env, "hash"),
+        )
+        .unwrap();
         client.mark_funded(&id, &pool);
 
         (client, admin, pool, owner)
