@@ -25,12 +25,24 @@ interface AsteraStore {
   lastPollTime: number | null;
   pollingInterval: number;
 
+  // Network mismatch state
+  networkMismatch: {
+    isMismatched: boolean;
+    walletNetwork: string | null;
+    appNetwork: string | null;
+  };
+
   setWallet: (wallet: WalletState) => void;
   setPoolConfig: (config: PoolConfig) => void;
   setPosition: (position: InvestorPosition | null) => void;
   setRecentEvents: (events: StoreEvent[]) => void;
   setLastPollTime: (time: number) => void;
   setPollingInterval: (interval: number) => void;
+  setNetworkMismatch: (mismatch: {
+    isMismatched: boolean;
+    walletNetwork: string | null;
+    appNetwork: string | null;
+  }) => void;
   disconnect: () => void;
   refreshPosition: () => void;
 }
@@ -44,6 +56,13 @@ export const useStore = create<AsteraStore>((set, get) => ({
   recentEvents: [],
   lastPollTime: null,
   pollingInterval: 15_000,
+
+  // Network mismatch state
+  networkMismatch: {
+    isMismatched: false,
+    walletNetwork: null,
+    appNetwork: null,
+  },
 
   setWallet: (wallet) => {
     if (typeof window !== 'undefined') {
@@ -60,6 +79,11 @@ export const useStore = create<AsteraStore>((set, get) => ({
   setRecentEvents: (recentEvents) => set({ recentEvents }),
   setLastPollTime: (lastPollTime) => set({ lastPollTime }),
   setPollingInterval: (pollingInterval) => set({ pollingInterval }),
+  setNetworkMismatch: (networkMismatch: {
+    isMismatched: boolean;
+    walletNetwork: string | null;
+    appNetwork: string | null;
+  }) => set({ networkMismatch }),
   disconnect: () => {
     if (typeof window !== 'undefined') {
       localStorage.removeItem(WALLET_KEY);
@@ -69,6 +93,11 @@ export const useStore = create<AsteraStore>((set, get) => ({
       position: null,
       poolConfig: null,
       recentEvents: [],
+      networkMismatch: {
+        isMismatched: false,
+        walletNetwork: null,
+        appNetwork: null,
+      },
     });
   },
   refreshPosition: async () => {

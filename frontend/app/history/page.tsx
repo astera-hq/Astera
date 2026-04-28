@@ -17,6 +17,7 @@ import {
 const EXPLORER_BASE = 'https://stellar.expert/explorer/testnet';
 const PAGE_SIZE = 20;
 const EVENT_LIMIT = 200;
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
 
 type EventKind =
   | 'invoice_created'
@@ -248,22 +249,55 @@ export default function HistoryPage() {
       else setLoadingMore(true);
 
       try {
-        const latest = await rpc.getLatestLedger();
-        const startLedger = Math.max(1, latest.sequence - 500_000);
+        let parsed: HistoryEvent[] = [];
 
-        const response = await rpc.getEvents({
-          ...(nextCursor ? { cursor: nextCursor } : { startLedger }),
-          filters: [
-            {
-              type: 'contract',
-              contractIds: [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID],
-            },
-          ],
-          limit: EVENT_LIMIT,
-        });
+        // Try indexer API first (Option A optimization from #240)
+        if (INDEXER_URL) {
+          try {
+            const params = new URLSearchParams({
+              limit: EVENT_LIMIT.toString(),
+              ...(nextCursor ? { cursor: nextCursor } : {}),
+            });
+            if (INVOICE_CONTRACT_ID) params.append('contract_id', INVOICE_CONTRACT_ID);
+            if (POOL_CONTRACT_ID) params.append('contract_id', POOL_CONTRACT_ID);
 
-        const raw = response.events ?? [];
-        const parsed = parseEvents(raw, wallet.address);
+            const res = await fetch(`${INDEXER_URL}/events?${params.toString()}`);
+            if (res.ok) {
+              const data = await res.json();
+              const raw = (data.events || []).map((e: any) => ({
+                contractId: e.contractId,
+                topic: e.topic || [],
+                value: e.value,
+                ledger: e.ledgerSequence,
+                ledgerCloseAt: e.ledgerCloseAt,
+                txHash: e.txHash,
+              }));
+              parsed = parseEvents(raw, wallet.address);
+            }
+          } catch (indexerErr) {
+            console.warn('[History] Indexer unavailable, falling back to Horizon:', indexerErr);
+          }
+        }
+
+        // Fallback to Horizon RPC if indexer didn't work
+        if (parsed.length === 0) {
+          const latest = await rpc.getLatestLedger();
+          const startLedger = Math.max(1, latest.sequence - 500_000);
+
+          const response = await rpc.getEvents({
+            ...(nextCursor ? { cursor: nextCursor } : { startLedger }),
+            filters: [
+              {
+                type: 'contract',
+                contractIds: [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID].filter(Boolean) as string[],
+              },
+            ],
+            limit: EVENT_LIMIT,
+          });
+
+          const raw = response.events ?? [];
+          parsed = parseEvents(raw, wallet.address);
+        }
 
         if (append) {
           setEvents((prev) => [...prev, ...parsed]);

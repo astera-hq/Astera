@@ -78,13 +78,10 @@ pub enum PoolError {
     WithdrawalCooldownActive = 19,
     // #247
     InsufficientCoFundShare = 20,
-    // #222: Pool Token Removal Safety Checks
-    /// Token has non-zero deposited balance
-    TokenHasActiveBalances = 21,
-    /// Token has deployed capital (active funded invoices)
-    TokenHasDeployedCapital = 22,
-    /// Token has pending withdrawals in queue
-    TokenHasPendingWithdrawals = 23,
+    // #217: withdrawal queue errors
+    WithdrawalRequestNotFound = 21,
+    AlreadyQueuedForWithdrawal = 22,
+    InvalidRequestId = 23,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -99,8 +96,12 @@ const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
 const DEFAULT_COLLATERAL_BPS: u32 = 2_000;
 const DEFAULT_YIELD_CHANGE_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_YIELD_CHANGE_BPS: u32 = 200; // +/- 200 bps per adjustment
+// #227: yield timelock — 48 hours default delay for two-step yield change
+const DEFAULT_YIELD_TIMELOCK_SECS: u64 = 172_800; // 48 hours
 // #235: minimum deposit — 0 = disabled
 const DEFAULT_MIN_DEPOSIT_AMOUNT: i128 = 0;
+// #233: max single-investor concentration — 2_000 bps = 20% (0 = disabled, 10_000 = 100%)
+const DEFAULT_MAX_SINGLE_INVESTOR_BPS: u32 = 2_000;
 // #244: withdrawal rate limiting — 10_000 bps (100%) and 0s = disabled by default
 const DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS: u32 = 10_000;
 const DEFAULT_WITHDRAWAL_COOLDOWN_SECS: u64 = 0;
@@ -113,6 +114,16 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithdrawalRequest {
+    pub investor: Address,
+    pub token: Address,
+    pub shares: i128,
+    pub requested_at: u64,
+    pub request_id: u64,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct PoolConfig {
     pub invoice_contract: Address,
@@ -123,8 +134,14 @@ pub struct PoolConfig {
     pub last_yield_change_at: u64,
     pub yield_change_cooldown_secs: u64,
     pub max_yield_change_bps: u32,
+    // #227: yield timelock — two-step yield change
+    pub proposed_yield_bps: u32,
+    pub yield_proposal_at: u64,
+    pub yield_timelock_secs: u64,
     // #235: minimum deposit per transaction (0 = disabled)
     pub min_deposit_amount: i128,
+    // #233: maximum single-investor concentration (2_000 = 20%, 10_000 = 100% = disabled)
+    pub max_single_investor_bps: u32,
     // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
     pub max_single_withdrawal_bps: u32,
     pub withdrawal_cooldown_secs: u64,
@@ -255,10 +272,16 @@ pub enum DataKey {
     Treasury,
     // #247: co-fund share ownership per (invoice_id, investor): stores bps (0-10_000)
     CoFundShare(u64, Address),
+    // #233: per-investor deposited amount per token for concentration limit
+    InvestorPosition(Address, Address),
     /// Semantic version stored during initialize() (#237).
     ContractVersion,
     /// Migration level, incremented per migration run (#237).
     MigrationVersion,
+    /// Withdrawal queue for low-liquidity scenarios (#217)
+    WithdrawalQueue(Address),
+    /// Withdrawal request data (#217)
+    WithdrawalRequest(Address, u64), // (investor, request_id)
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -459,12 +482,20 @@ impl FundingPool {
             invoice_contract,
             admin: admin.clone(),
             yield_bps: DEFAULT_YIELD_BPS,
-            factoring_fee_bps: DEFAULT_FACTORING_FEE_BPS,
+            factoring_fee_bps: DEFAULT_FACTOING_FEE_BPS,
             compound_interest: false,
             last_yield_change_at: env.ledger().timestamp(),
             yield_change_cooldown_secs: DEFAULT_YIELD_CHANGE_COOLDOWN_SECS,
             max_yield_change_bps: DEFAULT_MAX_YIELD_CHANGE_BPS,
+            // #227: yield timelock defaults
+            proposed_yield_bps: 0,
+            yield_proposal_at: 0,
+            yield_timelock_secs: DEFAULT_YIELD_TIMELOCK_SECS,
+            // #235: minimum deposit per transaction (0 = disabled)
             min_deposit_amount: DEFAULT_MIN_DEPOSIT_AMOUNT,
+            // #233: maximum single-investor concentration (2000 = 20%)
+            max_single_investor_bps: DEFAULT_MAX_SINGLE_INVESTOR_BPS,
+            // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
             max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
             withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
         };
@@ -699,12 +730,43 @@ impl FundingPool {
         // Batch read: get both token totals and share token in one go
         let token_totals_key = DataKey::TokenTotals(token.clone());
         let share_token_key = DataKey::ShareToken(token.clone());
+        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
 
         let mut tt: PoolTokenTotals = env
             .storage()
             .instance()
             .get(&token_totals_key)
             .unwrap_or_default();
+
+        let mut investor_position: InvestorPosition = env
+            .storage()
+            .persistent()
+            .get(&investor_pos_key)
+            .unwrap_or(InvestorPosition {
+                deposited: 0,
+                available: 0,
+                deployed: 0,
+                earned: 0,
+                deposit_count: 0,
+            });
+
+        // #233: enforce maximum single-investor concentration limit
+        let config = get_config_cached(&env)?;
+        if config.max_single_investor_bps < 10_000 {
+            let new_investor_total = investor_position.deposited + amount;
+            let new_pool_total = tt.pool_value + amount;
+            if new_pool_total > 0 {
+                let investor_share_bps =
+                    ((new_investor_total as u128 * 10_000u128) / new_pool_total as u128) as u32;
+                if investor_share_bps > config.max_single_investor_bps {
+                    env.events().publish(
+                        (EVT, symbol_short!("conc_excd")),
+                        (investor.clone(), investor_share_bps, config.max_single_investor_bps),
+                    );
+                    return Err(PoolError::ConcentrationLimitExceeded);
+                }
+            }
+        }
 
         let share_token: Address = env
             .storage()
@@ -736,6 +798,11 @@ impl FundingPool {
         mint_args.push_back(investor.clone().into_val(&env));
         mint_args.push_back(shares_to_mint.into_val(&env));
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "mint"), mint_args);
+
+        // #233: update investor position for concentration tracking
+        investor_position.deposited += amount;
+        investor_position.deposit_count += 1;
+        env.storage().persistent().set(&investor_pos_key, &investor_position);
 
         env.events().publish(
             (EVT, symbol_short!("deposit")),
@@ -837,6 +904,249 @@ impl FundingPool {
 
         env.events()
             .publish((EVT, symbol_short!("withdraw")), (investor, amount, shares));
+        Ok(())
+    }
+
+    /// Request a withdrawal when liquidity is insufficient (#217)
+    /// 
+    /// If liquidity is available, processes immediately like withdraw()
+    /// If not, queues the request for FIFO processing when funds become available
+    pub fn request_withdrawal(env: Env, investor: Address, token: Address, shares: i128) -> PoolResult<u64> {
+        investor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if shares <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        Self::assert_accepted_token(&env, &token)?;
+
+        // Check if investor already has a pending request for this token
+        let queue_key = DataKey::WithdrawalQueue(token.clone());
+        let mut queue: Vec<WithdrawalRequest> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or_default();
+        
+        for request in queue.iter() {
+            if request.investor == investor {
+                return Err(PoolError::AlreadyQueuedForWithdrawal);
+            }
+        }
+
+        Self::non_reentrant_start(&env);
+
+        let share_token_key = DataKey::ShareToken(token.clone());
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let share_token: Address = env
+            .storage()
+            .instance()
+            .get(&share_token_key)
+            .ok_or(PoolError::ShareTokenNotConfigured)?;
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+
+        let mut bal_args = Vec::new(&env);
+        bal_args.push_back(investor.clone().into_val(&env));
+        let share_balance: i128 =
+            env.invoke_contract(&share_token, &Symbol::new(&env, "balance"), bal_args);
+        if share_balance < shares {
+            Self::non_reentrant_end(&env);
+            return Err(PoolError::InvalidAmount);
+        }
+
+        let amount = (shares * tt.pool_value) / tt.total_shares;
+        let available_liquidity = tt.pool_value - tt.total_deployed;
+
+        let now = env.ledger().timestamp();
+        
+        if available_liquidity >= amount {
+            // Sufficient liquidity - process immediately
+            Self::process_immediate_withdrawal(&env, investor, token, shares, amount, tt, share_token)?;
+        } else {
+            // Insufficient liquidity - queue the request
+            let request_id = Self::generate_request_id(&env, &token);
+            let request = WithdrawalRequest {
+                investor: investor.clone(),
+                token: token.clone(),
+                shares,
+                requested_at: now,
+                request_id,
+            };
+            
+            queue.push_back(request);
+            env.storage().persistent().set(&queue_key, &queue);
+            
+            // Store individual request for lookup
+            let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
+            env.storage().persistent().set(&request_key, &request);
+            
+            env.events()
+                .publish((EVT, symbol_short!("withdrawal_queued")), (investor, shares, request_id));
+        }
+
+        Self::non_reentrant_end(&env);
+        Ok(request_id)
+    }
+
+    /// Cancel a pending withdrawal request
+    pub fn cancel_withdrawal_request(env: Env, investor: Address, request_id: u64) -> PoolResult<()> {
+        investor.require_auth();
+        bump_instance(&env);
+        
+        let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
+        let request: WithdrawalRequest = env
+            .storage()
+            .persistent()
+            .get(&request_key)
+            .ok_or(PoolError::WithdrawalRequestNotFound)?;
+        
+        // Remove from queue
+        let queue_key = DataKey::WithdrawalQueue(request.token.clone());
+        let mut queue: Vec<WithdrawalRequest> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or_default();
+        
+        let mut new_queue = Vec::new(&env);
+        for req in queue.iter() {
+            if !(req.investor == investor && req.request_id == request_id) {
+                new_queue.push_back(req);
+            }
+        }
+        env.storage().persistent().set(&queue_key, &new_queue);
+        
+        // Remove individual request
+        env.storage().persistent().remove(&request_key);
+        
+        env.events()
+            .publish((EVT, symbol_short!("withdrawal_cancelled")), (investor, request_id));
+        Ok(())
+    }
+
+    /// Get the current withdrawal queue for a token
+    pub fn get_withdrawal_queue(env: Env, token: Address) -> Vec<WithdrawalRequest> {
+        bump_instance(&env);
+        let queue_key = DataKey::WithdrawalQueue(token);
+        env.storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or_default()
+    }
+
+    /// Process withdrawal immediately (helper function)
+    fn process_immediate_withdrawal(
+        env: &Env,
+        investor: Address,
+        token: Address,
+        shares: i128,
+        amount: i128,
+        mut tt: PoolTokenTotals,
+        share_token: Address,
+    ) -> PoolResult<()> {
+        // Burn shares FIRST
+        let mut burn_args = Vec::new(env);
+        burn_args.push_back(investor.clone().into_val(env));
+        burn_args.push_back(shares.into_val(env));
+        let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "burn"), burn_args);
+
+        // Update state
+        tt.pool_value -= amount;
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        env.storage().instance().set(&token_totals_key, &tt);
+
+        // Transfer LAST
+        let token_client = token::Client::new(env, &token);
+        token_client.transfer(&env.current_contract_address(), &investor, &amount);
+
+        env.events()
+            .publish((EVT, symbol_short!("withdrawal_fulfilled")), (investor, amount, shares));
+        Ok(())
+    }
+
+    /// Generate unique request ID for withdrawal requests
+    fn generate_request_id(env: &Env, token: &Address) -> u64 {
+        let counter_key = DataKey::WithdrawalQueue(token.clone());
+        let current_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&counter_key)
+            .unwrap_or(0);
+        let new_id = current_count + 1;
+        env.storage().persistent().set(&counter_key, &new_id);
+        new_id
+    }
+
+    /// Process withdrawal queue after repayments (call from repay_invoice)
+    fn process_withdrawal_queue(env: &Env, token: Address, available_amount: i128) -> PoolResult<()> {
+        let queue_key = DataKey::WithdrawalQueue(token.clone());
+        let mut queue: Vec<WithdrawalRequest> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or_default();
+        
+        if queue.is_empty() {
+            return Ok(());
+        }
+
+        let mut processed = Vec::new(env);
+        let mut remaining_amount = available_amount;
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token.clone()))
+            .unwrap_or_default();
+
+        for request in queue.iter() {
+            let request_amount = (request.shares * tt.pool_value) / tt.total_shares;
+            if remaining_amount >= request_amount {
+                // Process this request
+                let share_token_key = DataKey::ShareToken(token.clone());
+                let share_token: Address = env
+                    .storage()
+                    .instance()
+                    .get(&share_token_key)
+                    .ok_or(PoolError::ShareTokenNotConfigured)?;
+                
+                // Burn shares
+                let mut burn_args = Vec::new(env);
+                burn_args.push_back(request.investor.clone().into_val(env));
+                burn_args.push_back(request.shares.into_val(env));
+                let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "burn"), burn_args);
+
+                // Update pool totals
+                tt.pool_value -= request_amount;
+                remaining_amount -= request_amount;
+
+                // Transfer tokens
+                let token_client = token::Client::new(env, &token);
+                token_client.transfer(&env.current_contract_address(), &request.investor, &request_amount);
+
+                // Remove individual request
+                let request_key = DataKey::WithdrawalRequest(request.investor.clone(), request.request_id);
+                env.storage().persistent().remove(&request_key);
+
+                env.events()
+                    .publish((EVT, symbol_short!("withdrawal_fulfilled")), 
+                             (request.investor, request_amount, request.shares));
+            } else {
+                // Can't process this request, keep it in queue
+                processed.push_back(request);
+            }
+        }
+
+        // Update queue with remaining unprocessed requests
+        env.storage().persistent().set(&queue_key, &processed);
+        
+        // Update token totals
+        let token_totals_key = DataKey::TokenTotals(token);
+        env.storage().instance().set(&token_totals_key, &tt);
+        
         Ok(())
     }
 
@@ -1125,6 +1435,13 @@ impl FundingPool {
         Self::non_reentrant_end(&env); // <- ADD GUARD END
 
         if fully_repaid {
+            // #217: Process withdrawal queue after repayment
+            let available_amount = total_interest as i128 + record.factoring_fee;
+            if let Err(e) = Self::process_withdrawal_queue(&env, record.token.clone(), available_amount) {
+                // Log error but don't fail the repayment
+                env.logs().add(&format!("Failed to process withdrawal queue: {:?}", e));
+            }
+
             env.events().publish(
                 (EVT, symbol_short!("repaid")),
                 (invoice_id, record.principal, total_interest as i128),
@@ -1345,7 +1662,12 @@ impl FundingPool {
         Ok(())
     }
 
-    pub fn set_yield(env: Env, admin: Address, yield_bps: u32) -> PoolResult<()> {
+    // #227: Two-step yield change with timelock
+
+    /// Admin proposes a new yield rate.
+    /// Stores (proposed_yield_bps, proposal_timestamp) and emits an event.
+    /// Minimum delay: 48 hours (configurable via set_yield_timelock()).
+    pub fn propose_yield_change(env: Env, admin: Address, new_yield_bps: u32) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -1355,41 +1677,93 @@ impl FundingPool {
             .get(&DataKey::Config)
             .ok_or(PoolError::NotInitialized)?;
         Self::require_admin(&env, &admin)?;
-        if yield_bps > 5_000 {
-            return Err(PoolError::InvalidAmount);
-        }
-
-        let now = env.ledger().timestamp();
-        let next_allowed = config
-            .last_yield_change_at
-            .saturating_add(config.yield_change_cooldown_secs);
-        if now < next_allowed {
+        if new_yield_bps > 5_000 {
             return Err(PoolError::InvalidAmount);
         }
 
         let current = config.yield_bps;
-        let delta = if yield_bps >= current {
-            yield_bps - current
+        let delta = if new_yield_bps >= current {
+            new_yield_bps - current
         } else {
-            current - yield_bps
+            current - new_yield_bps
         };
         if delta > config.max_yield_change_bps {
             return Err(PoolError::InvalidAmount);
         }
 
-        config.yield_bps = yield_bps;
-        config.last_yield_change_at = now;
+        let now = env.ledger().timestamp();
+        config.proposed_yield_bps = new_yield_bps;
+        config.yield_proposal_at = now;
         env.storage().instance().set(&DataKey::Config, &config);
-        env.events()
-            .publish((EVT, symbol_short!("set_yield")), (admin, yield_bps));
+
+        let effective_at = now + config.yield_timelock_secs;
+        env.events().publish(
+            (EVT, symbol_short!("yield_prop")),
+            (admin, current, new_yield_bps, effective_at),
+        );
         Ok(())
     }
 
+    /// Anyone can call after the delay period has passed.
+    /// Reads the proposal, verifies delay, updates yield_bps, clears proposal.
+    pub fn execute_yield_change(env: Env) -> PoolResult<()> {
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        if config.proposed_yield_bps == 0 || config.yield_proposal_at == 0 {
+            return Err(PoolError::YieldProposalNotFound);
+        }
+
+        let now = env.ledger().timestamp();
+        let effective_at = config.yield_proposal_at + config.yield_timelock_secs;
+        if now < effective_at {
+            return Err(PoolError::YieldChangeNotReady);
+        }
+
+        let old_bps = config.yield_bps;
+        config.yield_bps = config.proposed_yield_bps;
+        config.last_yield_change_at = now;
+        config.proposed_yield_bps = 0;
+        config.yield_proposal_at = 0;
+        env.storage().instance().set(&DataKey::Config, &config);
+
+        env.events().publish(
+            (EVT, symbol_short!("yield_chg")),
+            (old_bps, config.yield_bps),
+        );
+        Ok(())
+    }
+
+    /// Admin can cancel a pending yield proposal before execution.
+    pub fn cancel_yield_proposal(env: Env, admin: Address) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.proposed_yield_bps = 0;
+        config.yield_proposal_at = 0;
+        env.storage().instance().set(&DataKey::Config, &config);
+
+        env.events()
+            .publish((EVT, symbol_short!("yield_cncl")), admin);
+        Ok(())
+    }
+
+    /// Set the yield change policy: cooldown, max step, and timelock duration.
     pub fn set_yield_change_policy(
         env: Env,
         admin: Address,
         cooldown_secs: u64,
         max_change_bps: u32,
+        timelock_secs: u64,
     ) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
@@ -1406,12 +1780,16 @@ impl FundingPool {
         if max_change_bps == 0 {
             return Err(PoolError::InvalidAmount);
         }
+        if timelock_secs < 3600 {
+            return Err(PoolError::InvalidAmount); // minimum 1 hour
+        }
         config.yield_change_cooldown_secs = cooldown_secs;
         config.max_yield_change_bps = max_change_bps;
+        config.yield_timelock_secs = timelock_secs;
         env.storage().instance().set(&DataKey::Config, &config);
         env.events().publish(
             (EVT, symbol_short!("set_y_pol")),
-            (admin, cooldown_secs, max_change_bps),
+            (admin, cooldown_secs, max_change_bps, timelock_secs),
         );
         Ok(())
     }
@@ -1474,6 +1852,49 @@ impl FundingPool {
             .get::<DataKey, PoolConfig>(&DataKey::Config)
             .map(|c| c.min_deposit_amount)
             .unwrap_or(0)
+    }
+
+    // ---- #233: maximum single-investor concentration limit ----
+
+    pub fn set_max_investor_concentration(env: Env, admin: Address, max_bps: u32) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if max_bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config = get_config_cached(&env)?;
+        config.max_single_investor_bps = max_bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_conc")), (admin, max_bps));
+        Ok(())
+    }
+
+    pub fn get_investor_concentration(env: Env, investor: Address, token: Address) -> PoolResult<u32> {
+        let tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token.clone()))
+            .unwrap_or_default();
+        if tt.pool_value <= 0 {
+            return Ok(0);
+        }
+        let pos_key = DataKey::InvestorPosition(investor.clone(), token);
+        let position: InvestorPosition = env
+            .storage()
+            .persistent()
+            .get(&pos_key)
+            .unwrap_or(InvestorPosition {
+                deposited: 0,
+                available: 0,
+                deployed: 0,
+                earned: 0,
+                deposit_count: 0,
+            });
+        let share_bps =
+            ((position.deposited as u128 * 10_000u128) / tt.pool_value as u128) as u32;
+        Ok(share_bps)
     }
 
     // ---- #236: protocol revenue & treasury ----

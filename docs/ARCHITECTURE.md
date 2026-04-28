@@ -224,6 +224,10 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - `yield_bps: u32` — Annual percentage yield in basis points (default 800 = 8%, max 5000 = 50%)
 - `factoring_fee_bps: u32` — Platform fee in basis points (default 0)
 - `compound_interest: bool` — Simple (false) vs compound (true) interest calculation
+- `proposed_yield_bps: u32` — Pending yield change proposal (#227)
+- `yield_proposal_at: u64` — Timestamp when yield change was proposed (#227)
+- `yield_timelock_secs: u64` — Delay before yield change takes effect (default 172800 = 48h) (#227)
+- `max_single_investor_bps: u32` — Max concentration per investor in bps (default 2000 = 20%, 10000 = disabled) (#233)
 
 **PoolTokenTotals Struct** (per token):
 - `pool_value: i128` — Total liquidity available or deployed
@@ -278,8 +282,13 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - `repaid` (invoice_id, principal, interest) — Invoice repaid
 - `add_token` (admin, token) — Token whitelisted
 - `rm_token` (admin, token) — Token removed from whitelist
-- `set_yield` (admin, yield_bps) — Yield rate changed
+- `yield_prop` (admin, current_bps, proposed_bps, effective_at) — Yield change proposed (#227)
+- `yield_chg` (old_bps, new_bps) — Yield changed after timelock (#227)
+- `yield_cncl` (admin) — Yield proposal cancelled (#227)
+- `set_y_pol` (admin, cooldown, max_change, timelock) — Yield policy updated (#227)
 - `set_comp` (admin, compound) — Interest type changed
+- `conc_excd` (investor, current_bps, limit_bps) — Concentration limit exceeded warning (#233)
+- `set_conc` (admin, max_bps) — Concentration limit updated (#233)
 - `upgraded` (admin, timestamp) — Contract code upgraded
 
 **Upgrade Mechanism**: Same as Invoice Contract (24-hour timelock)
@@ -371,6 +380,44 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 - When deposit: `shares_to_mint = (amount × total_shares) / pool_value`
 - When withdraw: `amount_to_return = (shares × pool_value) / total_shares`
 - On first deposit: shares = amount (1:1 initial ratio)
+
+---
+
+### 5. Event Indexer (`indexer/`)
+
+**Purpose**: Index Stellar Horizon events for fast historical queries and analytics.
+
+**Responsibilities**:
+- Subscribe to Stellar Horizon event streams for Astera contract events
+- Parse and store events in a SQLite database
+- Expose a REST API for the frontend to query historical data
+- Support cursor-based pagination for efficient queries
+
+**Architecture Decision**: Option B (Self-hosted Mini Indexer) was chosen over Option A (Hosted Indexer) to give the project full control over event data and enable custom querying.
+
+**Key Files**:
+- `indexer/src/index.ts` — Main event polling loop
+- `indexer/src/parser.ts` — Parse Horizon events into structured records
+- `indexer/src/db.ts` — SQLite storage with better-sqlite3
+- `indexer/src/api.ts` — Express REST API (port 3001)
+
+**API Endpoints**:
+- `GET /health` — Health check
+- `GET /events?contract_id=...&event_type=...&limit=50&offset=0` — Query events with filters
+- `GET /events/contract/:contractId` — Get events for a specific contract
+- `GET /events/type/:eventType` — Get events by type
+- `GET /ledger/latest` — Get latest indexed ledger
+
+**Environment Variables**:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HORIZON_URL` | `https://horizon-testnet.stellar.org` | Stellar Horizon endpoint |
+| `CONTRACT_IDS` | (empty) | Comma-separated contract IDs to index |
+| `POLLING_INTERVAL_MS` | `5000` | Polling interval in milliseconds |
+| `API_PORT` | `3001` | API server port |
+| `DB_PATH` | `./indexer.db` | SQLite database path |
+
+**Docker Service**: Added to `docker-compose.yml` as `indexer` service.
 
 ---
 

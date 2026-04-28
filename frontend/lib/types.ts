@@ -48,6 +48,12 @@ export interface PoolConfig {
   yieldBps: number;
   factoringFeeBps: number;
   compoundInterest: boolean;
+  // #227: yield timelock
+  proposedYieldBps: number;
+  yieldProposalAt: number;
+  yieldTimelockSecs: number;
+  // #233: max single-investor concentration
+  maxSingleInvestorBps: number;
 }
 
 export interface PoolTokenTotals {

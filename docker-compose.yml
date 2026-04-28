@@ -42,5 +42,23 @@ services:
     ports:
       - "4000:4000"
 
+  indexer:
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./indexer/data:/indexer/data
+    environment:
+      - HORIZON_URL=https://horizon-testnet.stellar.org
+      - CONTRACT_IDS=
+      - POLLING_INTERVAL_MS=5000
+      - API_PORT=3001
+      - DB_PATH=/indexer/data/indexer.db
+    depends_on:
+      - stellar
+    restart: unless-stopped
+
 volumes:
   stellar-data:
