@@ -114,6 +114,14 @@ export default function WalletConnect() {
       setNetworkMismatch(networkCheck);
 
       setWallet({ address, connected: true, network: 'testnet' });
+      // Trigger SEP-0010 authentication flow silently
+      try {
+        const { ensureAuthWithFreighter } = await import('@/lib/auth');
+        void ensureAuthWithFreighter(address);
+      } catch (e) {
+        // non-blocking: auth failure should not prevent connect
+        console.warn('[WalletConnect] SEP-0010 auth failed', e);
+      }
       toast.success('Wallet connected successfully!');
       setRetryCount(0);
       setStep('idle');

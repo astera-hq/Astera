@@ -27,6 +27,9 @@
     "swr": "^2.2.5",
     "zustand": "^5.0.0"
   },
+  "dependencies": {
+    "jose": "^4.20.0"
+  },
   "devDependencies": {
     "@playwright/test": "^1.44.0",
     "@testing-library/jest-dom": "^6.4.2",
