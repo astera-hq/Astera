@@ -62,10 +62,10 @@ export function InvoiceFunnelChart({ data, isLoading }: InvoiceFunnelChartProps)
                 borderRadius: '8px',
                 color: '#fff',
               }}
-              formatter={(value: number, name: string) => {
+              formatter={(value, name) => {
                 if (name === 'count') return `${value} invoices`;
-                if (name === 'value') return `$${value.toLocaleString()}`;
-                return value;
+                if (name === 'value') return `$${Number(value ?? 0).toLocaleString()}`;
+                return value ?? 0;
               }}
             />
             <Legend wrapperStyle={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }} />

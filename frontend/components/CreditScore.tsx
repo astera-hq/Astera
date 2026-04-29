@@ -71,7 +71,7 @@ export default function CreditScore({
     if (onTimePaid.length === 0) return 0;
     const totalDays = onTimePaid.reduce((sum, p) => {
       const due = p.dueDate;
-      const paid = p.paidDate || Date.now() / 1000;
+      const paid = p.paidDate ?? due;
       return sum + Math.floor((paid - due) / 86400);
     }, 0);
     return Math.round(totalDays / onTimePaid.length);
@@ -108,7 +108,7 @@ export default function CreditScore({
       impact: 'High',
       tip:
         onTimeRate < 0.8
-          ? `Pay your next ${Math.ceil((0.8 * total - paid))} invoices on time to reach Good tier`
+          ? `Pay your next ${Math.ceil(0.8 * total - paid)} invoices on time to reach Good tier`
           : 'Keep up the great on-time payment record',
     });
 
@@ -171,7 +171,8 @@ export default function CreditScore({
                 scoreChange >= 0 ? 'text-green-400' : 'text-red-400'
               }`}
             >
-              {scoreChange >= 0 ? '+' : ''}{scoreChange} since last invoice
+              {scoreChange >= 0 ? '+' : ''}
+              {scoreChange} since last invoice
             </div>
           )}
           <div className="text-xs text-brand-muted/60 mt-2">Based on {total} invoice(s)</div>
@@ -189,9 +190,7 @@ export default function CreditScore({
           <div className="mt-6 pt-6 border-t border-brand-border grid grid-cols-2 gap-4">
             <div>
               <div className="text-xs text-brand-muted mb-1">Repayment Rate</div>
-              <div className="text-lg font-semibold">
-                {Math.round(repaymentRate * 100)}%
-              </div>
+              <div className="text-lg font-semibold">{Math.round(repaymentRate * 100)}%</div>
             </div>
             <div>
               <div className="text-xs text-brand-muted mb-1">Average Payment Days</div>
@@ -221,17 +220,13 @@ export default function CreditScore({
               <div
                 className="h-full bg-gradient-to-r from-brand-border to-green-500 rounded-full transition-all"
                 style={{
-                  width: `${
-                    ((score - currentTier.min) / (nextTier.min - currentTier.min)) * 100
-                  }%`,
+                  width: `${((score - currentTier.min) / (nextTier.min - currentTier.min)) * 100}%`,
                 }}
               />
               <div
                 className="absolute top-0 h-full w-0.5 bg-white/50"
                 style={{
-                  left: `${
-                    ((score - currentTier.min) / (nextTier.min - currentTier.min)) * 100
-                  }%`,
+                  left: `${((score - currentTier.min) / (nextTier.min - currentTier.min)) * 100}%`,
                 }}
               />
             </div>
@@ -310,16 +305,17 @@ export default function CreditScore({
                 <h4 className="text-sm font-semibold mb-2">Next Milestone: {nextTier.name}</h4>
                 <div className="flex items-center gap-3 mb-3">
                   <div className="text-2xl font-bold">{nextTier.min}</div>
-                  <div className="text-xs text-brand-muted">
-                    {pointsToNext} points away
-                  </div>
+                  <div className="text-xs text-brand-muted">{pointsToNext} points away</div>
                 </div>
                 <p className="text-sm text-brand-muted">
                   {TIER_BENEFITS[nextTier.name] || 'Unlock new benefits at this tier'}
                 </p>
                 {pointsToNext <= PTS_PAID_ON_TIME * 2 && (
                   <p className="text-sm text-green-400 mt-2">
-                    Pay {Math.ceil(pointsToNext / PTS_PAID_ON_TIME)} more invoice{Math.ceil(pointsToNext / PTS_PAID_ON_TIME) > 1 ? 's' : ''} on time (+{Math.ceil(pointsToNext / PTS_PAID_ON_TIME) * PTS_PAID_ON_TIME} pts) to reach {nextTier.name} tier and {TIER_BENEFITS[nextTier.name]?.toLowerCase()}
+                    Pay {Math.ceil(pointsToNext / PTS_PAID_ON_TIME)} more invoice
+                    {Math.ceil(pointsToNext / PTS_PAID_ON_TIME) > 1 ? 's' : ''} on time (+
+                    {Math.ceil(pointsToNext / PTS_PAID_ON_TIME) * PTS_PAID_ON_TIME} pts) to reach{' '}
+                    {nextTier.name} tier and {TIER_BENEFITS[nextTier.name]?.toLowerCase()}
                   </p>
                 )}
               </div>

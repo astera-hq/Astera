@@ -18,6 +18,15 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# Playwright / E2E
+frontend/test-results/
+frontend/playwright-report/
+
+# next-pwa generated artifacts (produced on build)
+frontend/public/sw.js
+frontend/public/workbox-*.js
+frontend/public/fallback-*.js
+
 # IDE
 .vscode/
 .idea/

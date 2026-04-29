@@ -145,7 +145,16 @@ export default function AdminInvoicesPage() {
     }
   }
 
-  const modalConfig: Record<NonNullable<ModalAction>, { title: string; description: string; confirmPhrase?: string; variant: 'default' | 'destructive'; confirmLabel: string }> = {
+  const modalConfig: Record<
+    NonNullable<ModalAction>,
+    {
+      title: (id: number) => string;
+      description: (inv: Invoice) => string;
+      confirmPhrase?: string;
+      variant: 'default' | 'destructive';
+      confirmLabel: string;
+    }
+  > = {
     approve: {
       title: (id: number) => `Approve Invoice #${id}`,
       description: (inv: Invoice) =>

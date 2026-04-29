@@ -51,6 +51,7 @@ export default function WalletConnect() {
   const { wallet, setWallet, disconnect, setNetworkMismatch } = useStore();
   const [step, setStep] = useState<WalletStep>('idle');
   const [retryCount, setRetryCount] = useState(0);
+  const [inlineError, setInlineError] = useState<string | null>(null);
 
   const loading = step !== 'idle';
 
@@ -85,12 +86,15 @@ export default function WalletConnect() {
 
   async function connect(attempt = 0) {
     setStep('detecting');
+    setInlineError(null);
     try {
       const freighter = await import('@stellar/freighter-api');
 
       const { isConnected } = await freighter.isConnected();
       if (!isConnected) {
-        toast.error('Freighter not detected. Please install the browser extension and reload.');
+        const msg = 'Freighter not detected. Please install the browser extension and reload.';
+        setInlineError(msg);
+        toast.error(msg);
         setStep('idle');
         return;
       }
@@ -103,7 +107,7 @@ export default function WalletConnect() {
 
       setStep('fetching-address');
       const { address, error: addrError } = await freighter.getAddress();
-      if (addrError) {
+      if (addrError || !address) {
         toast.error('Could not retrieve wallet address. Please try again.');
         setStep('idle');
         return;
@@ -124,7 +128,9 @@ export default function WalletConnect() {
         // Brief delay before auto-retry
         setTimeout(() => connect(attempt + 1), 800);
       } else {
-        toast.error('Failed to connect wallet after multiple attempts. Please try again.');
+        const msg = 'Failed to connect wallet after multiple attempts. Please try again.';
+        setInlineError(msg);
+        toast.error(msg);
         setRetryCount(0);
         setStep('idle');
       }
@@ -164,6 +170,12 @@ export default function WalletConnect() {
         {loading && <LoadingSpinner size="sm" />}
         {STEP_LABELS[step]}
       </button>
+
+      {inlineError && (
+        <p role="alert" className="text-xs text-red-400 text-right max-w-[18rem]">
+          {inlineError}
+        </p>
+      )}
 
       {retryCount > 0 && (
         <button

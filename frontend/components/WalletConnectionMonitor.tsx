@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { useStore } from '@/lib/store';
+import { useStore, type AsteraStore } from '@/lib/store';
 import { pushToast } from './Toast';
 
 /**
@@ -23,8 +23,8 @@ const POLL_INTERVAL_MS = 30_000;
 const DISCONNECT_TOAST_ID = 'wallet-disconnected';
 
 export default function WalletConnectionMonitor() {
-  const wallet = useStore((s) => s.wallet);
-  const disconnectStore = useStore((s) => s.disconnect);
+  const wallet = useStore((s: AsteraStore) => s.wallet);
+  const disconnectStore = useStore((s: AsteraStore) => s.disconnect);
   // Track "was connected" so we only notify on the connected → disconnected edge.
   const wasConnectedRef = useRef(wallet.connected);
 

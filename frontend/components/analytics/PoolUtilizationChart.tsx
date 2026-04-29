@@ -54,11 +54,12 @@ export function PoolUtilizationChart({ data, isLoading }: PoolUtilizationChartPr
                 borderRadius: '8px',
                 color: '#fff',
               }}
-              formatter={(value: number, name: string) => {
-                if (name === 'utilization') return `${value}%`;
-                if (name === 'deployed') return `$${value.toLocaleString()}`;
-                if (name === 'deposited') return `$${value.toLocaleString()}`;
-                return value;
+              formatter={(value, name) => {
+                const n = Number(value ?? 0);
+                if (name === 'utilization') return `${n}%`;
+                if (name === 'deployed') return `$${n.toLocaleString()}`;
+                if (name === 'deposited') return `$${n.toLocaleString()}`;
+                return n;
               }}
             />
             <Legend wrapperStyle={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }} />

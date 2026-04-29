@@ -22,7 +22,7 @@ import { useTranslations } from 'next-intl';
 
 type DashboardRow = { invoice: Invoice; metadata: InvoiceMetadata };
 
-type StatusFilter = Invoice['status'];
+type StatusFilter = Invoice['status'] | 'All';
 type SortOption =
   | 'created-desc'
   | 'created-asc'
@@ -251,7 +251,8 @@ export default function DashboardPage() {
       );
     }
 
-    result = filterInvoicesByStatuses(result, statusFilters);
+    const selectedStatuses = statusFilters.filter((s): s is Invoice['status'] => s !== 'All');
+    result = filterInvoicesByStatuses(result, selectedStatuses);
 
     switch (sort) {
       case 'created-desc':
@@ -538,20 +539,24 @@ export default function DashboardPage() {
                 defaulted={stats.defaulted}
                 totalVolume={stats.totalVolume}
                 paymentHistory={invoices
-                  .filter((row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted')
+                  .filter(
+                    (row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted',
+                  )
                   .map((row) => ({
                     invoiceId: row.invoice.id,
                     amount: row.invoice.amount,
                     dueDate: row.metadata.dueDate,
-                    paidDate: row.metadata.paidDate ?? null,
-                    status: row.metadata.paidDate
-                      ? (row.metadata.paidDate > row.metadata.dueDate ? 'Late' : 'OnTime')
+                    paidDate: row.invoice.paidAt ? row.invoice.paidAt : null,
+                    status: row.invoice.paidAt
+                      ? row.invoice.paidAt > row.metadata.dueDate
+                        ? 'Late'
+                        : 'OnTime'
                       : row.invoice.status === 'Defaulted'
                         ? 'Defaulted'
                         : 'OnTime',
                     daysLate:
-                      row.metadata.paidDate && row.metadata.paidDate > row.metadata.dueDate
-                        ? Math.floor((row.metadata.paidDate - row.metadata.dueDate) / 86400)
+                      row.invoice.paidAt && row.invoice.paidAt > row.metadata.dueDate
+                        ? Math.floor((row.invoice.paidAt - row.metadata.dueDate) / 86400)
                         : undefined,
                   }))}
               />

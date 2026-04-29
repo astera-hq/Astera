@@ -279,6 +279,9 @@ export default function HistoryPage() {
           }
         }
 
+        let responseCursor: string | undefined = undefined;
+        let fetchedCount = parsed.length;
+
         // Fallback to Horizon RPC if indexer didn't work
         if (parsed.length === 0) {
           const latest = await rpc.getLatestLedger();
@@ -296,6 +299,8 @@ export default function HistoryPage() {
           });
 
           const raw = response.events ?? [];
+          fetchedCount = raw.length;
+          responseCursor = response.cursor;
           parsed = parseEvents(raw, wallet.address);
         }
 
@@ -306,11 +311,7 @@ export default function HistoryPage() {
           setVisible(PAGE_SIZE);
         }
 
-        const responseCursor =
-          typeof response === 'object' && response !== null && 'cursor' in response
-            ? (response as { cursor?: string }).cursor
-            : undefined;
-        setHasMore(raw.length === EVENT_LIMIT && Boolean(responseCursor));
+        setHasMore(fetchedCount === EVENT_LIMIT && Boolean(responseCursor));
         setCursor(responseCursor);
       } catch (e) {
         toast.error('Failed to load transaction history. Make sure contracts are deployed.');
