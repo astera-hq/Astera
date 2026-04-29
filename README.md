@@ -40,18 +40,30 @@ frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
 
 ---
 
-## Setup
+## Getting Started
+
+Start with the guide that matches how you want to work:
+
+- [Local Development with Docker Compose](docs/local-development.md)
+- [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md)
+- [Testnet Deployment Guide](docs/deployment.md)
 
 ### Rapid Local Development (Docker Compose)
-We provide a one-command setup using Docker Compose that spins up the Stellar local network, the Next.js frontend, a contracts development environment, and mock services.
+We provide a Docker Compose workflow for the Stellar local network, the Next.js
+frontend, a contracts development shell, mock services, and the optional local
+indexer.
 
 ```bash
-docker-compose up -d
+docker compose up --build
 ```
-After running this command:
+After the stack is ready:
 - **Frontend** is available at http://localhost:3000
-- **Stellar RPC** is available at http://localhost:8000
+- **Stellar Horizon/RPC** is available at http://localhost:8000
 - **Mock Services** are available at http://localhost:4000
+
+Read the full [local development guide](docs/local-development.md) before the
+first run. It explains the required frontend env file, manual contract workflow,
+common failures, and reset commands.
 
 ---
 

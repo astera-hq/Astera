@@ -71,7 +71,9 @@ git checkout -b feat/your-feature-name
 
 ### Step 4: Set up your environment
 
-Follow the **Development Environment Setup** section below to install Rust, Node.js, and other tools.
+Follow the **Development Environment Setup** section below to install Rust,
+Node.js, and other tools. If you plan to use Docker Compose locally, read
+[docs/local-development.md](docs/local-development.md) first.
 
 ### Step 5: Make your change
 
@@ -151,7 +153,10 @@ A maintainer will review your PR within 1–3 business days. They may request ch
 
 ## 🛠 Development Environment Setup
 
-Before contributing, set up your environment as follows. If you are using Windows, please follow the [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md).
+Before contributing, set up your environment as follows. If you are using
+Docker Compose for local development, start with the
+[Local Development Guide](docs/local-development.md). If you are using Windows,
+please follow the [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md).
 
 ### Required Tools
 
