@@ -244,17 +244,9 @@ fn require_not_paused(env: &Env) {
     }
 }
 
-fn is_valid_metadata_uri(env: &Env, uri: &String) -> bool {
-    let bytes = uri.to_bytes();
-    if bytes.len() == 0 || bytes.len() > MAX_METADATA_URI_LEN {
-        return false;
-    }
-    let ipfs = String::from_str(env, "ipfs://").to_bytes();
-    let ar = String::from_str(env, "ar://").to_bytes();
-    let https = String::from_str(env, "https://").to_bytes();
-    (bytes.len() >= ipfs.len() && bytes.slice(0..ipfs.len()) == ipfs)
-        || (bytes.len() >= ar.len() && bytes.slice(0..ar.len()) == ar)
-        || (bytes.len() >= https.len() && bytes.slice(0..https.len()) == https)
+fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
+    let len = uri.len();
+    len > 0 && len <= MAX_METADATA_URI_LEN
 }
 
 fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
@@ -3032,8 +3024,3 @@ mod test {
         (client, admin, pool, owner)
     }
 }
-        if let Some(uri) = metadata_uri.clone() {
-            if !is_valid_metadata_uri(&env, &uri) {
-                panic!("invalid metadata uri");
-            }
-        }

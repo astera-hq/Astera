@@ -1953,11 +1953,11 @@ impl FundingPool {
         let mut removed = false;
         for i in 0..tier_ids.len() {
             let existing_id = tier_ids.get(i).expect("storage corrupted");
-            if *existing_id == tier_id {
+            if existing_id == tier_id {
                 removed = true;
                 continue;
             }
-            new_ids.push_back(*existing_id);
+            new_ids.push_back(existing_id);
         }
         if !removed {
             return Err(PoolError::FeeTierNotFound);
@@ -1984,8 +1984,8 @@ impl FundingPool {
             .unwrap_or(Vec::new(&env));
         for i in 0..tier_ids.len() {
             let tier_id = tier_ids.get(i).expect("storage corrupted");
-            if let Some(tier) = env.storage().instance().get(&DataKey::FeeTier(*tier_id)) {
-                result.push_back((*tier_id, tier));
+            if let Some(tier) = env.storage().instance().get(&DataKey::FeeTier(tier_id)) {
+                result.push_back((tier_id, tier));
             }
         }
         result
@@ -2319,6 +2319,35 @@ impl FundingPool {
             .instance()
             .get(&DataKey::StorageStats)
             .unwrap_or_default()
+    }
+
+    pub fn get_position(env: Env, investor: Address, token: Address) -> Option<InvestorPosition> {
+        bump_instance(&env);
+        let pos_key = DataKey::InvestorPosition(investor, token);
+        env.storage().persistent().get(&pos_key)
+    }
+
+    pub fn is_invoice_repaid(env: Env, invoice_id: u64) -> bool {
+        let record: FundedInvoice = match env.storage().persistent().get(&DataKey::FundedInvoice(invoice_id)) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        let config: PoolConfig = match get_config_cached(&env) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let now = env.ledger().timestamp();
+        let elapsed_secs = now - record.funded_at;
+        let total_interest = calculate_interest(
+            record.principal as u128,
+            config.yield_bps,
+            elapsed_secs,
+            config.compound_interest,
+        );
+        let total_due = record.principal + total_interest as i128 + record.factoring_fee;
+        record.repaid_amount >= total_due
     }
 
     pub fn cleanup_funded_invoice(env: Env, admin: Address, invoice_id: u64) -> PoolResult<()> {
@@ -2786,7 +2815,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 100_000); // 100k secs
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         // Wait, 5000 principal at 8% APY for 100k secs.
@@ -2836,7 +2865,7 @@ mod test {
                 / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
         let expected_total_due = principal + expected_interest as i128 + expected_fee;
 
-        assert_eq!(client.estimate_repayment(&1u64), expected_total_due);
+        assert_eq!(client.estimate_repayment(&1u64).unwrap(), expected_total_due);
 
         client.repay_invoice(&1u64, &sme, &expected_total_due);
 
@@ -3071,7 +3100,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
         // Second repay must return AlreadyFullyRepaid
         let result = client.try_repay_invoice(&1u64, &sme, &amount_due);
@@ -3496,7 +3525,7 @@ mod test {
 
         let sme_balance_before = token::Client::new(&env, &usdc_id).balance(&sme);
 
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         let sme_balance_after = token::Client::new(&env, &usdc_id).balance(&sme);
@@ -3621,7 +3650,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         // Trying to seize after repayment must return AlreadyFullyRepaid
@@ -3888,7 +3917,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
         let attacker = Address::generate(&env);
         let result = client.try_cleanup_funded_invoice(&attacker, &1u64);
@@ -3940,7 +3969,7 @@ mod test {
             &usdc_id,
         );
         client.pause(&admin);
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
     }
 
@@ -3984,7 +4013,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
         let fi = client.get_funded_invoice(&1u64).unwrap();
         assert!(fi.repaid_amount >= amount_due);
@@ -4163,7 +4192,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 10_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64).unwrap();
         let half = total_due / 2;
 
         // First partial payment
@@ -4176,7 +4205,7 @@ mod test {
         assert_eq!(tt.total_deployed, 5_000i128);
 
         // Second payment clears the rest
-        let remaining = client.estimate_repayment(&1u64);
+        let remaining = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &remaining);
 
         let fi2 = client.get_funded_invoice(&1u64).unwrap();
@@ -4209,7 +4238,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64).unwrap();
 
         // Partial payment — less than total
         client.repay_invoice(&1u64, &sme, &(total_due / 3));
@@ -4243,7 +4272,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64).unwrap();
 
         // Attempt to pay more than due
         let result = client.try_repay_invoice(&1u64, &sme, &(total_due + 1));
@@ -4272,7 +4301,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &total_due);
 
         // Second full repayment must be rejected

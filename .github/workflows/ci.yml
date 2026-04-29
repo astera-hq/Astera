@@ -324,8 +324,6 @@ jobs:
           echo "- Pool Contract: ${{ steps.deploy-pool.outputs.POOL_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
           echo "- Credit Score Contract: ${{ steps.deploy-credit.outputs.CREDIT_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
 
-// Contributed via automated bounty system
-
   # ---- Smoke Tests ----
   smoke-test-testnet:
     name: Testnet Smoke Tests

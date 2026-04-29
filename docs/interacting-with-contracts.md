@@ -1,16 +1,22 @@
 # Interacting with Astera Smart Contracts
 
-This guide is designed for frontend developers, product managers, and other non-Rust contributors who want to interact with the Astera smart contracts directly. You **do not** need to know Rust to read from or write to the contracts on the testnet.
+This guide is designed for frontend developers, protocol users, and non-Rust contributors who want to understand how the Astera contracts work and how to interact with them without writing Rust code.
 
 ## Prerequisites
-1. [Install Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli)
-2. Get some testnet XLM for your account (using [Stellar Laboratory](https://laboratory.stellar.org/#account-creator?network=test) or `stellar keys fund`)
+
+1.  **Stellar CLI**: Install the [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli).
+2.  **Testnet Account**: Create and fund a testnet account using `stellar keys fund` or the [Stellar Laboratory](https://laboratory.stellar.org/#account-creator?network=test).
+3.  **Contract IDs**: Ensure you have the contract IDs for the Pool and Invoice contracts.
+
+---
 
 ## Section 1: Reading Contract State (no wallet needed)
 
-Reading from a contract is free and doesn't require a funded wallet.
+Reading from a contract is a "view" operation that doesn't cost gas or require a funded wallet.
 
-**Get Pool Configuration:**
+### Get Pool Configuration
+This returns the global settings of the pool, such as the authorized invoice contract and the current yield rate.
+
 ```bash
 stellar contract invoke \
   --id $POOL_CONTRACT_ID \
@@ -18,65 +24,101 @@ stellar contract invoke \
   -- get_config
 ```
 
-**Get Your Investor Position:**
+### Get Your Investor Position
+Check how much you have deposited, how much is currently deployed in invoices, and how much interest you have earned.
+
 ```bash
 stellar contract invoke \
   --id $POOL_CONTRACT_ID \
   --network testnet \
-  -- get_investor_position \
-  --investor GABC...YOUR_ADDRESS \
-  --token $USDC_TOKEN_ID
+  -- get_position \
+  --investor $YOUR_ADDRESS \
+  --token $USDC_TOKEN_ADDRESS
 ```
+
+---
 
 ## Section 2: Writing Transactions (wallet needed)
 
-To write data or change state, you need to sign the transaction.
+State-changing operations require a transaction signed by your secret key or a wallet like Freighter.
 
-**Create an Invoice:**
+### Create an Invoice
+SMEs can tokenize an invoice by submitting its details. Note that `amount` is in **stroops** (7 decimal places) and `due_date` is a Unix timestamp.
+
 ```bash
 stellar contract invoke \
   --id $INVOICE_CONTRACT_ID \
   --source-account YOUR_SECRET_KEY \
   --network testnet \
   -- create_invoice \
-  --owner GABC...YOUR_ADDRESS \
+  --owner $YOUR_ADDRESS \
   --debtor "Acme Corp" \
   --amount 1000000000 \
-  --due_date 1735689600
+  --due_date 1735689600 \
+  --description "Goods delivery #101" \
+  --verification_hash "a1b2c3d4..."
 ```
-*(Note: `amount` is specified in stroops. 1 USDC = 10,000,000 stroops. So 1000000000 = 100 USDC.)*
+*(1,000,000,000 stroops = 100.00 USDC)*
+
+---
 
 ## Section 3: Using the JavaScript SDK
 
-*(Coming soon: Once issue #165 is merged, you will be able to use the SDK directly in JS/TS).*
+Once the Astera SDK is merged (see issue #165), you can interact with the contracts directly from your frontend or Node.js application.
 
 ```typescript
 import { AsteraClient } from '@astera/sdk';
-const client = new AsteraClient({ network: 'testnet' });
+
+const client = new AsteraClient({ 
+  network: 'testnet',
+  rpcUrl: 'https://soroban-testnet.stellar.org'
+});
+
+// Fetch an invoice by its ID
 const invoice = await client.invoice.get(42n);
-console.log("Invoice Principal:", invoice.principal);
+console.log(`Invoice Principal: ${invoice.amount} stroops`);
+
+// Check pool liquidity
+const liquidity = await client.pool.getAvailableLiquidity(USDC_ADDRESS);
 ```
+
+---
 
 ## Section 4: Understanding Contract Responses
 
-- **ScVal Encoding**: The Stellar CLI often returns data as `ScVal`. The CLI automatically decodes it into readable JSON-like formats.
-- **Amounts (Stroops)**: All token amounts are represented in stroops (7 decimal places). `10000000` = 1 Token.
-- **Addresses**: Stellar addresses start with `G...` (for accounts) or `C...` (for contracts).
+### ScVal Encoding
+The Stellar network uses `ScVal` (Smart Contract Value) to encode data. While the CLI decodes this for you, you should be aware of common types:
+- **Address**: Represented as `G...` (accounts) or `C...` (contracts).
+- **i128 / u64**: Large numbers are often returned as strings or BigInts in JS.
+
+### Amounts (Stroops)
+All token amounts in Astera use **7 decimal places** to align with Stellar's native USDC.
+- `1.0000000` USDC = `10,000,000` stroops.
+- `100.00` USDC = `1,000,000,000` stroops.
+
+---
 
 ## Section 5: Common Tasks Cookbook
 
-- **"How do I check if my withdrawal is ready?"**
-  Invoke `get_withdrawal_queue` or check the last withdrawal timestamp using `get_config` to see if your cooldown period has passed.
+### "How do I check if my withdrawal is ready?"
+Withdrawals may be subject to a cooldown or a queue. Check your request status:
+```bash
+stellar contract invoke \
+  --id $POOL_CONTRACT_ID \
+  --network testnet \
+  -- get_withdrawal_queue \
+  --token $USDC_TOKEN_ADDRESS
+```
 
-- **"How do I see how much yield I've earned?"**
-  Invoke `get_token_totals` on the pool contract. The `reward_per_share` field helps calculate accrued yield since your last snapshot.
+### "How do I see how much yield I've earned?"
+Invoke `get_position` and look at the `earned` field. This shows the cumulative interest accrued to your position since your first deposit.
 
-- **"How do I check an SME's credit score?"**
-  Invoke the Credit Score contract using `get_credit_score`:
-  ```bash
-  stellar contract invoke \
-    --id $CREDIT_CONTRACT_ID \
-    --network testnet \
-    -- get_credit_score \
-    --sme GABC...
-  ```
+### "How do I check an SME's credit score?"
+The credit score is managed by a dedicated contract. Use the SME's address to look up their history:
+```bash
+stellar contract invoke \
+  --id $CREDIT_CONTRACT_ID \
+  --network testnet \
+  -- get_credit_score \
+  --sme $SME_ADDRESS
+```
