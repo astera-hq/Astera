@@ -315,25 +315,15 @@ class SseEventsService {
         filters: [{ contractIds: [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID] }],
       });
 
-      const events: ContractEvent[] = response.events.map(
-        (e: {
-          id: string;
-          contractId: string;
-          topic: unknown[];
-          value: unknown;
-          ledger: number;
-          ledgerCloseAt: string;
-          txHash: string;
-        }) => ({
-          id: e.id,
-          contractId: e.contractId,
-          topic: e.topic.map((t: unknown) => scValToNative(t as string)),
-          value: scValToNative(e.value),
-          ledger: e.ledger,
-          ledgerCloseAt: e.ledgerCloseAt,
-          txHash: e.txHash,
-        }),
-      );
+      const events: ContractEvent[] = response.events.map((e) => ({
+        id: e.id,
+        contractId: String((e as any).contractId ?? ''),
+        topic: e.topic.map((t) => String(scValToNative(t as any))),
+        value: scValToNative(e.value as any),
+        ledger: e.ledger,
+        ledgerCloseAt: (e as any).ledgerClosedAt ?? (e as any).ledgerCloseAt ?? '',
+        txHash: e.txHash,
+      }));
 
       // Filter out already-processed events
       const newEvents = events.filter((e) => !this.processedEventIds.has(e.id));

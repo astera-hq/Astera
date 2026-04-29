@@ -23,6 +23,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN,
     Env, IntoVal, Symbol, Vec,

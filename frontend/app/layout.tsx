@@ -57,7 +57,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <main id="main-content" role="main">
               {children}
             </main>
-            <Toaster position="top-right" duration={5000} />
+            <Toaster position="top-right" toastOptions={{ duration: 5000 }} />
           </ThemeProvider>
         </NextIntlClientProvider>
       </body>

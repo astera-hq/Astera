@@ -3,6 +3,7 @@ target/
 target*/
 **/*.rs.bk
 Cargo.lock
+!contracts/Cargo.lock
 
 # Node
 node_modules/
@@ -36,3 +37,8 @@ contracts/**/test_snapshots/
 
 # Proptest regression artifacts (generated)
 contracts/**/*.proptest-regressions/
+
+# Frontend build artifacts (PWA)
+frontend/public/sw.js
+frontend/public/workbox-*.js
+frontend/public/fallback-*.js

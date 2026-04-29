@@ -1,9 +1,12 @@
 [advisories]
 # Add known-safe advisory IDs here as needed, e.g.:
 # ignore = ["RUSTSEC-2023-XXXX"]
-ignore = []
+# Soroban SDK dependency tree currently pulls in some unmaintained proc-macro crates.
+# These are tracked upstream; we ignore them here to avoid blocking CI.
+ignore = ["RUSTSEC-2024-0388", "RUSTSEC-2024-0436"]
 
 [output]
 # Valid deny values: "warnings", "unmaintained", "unsound", "yanked"
 # ("vulnerability" was removed in cargo-audit 0.18 — vulnerabilities always fail.)
 deny = ["unmaintained", "unsound"]
+quiet = false

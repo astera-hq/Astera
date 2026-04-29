@@ -1,0 +1,14 @@
+[workspace]
+members = [
+  "invoice",
+  "pool",
+  "credit_score",
+  "share",
+  "governance",
+]
+
+resolver = "2"
+
+[workspace.dependencies]
+soroban-sdk = { version = "22.0.0", features = ["alloc"] }
+

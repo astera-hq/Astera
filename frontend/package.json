@@ -15,11 +15,12 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
+    "@ducanh2912/next-pwa": "^10.2.9",
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^14.6.1",
+    "lucide-react": "^1.14.0",
     "next": "^15.2.2",
     "next-intl": "^4.9.1",
-    "next-pwa": "^6.4.2",
     "react": "^18",
     "react-dom": "^18",
     "react-hot-toast": "^2.6.0",

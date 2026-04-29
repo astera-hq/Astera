@@ -66,7 +66,7 @@ export function CreditScoreDistributionChart({
                 borderRadius: '8px',
                 color: '#fff',
               }}
-              formatter={(value: number) => [`${value} SMEs`, 'Count']}
+              formatter={(value) => [`${value ?? 0} SMEs`, 'Count']}
             />
             <Bar dataKey="count" name="SME Count" radius={[4, 4, 0, 0]}>
               {data.map((entry, index) => (
