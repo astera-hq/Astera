@@ -80,6 +80,7 @@ export class AsteraClient {
       amount: bigint;
       dueDate: number;
       description: string;
+      verificationHash?: string;
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> => {
       const account = await this.server.getAccount(params.owner);
@@ -97,6 +98,47 @@ export class AsteraClient {
             nativeToScVal(params.amount, { type: 'i128' }),
             nativeToScVal(params.dueDate, { type: 'u64' }),
             nativeToScVal(params.description, { type: 'string' }),
+            nativeToScVal(params.verificationHash || '', { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    verify: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      oracle: string;
+      id: bigint | number;
+      approved: boolean;
+      reason: string;
+      oracleHash: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.oracle);
+      const contract = new Contract(this.config.invoiceContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'verify_invoice',
+            nativeToScVal(params.id, { type: 'u64' }),
+            new Address(params.oracle).toScVal(),
+            nativeToScVal(params.approved, { type: 'bool' }),
+            nativeToScVal(params.reason, { type: 'string' }),
+            nativeToScVal(params.oracleHash, { type: 'string' }),
           ),
         )
         .setTimeout(30)

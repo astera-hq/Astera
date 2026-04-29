@@ -24,13 +24,16 @@ export interface Invoice {
   owner: string;
   debtor: string;
   amount: bigint;
-  dueDate: number;
+  due_date: number;
   description: string;
   status: InvoiceStatus;
-  createdAt: number;
-  fundedAt: number;
-  paidAt: number;
-  poolContract: string;
+  created_at: number;
+  funded_at: number;
+  paid_at: number;
+  pool_contract: string;
+  verification_hash?: string;
+  metadata_uri?: string;
+  oracle_verified?: boolean;
 }
 
 export interface InvestorPosition {
