@@ -60,5 +60,24 @@ services:
       - stellar
     restart: unless-stopped
 
+  oracle-service:
+    build:
+      context: ./oracle-service
+      dockerfile: Dockerfile
+    environment:
+      - RPC_URL=http://stellar:8000/soroban/rpc
+      - HORIZON_URL=http://stellar:8000
+      - NETWORK_PASSPHRASE=Standalone Network ; February 2017
+      - ORACLE_SECRET_KEY=${ORACLE_SECRET_KEY}
+      - INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID}
+      - AUTO_VERIFY_DELAY_MS=30000
+    depends_on:
+      - stellar
+      - contracts
+    volumes:
+      - ./oracle-service:/app
+      - ./sdk:/sdk
+    restart: unless-stopped
+
 volumes:
   stellar-data:
