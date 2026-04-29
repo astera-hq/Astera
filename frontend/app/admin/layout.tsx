@@ -21,22 +21,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         }
 
         if (wallet.connected && wallet.address && currentPoolConfig) {
-          try {
-            // Prefer cryptographic verification via SEP-0010 JWT
-            const { verifyToken, getToken } = await import('@/lib/auth');
-            const token = getToken();
-            const v = await verifyToken(token);
-            if (v?.authenticated && v?.account === currentPoolConfig.admin) {
-              setAuthorized(true);
-            } else if (wallet.address === currentPoolConfig.admin) {
-              // fallback to raw address match (non-cryptographic)
-              setAuthorized(true);
-            } else {
-              setAuthorized(false);
-            }
-          } catch (e) {
-            console.warn('Auth verification failed, falling back to address match', e);
-            setAuthorized(wallet.address === currentPoolConfig.admin);
+          if (wallet.address === currentPoolConfig.admin) {
+            setAuthorized(true);
+          } else {
+            setAuthorized(false);
           }
         } else if (!wallet.connected) {
           setAuthorized(null);
