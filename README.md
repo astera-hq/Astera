@@ -206,6 +206,8 @@ For production deployment, see the comprehensive [Mainnet Deployment Guide](docs
 
 For upgrade runbooks and migration safety checks, see the [Contract Upgrade Guide](docs/contract-upgrade-guide.md).
 
+For safely testing contract upgrades before deployment, see the [Upgrade Dry-Run Guide](docs/upgrade-dry-run.md).
+
 **⚠️ Important:** Mainnet deployment involves real assets. Complete all security audits and testing before deploying to production.
 
 ---

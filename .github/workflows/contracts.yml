@@ -58,3 +58,15 @@ jobs:
             fi
             echo "$f size: ${size} KB (OK)"
           done
+
+      - name: Run upgrade dry-run simulation
+        run: ./scripts/upgrade-dry-run.sh all
+
+      - name: Upload upgrade reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-dry-run-reports
+          path: .upgrade-dry-run/
+          retention-days: 30
+
