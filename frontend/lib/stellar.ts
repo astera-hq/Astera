@@ -11,7 +11,14 @@ import {
 } from '@stellar/stellar-sdk';
 
 export const NETWORK = Networks.TESTNET;
-export const RPC_URL = 'https://soroban-testnet.stellar.org';
+export const RPC_ENDPOINTS = [
+  process.env.NEXT_PUBLIC_STELLAR_RPC_URL,
+  process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_1,
+  process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_2,
+  'https://soroban-testnet.stellar.org',
+  'https://rpc-testnet.stellar.org',
+].filter(Boolean) as string[];
+export const RPC_URL = RPC_ENDPOINTS[0];
 export const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 
 // Set these after deploying your contracts
@@ -48,6 +55,7 @@ interface PooledConnection {
   lastUsed: number;
   healthy: boolean;
   inFlightRequests: number;
+  url: string;
 }
 
 class RpcConnectionPool {
@@ -63,12 +71,14 @@ class RpcConnectionPool {
   private initPool(): void {
     const now = Date.now();
     for (let i = 0; i < RPC_POOL_CONFIG.poolSize; i++) {
+      const url = RPC_ENDPOINTS[i % RPC_ENDPOINTS.length] || RPC_URL;
       this.connections.push({
-        server: new StellarRpc.Server(RPC_URL),
+        server: new StellarRpc.Server(url),
         createdAt: now,
         lastUsed: now,
         healthy: true,
         inFlightRequests: 0,
+        url,
       });
     }
   }
@@ -109,12 +119,18 @@ class RpcConnectionPool {
   /** Replace a connection with a fresh one */
   private recycleConnection(index: number): void {
     const now = Date.now();
+    // Try the next endpoint in the fallback list
+    const currentUrl = this.connections[index]?.url || RPC_URL;
+    const nextUrlIndex = (RPC_ENDPOINTS.indexOf(currentUrl) + 1) % RPC_ENDPOINTS.length;
+    const nextUrl = RPC_ENDPOINTS[nextUrlIndex] || RPC_URL;
+    
     this.connections[index] = {
-      server: new StellarRpc.Server(RPC_URL),
+      server: new StellarRpc.Server(nextUrl),
       createdAt: now,
       lastUsed: now,
       healthy: true,
       inFlightRequests: 0,
+      url: nextUrl,
     };
   }
 

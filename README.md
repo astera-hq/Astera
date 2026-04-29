@@ -47,6 +47,7 @@ Start with the guide that matches how you want to work:
 - [Local Development with Docker Compose](docs/local-development.md)
 - [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md)
 - [Testnet Deployment Guide](docs/deployment.md)
+- [Smart Contract Interaction Guide](docs/interacting-with-contracts.md)
 
 ### Rapid Local Development (Docker Compose)
 We provide a Docker Compose workflow for the Stellar local network, the Next.js

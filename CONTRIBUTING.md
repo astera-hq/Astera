@@ -157,6 +157,7 @@ Before contributing, set up your environment as follows. If you are using
 Docker Compose for local development, start with the
 [Local Development Guide](docs/local-development.md). If you are using Windows,
 please follow the [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md).
+For a guide on how to interact with the contracts, see the [Smart Contract Interaction Guide](docs/interacting-with-contracts.md).
 
 ### Required Tools
 

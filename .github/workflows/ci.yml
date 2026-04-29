@@ -265,6 +265,9 @@ jobs:
     needs: [rust-contracts, frontend, integration-tests]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: testnet
+    outputs:
+      INVOICE_CONTRACT_ID: ${{ steps.deploy-invoice.outputs.INVOICE_CONTRACT_ID }}
+      POOL_CONTRACT_ID: ${{ steps.deploy-pool.outputs.POOL_CONTRACT_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -321,4 +324,50 @@ jobs:
           echo "- Pool Contract: ${{ steps.deploy-pool.outputs.POOL_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
           echo "- Credit Score Contract: ${{ steps.deploy-credit.outputs.CREDIT_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
 
-// Contributed via automated bounty system
+  # ---- Smoke Tests ----
+  smoke-test-testnet:
+    name: Testnet Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-testnet]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: testnet
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+      - name: Configure Stellar CLI
+        run: |
+          stellar keys add tester --secret-key "${{ secrets.TESTNET_SMOKE_TEST_KEY }}"
+      - name: Run Smoke Tests
+        timeout-minutes: 2
+        env:
+          INVOICE_CONTRACT_ID: ${{ needs.deploy-testnet.outputs.INVOICE_CONTRACT_ID }}
+          POOL_CONTRACT_ID: ${{ needs.deploy-testnet.outputs.POOL_CONTRACT_ID }}
+        run: |
+          echo "Test 1: Contract Reachability"
+          stellar contract invoke --id $INVOICE_CONTRACT_ID --source-account tester --network testnet -- get_invoice_count
+          
+          echo "Test 2: Pool Config Readable"
+          stellar contract invoke --id $POOL_CONTRACT_ID --source-account tester --network testnet -- get_config
+          
+          echo "Test 3: End-to-End Mini Lifecycle"
+          stellar contract invoke --id $INVOICE_CONTRACT_ID --source-account tester --network testnet -- create_invoice --owner tester --debtor "Smoke Test" --amount 1000 --due_date 1735689600
+          # We don't have the returned ID easily but we can check if it didn't fail
+          
+          echo "Test 4: Contract Version Check"
+          stellar contract invoke --id $INVOICE_CONTRACT_ID --network testnet -- version
+      
+      - name: Post Failure Comment
+        if: failure()
+        uses: peter-evans/commit-comment@v3
+        with:
+          body: "⚠️ Testnet deployment smoke tests failed"
+      
+      - name: Send Webhook Alert
+        if: failure()
+        run: |
+          if [ -n "${{ secrets.ALERT_WEBHOOK_URL }}" ]; then
+            curl -X POST -H "Content-Type: application/json" \
+              -d '{"text": "⚠️ Testnet deployment smoke tests failed"}' \
+              ${{ secrets.ALERT_WEBHOOK_URL }}
+          fi
