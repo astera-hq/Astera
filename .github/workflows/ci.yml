@@ -207,55 +207,15 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: contracts
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+          workspaces: |
+            .
+            contracts
 
       - name: Build all contracts
-        working-directory: ./contracts
         run: cargo build --target wasm32-unknown-unknown --release
 
-      - name: Run integration tests
-        working-directory: ./contracts
-        run: cargo test --test integration_tests --verbose
-
-      - name: Run all contract tests with timing
-        id: contract-tests
-        working-directory: ./contracts
-        run: |
-          START=$(date +%s)
-          cargo test --workspace --verbose 2>&1 | tee test-output.txt
-          END=$(date +%s)
-          ELAPSED=$((END-START))
-          echo "contract_test_duration_s=${ELAPSED}" >> $GITHUB_OUTPUT
-          echo "Test suite completed in ${ELAPSED} seconds"
-
-      - name: Check test execution time
-        run: |
-          ELAPSED=${{ steps.contract-tests.outputs.contract_test_duration_s }}
-          MAX_SECONDS=120
-          echo "Test duration: ${ELAPSED}s"
-          if [ "${ELAPSED}" -gt "${MAX_SECONDS}" ]; then
-            echo "⚠️  WARNING: Tests took ${ELAPSED}s, exceeding ${MAX_SECONDS}s threshold"
-          else
-            echo "✅ Tests completed within ${MAX_SECONDS}s threshold"
-          fi
-
-      - name: Run benchmarks
-        working-directory: ./contracts
-        run: cargo bench --bench contract_benchmarks
-
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        with:
-          name: contract-benchmarks-${{ github.sha }}
-          path: |
-            contracts/target/criterion/
-            contracts/test-output.txt
-          retention-days: 30
+      - name: Run contract tests
+        run: cargo test --workspace --verbose
 
   # ---- Deploy to Testnet ----
   deploy-testnet:
