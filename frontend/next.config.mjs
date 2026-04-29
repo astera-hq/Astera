@@ -1,8 +1,8 @@
-import withPWA from 'next-pwa';
+import nextPwa from 'next-pwa';
 import runtimeCaching from 'next-pwa/cache.js';
+import createNextIntlPlugin from 'next-intl/plugin';
 
-/** @type {import('next').NextConfig} */
-const nextConfig = withPWA({
+const withPWA = nextPwa({
   dest: 'public',
   disable: process.env.NODE_ENV === 'development',
   runtimeCaching,
@@ -10,6 +10,10 @@ const nextConfig = withPWA({
   fallbacks: {
     document: '/offline.html',
   },
+});
+
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   reactStrictMode: true,
   webpack: (config) => {
     config.resolve.fallback = {
@@ -20,6 +24,8 @@ const nextConfig = withPWA({
     };
     return config;
   },
-});
+};
 
-export default nextConfig;
+const withNextIntl = createNextIntlPlugin('./i18n/request.ts');
+
+export default withNextIntl(withPWA(nextConfig));
