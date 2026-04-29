@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { useStore } from '@/lib/store';
+import { useStore, type AsteraStore } from '@/lib/store';
 import { pushToast } from './Toast';
+import { getFreighter } from '@/lib/freighter';
 
 /**
  * Background monitor that detects when the Freighter wallet has been
@@ -23,8 +24,8 @@ const POLL_INTERVAL_MS = 30_000;
 const DISCONNECT_TOAST_ID = 'wallet-disconnected';
 
 export default function WalletConnectionMonitor() {
-  const wallet = useStore((s) => s.wallet);
-  const disconnectStore = useStore((s) => s.disconnect);
+  const wallet = useStore((s: AsteraStore) => s.wallet);
+  const disconnectStore = useStore((s: AsteraStore) => s.disconnect);
   // Track "was connected" so we only notify on the connected → disconnected edge.
   const wasConnectedRef = useRef(wallet.connected);
 
@@ -42,7 +43,7 @@ export default function WalletConnectionMonitor() {
       if (!wasConnectedRef.current) return;
 
       try {
-        const freighter = await import('@stellar/freighter-api');
+        const freighter = await getFreighter();
         const [{ isAllowed, error: allowedError }, { address, error: addressError }] =
           await Promise.all([freighter.isAllowed(), freighter.getAddress()]);
 

@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "start:e2e": "next build && next start",
     "lint": "eslint .",
     "format": "prettier --write .",
     "prepare": "cd .. && git config core.hooksPath frontend/.husky",
@@ -15,20 +16,23 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
+    "next-pwa": "^5.6.0",
     "@stellar/freighter-api": "^6.0.1",
+    "@stellar/js-xdr": "^4.0.0",
     "@stellar/stellar-sdk": "^14.6.1",
     "jose": "^6.2.3",
     "next": "^15.2.2",
     "next-intl": "^4.9.1",
-    "next-pwa": "^5.6.0",
     "react": "^18",
     "react-dom": "^18",
     "react-hot-toast": "^2.6.0",
+    "react-redux": "^9.2.0",
     "recharts": "^3.8.1",
     "swr": "^2.2.5",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@parcel/watcher": "^2.5.0",
     "@playwright/test": "^1.44.0",
     "@testing-library/jest-dom": "^6.4.2",
     "@testing-library/react": "^14.2.1",
@@ -44,6 +48,7 @@
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.2.1",
     "eslint-config-prettier": "^10.1.8",
+    "hermes-parser": "^0.36.0",
     "husky": "^9.1.7",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^29.7.0",
@@ -52,6 +57,7 @@
     "prettier": "^3.8.1",
     "tailwindcss": "^3",
     "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5"
   },
   "lint-staged": {
@@ -62,5 +68,8 @@
     "*.{js,jsx,mjs,json,css,md}": [
       "npx prettier --write"
     ]
+  },
+  "overrides": {
+    "serialize-javascript": "7.0.5"
   }
 }

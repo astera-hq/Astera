@@ -42,7 +42,10 @@ function validateContractId(value: string, name: string): EnvValidationError | n
     return { variable: name, message: 'is required' };
   }
   if (value.length !== 56 || !value.startsWith('C')) {
-    return { variable: name, message: 'must be a valid Stellar contract ID (56 characters starting with C)' };
+    return {
+      variable: name,
+      message: 'must be a valid Stellar contract ID (56 characters starting with C)',
+    };
   }
   return null;
 }
@@ -50,7 +53,10 @@ function validateContractId(value: string, name: string): EnvValidationError | n
 function validateNetwork(value: string): EnvValidationError | null {
   const validNetworks = ['testnet', 'mainnet', 'standalone'];
   if (value && !validNetworks.includes(value)) {
-    return { variable: 'NEXT_PUBLIC_NETWORK', message: `must be one of: ${validNetworks.join(', ')}` };
+    return {
+      variable: 'NEXT_PUBLIC_NETWORK',
+      message: `must be one of: ${validNetworks.join(', ')}`,
+    };
   }
   return null;
 }
@@ -103,7 +109,8 @@ export function validateEnv(): { valid: boolean; errors: EnvValidationError[] } 
 }
 
 export function getEnvConfig(): EnvConfig {
-  const network = (process.env.NEXT_PUBLIC_NETWORK || 'testnet') as EnvConfig['NEXT_PUBLIC_NETWORK'];
+  const network = (process.env.NEXT_PUBLIC_NETWORK ||
+    'testnet') as EnvConfig['NEXT_PUBLIC_NETWORK'];
 
   return {
     NEXT_PUBLIC_INVOICE_CONTRACT_ID: process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID || '',
@@ -129,7 +136,7 @@ export function getNetworkConfig(network?: EnvConfig['NEXT_PUBLIC_NETWORK']) {
 }
 
 export function formatEnvErrors(errors: EnvValidationError[]): string {
-  return errors.map(e => `  - ${e.variable}: ${e.message}`).join('\n');
+  return errors.map((e) => `  - ${e.variable}: ${e.message}`).join('\n');
 }
 
 export function assertEnvValid(): void {
@@ -137,7 +144,10 @@ export function assertEnvValid(): void {
   if (!valid) {
     const errorMessage = `Environment configuration errors:\n${formatEnvErrors(errors)}`;
     console.error(errorMessage);
-    if (typeof window === 'undefined') {
+    // CI/build environments (especially for PRs from forks) typically don't have
+    // deployed contract IDs. Only hard-fail when explicitly requested.
+    const strict = process.env.NEXT_PUBLIC_STRICT_ENV === 'true';
+    if (strict && typeof window === 'undefined') {
       throw new Error(errorMessage);
     }
   }

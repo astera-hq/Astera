@@ -13,6 +13,13 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ['node_modules/**', '.next/**'],
+    ignores: [
+      'node_modules/**',
+      '.next/**',
+      'public/sw.js',
+      'public/sw.js.map',
+      'public/workbox-*.js',
+      'public/workbox-*.js.map',
+    ],
   },
 );

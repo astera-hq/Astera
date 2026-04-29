@@ -207,6 +207,10 @@ export async function getPoolConfig(): Promise<PoolConfig> {
     yieldBps: Number(raw.yield_bps),
     factoringFeeBps: Number(raw.factoring_fee_bps ?? 0),
     compoundInterest: Boolean(raw.compound_interest),
+    proposedYieldBps: Number(raw.proposed_yield_bps ?? 0),
+    yieldProposalAt: Number(raw.yield_proposal_at ?? 0),
+    yieldTimelockSecs: Number(raw.yield_timelock_secs ?? 0),
+    maxSingleInvestorBps: Number(raw.max_single_investor_bps ?? 0),
   };
 }
 
@@ -604,7 +608,10 @@ export interface KycInvestor {
   isApproved: boolean;
 }
 
-export async function fetchKycInvestors(): Promise<{ pending: KycInvestor[]; approved: KycInvestor[] }> {
+export async function fetchKycInvestors(): Promise<{
+  pending: KycInvestor[];
+  approved: KycInvestor[];
+}> {
   try {
     const latestLedger = await rpcGetLatestLedger();
     // Look back ~30 days (17280 * 30 ledgers) or as far as the RPC allows to find depositors
@@ -619,12 +626,14 @@ export async function fetchKycInvestors(): Promise<{ pending: KycInvestor[]; app
 
     for (const e of response.events) {
       try {
-        const topic = e.topic.map((t: string) => scValToNative(t));
+        const topic = e.topic.map((t) => scValToNative(t as any));
         if (topic[1] === 'deposit') {
           const val = scValToNative(e.value) as unknown[];
           const investor = val[0] as string;
           const amount = val[1] as bigint;
-          const timestamp = new Date(e.ledgerCloseAt).getTime();
+          const timestamp = new Date(
+            (e as any).ledgerClosedAt ?? (e as any).ledgerCloseAt,
+          ).getTime();
 
           const existing = depositors.get(investor);
           if (existing) {
@@ -1024,7 +1033,10 @@ export async function buildVoteProposalTx(params: {
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
-export async function buildExecuteProposalTx(executor: string, proposalId: number): Promise<string> {
+export async function buildExecuteProposalTx(
+  executor: string,
+  proposalId: number,
+): Promise<string> {
   const account = await getRpcAccount(executor);
   const contract = new Contract(GOVERNANCE_CONTRACT_ID);
 
@@ -1043,7 +1055,10 @@ export async function buildExecuteProposalTx(executor: string, proposalId: numbe
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
-export async function buildCancelProposalTx(cancelledBy: string, proposalId: number): Promise<string> {
+export async function buildCancelProposalTx(
+  cancelledBy: string,
+  proposalId: number,
+): Promise<string> {
   const account = await getRpcAccount(cancelledBy);
   const contract = new Contract(GOVERNANCE_CONTRACT_ID);
 

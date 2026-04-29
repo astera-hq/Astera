@@ -200,7 +200,7 @@ log_info "Running integration tests with new WASM..."
 cd "$PROJECT_ROOT"
 
 # Check if tests pass with the new build
-if ! cargo test -r --test integration_tests 2>&1 | tee "${REPORTS_DIR}/test-output-${BUILD_TS}.log"; then
+if ! cargo test --workspace --verbose 2>&1 | tee "${REPORTS_DIR}/test-output-${BUILD_TS}.log"; then
   log_error "Integration tests failed with new WASM"
   echo ""
   log_warn "This indicates the upgrade may break contract functionality."

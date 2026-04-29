@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { notificationService } from '@/lib/notifications';
 import type { NotificationAlert } from '@/lib/notifications';
+import { isInAppEnabled } from '@/lib/notification-preferences';
 
 const PRIORITY_COLORS: Record<string, string> = {
   LOW: 'text-brand-muted',
@@ -28,6 +29,7 @@ export default function NotificationBell() {
 
   useEffect(() => {
     const unsub = notificationService.subscribe((alert) => {
+      if (!isInAppEnabled(alert.type)) return;
       setNotifications((prev) => [alert, ...prev].slice(0, MAX_NOTIFICATIONS));
       setHasNew(true);
     });

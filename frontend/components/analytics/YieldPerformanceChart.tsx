@@ -59,10 +59,11 @@ export function YieldPerformanceChart({ data, isLoading }: YieldPerformanceChart
                 borderRadius: '8px',
                 color: '#fff',
               }}
-              formatter={(value: number, name: string) => {
-                if (name === 'apy') return `${value}% APY`;
-                if (name === 'interest') return `${value}%`;
-                return value;
+              formatter={(value, name) => {
+                const n = Number(value ?? 0);
+                if (name === 'apy') return `${n}% APY`;
+                if (name === 'interest') return `${n}%`;
+                return n;
               }}
             />
             <Legend wrapperStyle={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }} />

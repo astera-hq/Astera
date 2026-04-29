@@ -66,7 +66,5 @@ export function ChartSkeleton() {
 
 // Button loading skeleton (inline)
 export function ButtonSkeleton({ width = 'w-32' }: { width?: string }) {
-  return (
-    <Skeleton className={`h-10 ${width} rounded-xl`} />
-  );
+  return <Skeleton className={`h-10 ${width} rounded-xl`} />;
 }

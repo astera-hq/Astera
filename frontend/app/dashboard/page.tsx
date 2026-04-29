@@ -26,7 +26,7 @@ import { useTranslations } from 'next-intl';
 
 type DashboardRow = { invoice: Invoice; metadata: InvoiceMetadata };
 
-type StatusFilter = Invoice['status'];
+type StatusFilter = Invoice['status'] | 'All';
 type SortOption =
   | 'created-desc'
   | 'created-asc'
@@ -37,6 +37,7 @@ type SortOption =
 
 /** Number of invoices to load per page */
 const PAGE_SIZE = 20;
+const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
 
 export default function DashboardPage() {
   const t = useTranslations('Dashboard');
@@ -87,8 +88,6 @@ export default function DashboardPage() {
   /** Ref used to preserve scroll position when loading more */
   const listRef = useRef<HTMLDivElement>(null);
 
-  const [loadError, setLoadError] = useState<string | null>(null);
-
   useEffect(() => {
     setQueryHydrated(true);
   }, []);
@@ -105,7 +104,7 @@ export default function DashboardPage() {
           .filter((value): value is StatusFilter => STATUS_TABS.includes(value as StatusFilter))
       : [];
     const initialSort = params.get('sort');
-    const initialSortValue = SORT_OPTIONS.some((opt) => opt.value === initialSort)
+    const initialSortValue = sortOptions.some((opt) => opt.value === initialSort)
       ? (initialSort as SortOption)
       : 'created-desc';
 
@@ -187,7 +186,6 @@ export default function DashboardPage() {
   /** Initial load — fetches the first PAGE_SIZE invoices (from newest) */
   const loadInvoices = useCallback(async () => {
     setLoading(true);
-    setLoadError(null);
     try {
       const count = await getInvoiceCount();
       setTotalOnChainCount(count);
@@ -204,7 +202,6 @@ export default function DashboardPage() {
       setCommittedMap(committed);
       setScannedCount(count - Math.max(scannedUpTo, 0));
     } catch (e) {
-      setLoadError('Failed to load invoices. Make sure contracts are deployed.');
       toast.error('Failed to load invoices. Make sure contracts are deployed.');
       console.error(e);
     } finally {
@@ -270,7 +267,8 @@ export default function DashboardPage() {
       );
     }
 
-    result = filterInvoicesByStatuses(result, statusFilters);
+    const selectedStatuses = statusFilters.filter((s): s is Invoice['status'] => s !== 'All');
+    result = filterInvoicesByStatuses(result, selectedStatuses);
 
     switch (sort) {
       case 'created-desc':

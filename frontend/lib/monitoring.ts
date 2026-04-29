@@ -1,4 +1,10 @@
-import { rpcGetEvents, rpcGetLatestLedger, INVOICE_CONTRACT_ID, POOL_CONTRACT_ID, scValToNative } from './stellar';
+import {
+  rpcGetEvents,
+  rpcGetLatestLedger,
+  INVOICE_CONTRACT_ID,
+  POOL_CONTRACT_ID,
+  scValToNative,
+} from './stellar';
 import { getInvoiceCount, getMultipleInvoices } from './contracts';
 import { notificationService } from './notifications';
 import {
@@ -224,10 +230,7 @@ class ContractMonitor {
     }
   }
 
-  private buildTtlWarning(
-    invoice: Invoice,
-    currentLedger: number,
-  ): InvoiceTtlWarning | null {
+  private buildTtlWarning(invoice: Invoice, currentLedger: number): InvoiceTtlWarning | null {
     if (!this.shouldTrackInvoice(invoice.status)) {
       return null;
     }
@@ -245,9 +248,7 @@ class ContractMonitor {
     const ttlLedgers = ttlDays * 17_280;
     const elapsedLedgers = Math.max(
       0,
-      Math.floor(
-        (Date.now() - baseTimestamp * 1000) / (ContractMonitor.LEDGER_SECONDS * 1000),
-      ),
+      Math.floor((Date.now() - baseTimestamp * 1000) / (ContractMonitor.LEDGER_SECONDS * 1000)),
     );
     const expiryLedger = elapsedLedgers + ttlLedgers;
     const remainingLedgers = expiryLedger - currentLedger;
@@ -262,8 +263,7 @@ class ContractMonitor {
       status: invoice.status,
       expiryLedger,
       remainingDays: Math.max(0, remainingDays),
-      severity:
-        remainingDays <= 7 ? 'high' : remainingDays <= 14 ? 'medium' : 'low',
+      severity: remainingDays <= 7 ? 'high' : remainingDays <= 14 ? 'medium' : 'low',
     };
   }
 
@@ -272,7 +272,9 @@ class ContractMonitor {
   }
 
   private isTerminalStatus(status: InvoiceStatus): boolean {
-    return status === 'Paid' || status === 'Defaulted' || status === 'Cancelled' || status === 'Expired';
+    return (
+      status === 'Paid' || status === 'Defaulted' || status === 'Cancelled' || status === 'Expired'
+    );
   }
 }
 
