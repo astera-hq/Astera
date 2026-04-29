@@ -5,9 +5,9 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { usePathname, useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
-import InvoiceCard from '@/components/InvoiceCard';
-import { StatCardSkeleton, InvoiceCardSkeleton } from '@/components/Skeleton';
-import CreditScore from '@/components/CreditScore';
+import InvoiceCard, { InvoiceCardSkeleton } from '@/components/InvoiceCard';
+import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
+import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
 import {
   getMultipleInvoices,
@@ -71,6 +71,8 @@ export default function DashboardPage() {
 
   /** Ref used to preserve scroll position when loading more */
   const listRef = useRef<HTMLDivElement>(null);
+
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     setHydrated(true);
@@ -170,6 +172,7 @@ export default function DashboardPage() {
   /** Initial load — fetches the first PAGE_SIZE invoices (from newest) */
   const loadInvoices = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const count = await getInvoiceCount();
       setTotalOnChainCount(count);
@@ -186,6 +189,7 @@ export default function DashboardPage() {
       setCommittedMap(committed);
       setScannedCount(count - Math.max(scannedUpTo, 0));
     } catch (e) {
+      setLoadError('Failed to load invoices. Make sure contracts are deployed.');
       toast.error('Failed to load invoices. Make sure contracts are deployed.');
       console.error(e);
     } finally {
@@ -326,31 +330,60 @@ export default function DashboardPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Error state */}
+            {loadError && (
+              <div
+                role="alert"
+                className="lg:col-span-3 flex items-center justify-between bg-red-900/30 border border-red-800/50 text-red-400 rounded-xl px-4 py-3 text-sm"
+              >
+                <span>{loadError}</span>
+                <button
+                  onClick={loadInvoices}
+                  className="underline ml-4 shrink-0 hover:text-red-300"
+                >
+                  {t('retry') || 'Retry'}
+                </button>
+              </div>
+            )}
             {/* Left column */}
             <div className="lg:col-span-2 space-y-6">
               {/* Quick stats */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                {[
-                  {
-                    label: t('stats.totalVolume'),
-                    value: formatUSDC(stats.totalVolume),
-                    highlight: true,
-                  },
-                  { label: t('stats.pending'), value: stats.pending.toString() },
-                  { label: t('stats.funded'), value: stats.funded.toString() },
-                  { label: t('stats.paid'), value: stats.paid.toString() },
-                ].map((s) => (
-                  <div
-                    key={s.label}
-                    className="p-4 bg-brand-card border border-brand-border rounded-xl"
-                  >
-                    <p className="text-xs text-brand-muted mb-1">{s.label}</p>
-                    <p className={`text-xl font-bold ${s.highlight ? 'gradient-text' : ''}`}>
-                      {s.value}
-                    </p>
-                  </div>
-                ))}
-              </div>
+              {loading ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                  {[1, 2, 3, 4].map((n) => (
+                    <div
+                      key={n}
+                      className="p-4 bg-brand-card border border-brand-border rounded-xl animate-pulse"
+                    >
+                      <Skeleton className="h-3 w-16 mb-2" />
+                      <Skeleton className="h-6 w-20" />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                  {[
+                    {
+                      label: t('stats.totalVolume'),
+                      value: formatUSDC(stats.totalVolume),
+                      highlight: true,
+                    },
+                    { label: t('stats.pending'), value: stats.pending.toString() },
+                    { label: t('stats.funded'), value: stats.funded.toString() },
+                    { label: t('stats.paid'), value: stats.paid.toString() },
+                  ].map((s) => (
+                    <div
+                      key={s.label}
+                      className="p-4 bg-brand-card border border-brand-border rounded-xl"
+                    >
+                      <p className="text-xs text-brand-muted mb-1">{s.label}</p>
+                      <p className={`text-xl font-bold ${s.highlight ? 'gradient-text' : ''}`}>
+                        {s.value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Invoices */}
               <div ref={listRef}>
@@ -532,29 +565,33 @@ export default function DashboardPage() {
 
             {/* Right column */}
             <div>
-              <CreditScore
-                paid={stats.paid}
-                funded={stats.funded}
-                defaulted={stats.defaulted}
-                totalVolume={stats.totalVolume}
-                paymentHistory={invoices
-                  .filter((row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted')
-                  .map((row) => ({
-                    invoiceId: row.invoice.id,
-                    amount: row.invoice.amount,
-                    dueDate: row.metadata.dueDate,
-                    paidDate: row.metadata.paidDate ?? null,
-                    status: row.metadata.paidDate
-                      ? (row.metadata.paidDate > row.metadata.dueDate ? 'Late' : 'OnTime')
-                      : row.invoice.status === 'Defaulted'
-                        ? 'Defaulted'
-                        : 'OnTime',
-                    daysLate:
-                      row.metadata.paidDate && row.metadata.paidDate > row.metadata.dueDate
-                        ? Math.floor((row.metadata.paidDate - row.metadata.dueDate) / 86400)
-                        : undefined,
-                  }))}
-              />
+              {loading ? (
+                <CreditScoreSkeleton />
+              ) : (
+                <CreditScore
+                  paid={stats.paid}
+                  funded={stats.funded}
+                  defaulted={stats.defaulted}
+                  totalVolume={stats.totalVolume}
+                  paymentHistory={invoices
+                    .filter((row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted')
+                    .map((row) => ({
+                      invoiceId: row.invoice.id,
+                      amount: row.invoice.amount,
+                      dueDate: row.metadata.dueDate,
+                      paidDate: row.metadata.paidDate ?? null,
+                      status: row.metadata.paidDate
+                        ? (row.metadata.paidDate > row.metadata.dueDate ? 'Late' : 'OnTime')
+                        : row.invoice.status === 'Defaulted'
+                          ? 'Defaulted'
+                          : 'OnTime',
+                      daysLate:
+                        row.metadata.paidDate && row.metadata.paidDate > row.metadata.dueDate
+                          ? Math.floor((row.metadata.paidDate - row.metadata.dueDate) / 86400)
+                          : undefined,
+                    }))}
+                />
+              )}
             </div>
           </div>
         )}

@@ -1,6 +1,7 @@
 import type { InvoiceMetadata } from '@/lib/types';
 import { formatUSDC, formatDate, daysUntil } from '@/lib/stellar';
 import Link from 'next/link';
+import { Skeleton } from '@/components/Skeleton';
 
 interface Props {
   id: number;
@@ -101,5 +102,33 @@ export default function InvoiceCard({ id, metadata, fundedAmount }: Props) {
         </p>
       )}
     </Link>
+  );
+}
+
+export function InvoiceCardSkeleton() {
+  return (
+    <div className="p-5 bg-brand-card border border-brand-border rounded-2xl animate-pulse">
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div className="flex gap-3 min-w-0 flex-1">
+          <Skeleton className="w-12 h-12 rounded-xl flex-shrink-0" />
+          <div className="min-w-0 flex-1">
+            <Skeleton className="h-3 w-24 mb-2" />
+            <Skeleton className="h-5 w-48 mb-1" />
+            <Skeleton className="h-4 w-32" />
+          </div>
+        </div>
+        <Skeleton className="h-6 w-16 rounded-full flex-shrink-0" />
+      </div>
+
+      <Skeleton className="h-8 w-32 mb-4" />
+
+      <div className="flex items-center justify-between text-sm">
+        <div className="flex items-center gap-2">
+          <Skeleton className="h-4 w-10" />
+          <Skeleton className="h-4 w-28" />
+        </div>
+        <Skeleton className="h-4 w-20" />
+      </div>
+    </div>
   );
 }
