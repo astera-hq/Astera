@@ -21,7 +21,6 @@
     "@stellar/js-xdr": "^4.0.0",
     "@stellar/stellar-sdk": "^14.6.1",
     "jose": "^6.2.3",
-    "lucide-react": "^1.14.0",
     "next": "^15.2.2",
     "next-intl": "^4.9.1",
     "react": "^18",
