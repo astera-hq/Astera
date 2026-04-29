@@ -7,9 +7,6 @@
 // - Oracle: mark_verified(), mark_disputed()
 // - Anyone: read-only view functions (e.g., get_invoice)
 
-extern crate alloc;
-use alloc::string::ToString;
-
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     String, Symbol, Vec,
