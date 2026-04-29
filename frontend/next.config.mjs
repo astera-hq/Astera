@@ -1,9 +1,9 @@
-import createNextIntlPlugin from 'next-intl/plugin';
-
 // GitHub Actions can end up with optional native deps omitted (notably
 // `@parcel/watcher` via transitive tooling). Importing PWA tooling can trigger
 // those natives during config load, failing the entire build. In CI we keep
 // the config minimal and skip PWA wrapping.
+import createNextIntlPlugin from 'next-intl/plugin';
+
 let withPWA = (config) => config;
 const IS_CI =
   process.env.CI === 'true' || process.env.CI === '1' || process.env.GITHUB_ACTIONS === 'true';
