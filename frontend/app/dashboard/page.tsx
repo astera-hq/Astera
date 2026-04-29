@@ -10,6 +10,7 @@ import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
 import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
 import TestnetFaucet from '@/components/TestnetFaucet';
+import PipelineBoard from '@/components/dashboard/PipelineBoard';
 import {
   getMultipleInvoices,
   getInvoiceCount,
@@ -19,6 +20,8 @@ import {
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice, InvoiceMetadata } from '@/lib/types';
 import { filterInvoicesByStatuses } from '@/lib/dashboardFilters';
+import { useDashboardViewMode } from '@/hooks/useDashboardViewMode';
+import { DASHBOARD_VIEW_MODES } from '@/lib/dashboardPipeline';
 import { useTranslations } from 'next-intl';
 
 type DashboardRow = { invoice: Invoice; metadata: InvoiceMetadata };
@@ -50,9 +53,20 @@ export default function DashboardPage() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilters, setStatusFilters] = useState<StatusFilter[]>([]);
   const [sort, setSort] = useState<SortOption>('created-desc');
-  const [hydrated, setHydrated] = useState(false);
+  const [queryHydrated, setQueryHydrated] = useState(false);
+  const { viewMode, setViewMode, hydrated: viewModeHydrated } = useDashboardViewMode();
 
-  const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
+  const STATUS_TABS: StatusFilter[] = [
+    'Pending',
+    'AwaitingVerification',
+    'Verified',
+    'Disputed',
+    'Funded',
+    'Paid',
+    'Defaulted',
+    'Cancelled',
+    'Expired',
+  ];
 
   const SORT_OPTIONS: { value: SortOption; label: string }[] = [
     { value: 'created-desc', label: t('sort.createdDesc') },
@@ -76,11 +90,11 @@ export default function DashboardPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    setHydrated(true);
+    setQueryHydrated(true);
   }, []);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!queryHydrated) return;
 
     const params = new URLSearchParams(window.location.search);
     const q = params.get('q') ?? '';
@@ -101,7 +115,7 @@ export default function DashboardPage() {
       setStatusFilters(initialStatuses);
       setSort(initialSortValue);
     });
-  }, [hydrated]);
+  }, [queryHydrated]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -111,7 +125,7 @@ export default function DashboardPage() {
   }, [search]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!queryHydrated) return;
 
     const params = new URLSearchParams();
     if (debouncedSearch.trim()) params.set('q', debouncedSearch.trim());
@@ -120,7 +134,7 @@ export default function DashboardPage() {
 
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  }, [hydrated, pathname, router, debouncedSearch, sort, statusFilters]);
+  }, [queryHydrated, pathname, router, debouncedSearch, sort, statusFilters]);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -294,6 +308,17 @@ export default function DashboardPage() {
     return result;
   }, [invoices, debouncedSearch, statusFilters, sort]);
 
+  const pipelineRows = useMemo(() => {
+    if (!debouncedSearch.trim()) return invoices;
+    const q = debouncedSearch.trim().toLowerCase();
+    return invoices.filter(
+      (row) =>
+        row.metadata.debtor.toLowerCase().includes(q) ||
+        row.metadata.description.toLowerCase().includes(q) ||
+        row.metadata.name.toLowerCase().includes(q),
+    );
+  }, [invoices, debouncedSearch]);
+
   const isFiltered = debouncedSearch.trim() !== '' || statusFilters.length > 0;
 
   return (
@@ -306,6 +331,30 @@ export default function DashboardPage() {
             <p className="text-brand-muted text-sm">{t('description')}</p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            {viewModeHydrated && (
+              <div className="inline-flex items-center rounded-xl border border-brand-border bg-brand-card p-1">
+                <button
+                  onClick={() => setViewMode(DASHBOARD_VIEW_MODES.LIST)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                    viewMode === DASHBOARD_VIEW_MODES.LIST
+                      ? 'bg-brand-gold text-brand-dark'
+                      : 'text-brand-muted hover:text-white'
+                  }`}
+                >
+                  {t('view.list')}
+                </button>
+                <button
+                  onClick={() => setViewMode(DASHBOARD_VIEW_MODES.PIPELINE)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                    viewMode === DASHBOARD_VIEW_MODES.PIPELINE
+                      ? 'bg-brand-gold text-brand-dark'
+                      : 'text-brand-muted hover:text-white'
+                  }`}
+                >
+                  {t('view.pipeline')}
+                </button>
+              </div>
+            )}
             <button
               onClick={() => setShowOnboarding(true)}
               className="min-h-[44px] px-4 py-2 text-brand-muted hover:text-white transition-colors text-sm"
@@ -413,66 +462,69 @@ export default function DashboardPage() {
                   )}
                 </div>
 
-                {/* Status tabs + Sort */}
-                <div className="flex flex-col gap-3 mb-4">
-                  <div className="flex gap-1 flex-wrap">
-                    <button
-                      onClick={() => setStatusFilters([])}
-                      className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                        statusFilters.length === 0
-                          ? 'bg-brand-gold text-brand-dark'
-                          : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
-                      }`}
-                    >
-                      {t('status.all')}
-                    </button>
-                    {STATUS_TABS.map((tab) => (
-                      <button
-                        key={tab}
-                        onClick={() =>
-                          setStatusFilters((prev) =>
-                            prev.includes(tab)
-                              ? prev.filter((item) => item !== tab)
-                              : [...prev, tab],
-                          )
-                        }
-                        className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                          statusFilters.includes(tab)
-                            ? 'bg-brand-gold text-brand-dark'
-                            : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
-                        }`}
-                      >
-                        {t(`status.${tab.toLowerCase()}`)}
-                      </button>
-                    ))}
-                  </div>
+                {viewMode === DASHBOARD_VIEW_MODES.LIST && (
+                  <>
+                    <div className="flex flex-col gap-3 mb-4">
+                      <div className="flex gap-1 flex-wrap">
+                        <button
+                          onClick={() => setStatusFilters([])}
+                          className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                            statusFilters.length === 0
+                              ? 'bg-brand-gold text-brand-dark'
+                              : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
+                          }`}
+                        >
+                          {t('status.all')}
+                        </button>
+                        {STATUS_TABS.map((tab) => (
+                          <button
+                            key={tab}
+                            onClick={() =>
+                              setStatusFilters((prev) =>
+                                prev.includes(tab)
+                                  ? prev.filter((item) => item !== tab)
+                                  : [...prev, tab],
+                              )
+                            }
+                            className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                              statusFilters.includes(tab)
+                                ? 'bg-brand-gold text-brand-dark'
+                                : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
+                            }`}
+                          >
+                            {t(`status.${tab.toLowerCase()}`)}
+                          </button>
+                        ))}
+                      </div>
 
-                  <select
-                    value={sort}
-                    onChange={(e) => setSort(e.target.value as SortOption)}
-                    className="w-full sm:w-auto bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-gold cursor-pointer min-h-[36px]"
-                  >
-                    {SORT_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {statusFilters.length > 0 && (
-                  <div className="flex items-center gap-2 flex-wrap mb-4">
-                    {statusFilters.map((status) => (
-                      <button
-                        key={status}
-                        onClick={() =>
-                          setStatusFilters((prev) => prev.filter((item) => item !== status))
-                        }
-                        className="px-2.5 py-1 rounded-full text-xs bg-brand-card border border-brand-border text-white hover:border-brand-gold/60"
+                      <select
+                        value={sort}
+                        onChange={(e) => setSort(e.target.value as SortOption)}
+                        className="w-full sm:w-auto bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-gold cursor-pointer min-h-[36px]"
                       >
-                        {t(`status.${status.toLowerCase()}`)} ✕
-                      </button>
-                    ))}
-                  </div>
+                        {SORT_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {statusFilters.length > 0 && (
+                      <div className="flex items-center gap-2 flex-wrap mb-4">
+                        {statusFilters.map((status) => (
+                          <button
+                            key={status}
+                            onClick={() =>
+                              setStatusFilters((prev) => prev.filter((item) => item !== status))
+                            }
+                            className="px-2.5 py-1 rounded-full text-xs bg-brand-card border border-brand-border text-white hover:border-brand-gold/60"
+                          >
+                            {t(`status.${status.toLowerCase()}`)} ✕
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {loading ? (
@@ -507,6 +559,8 @@ export default function DashboardPage() {
                       </button>
                     )}
                   </div>
+                ) : viewMode === DASHBOARD_VIEW_MODES.PIPELINE ? (
+                  <PipelineBoard rows={pipelineRows} />
                 ) : (
                   <>
                     <div className="space-y-4">
@@ -567,21 +621,24 @@ export default function DashboardPage() {
                   totalVolume={stats.totalVolume}
                   paymentHistory={invoices
                     .filter((row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted')
-                    .map((row) => ({
-                      invoiceId: row.invoice.id,
-                      amount: row.invoice.amount,
-                      dueDate: row.metadata.dueDate,
-                      paidDate: row.metadata.paidDate ?? null,
-                      status: row.metadata.paidDate
-                        ? (row.metadata.paidDate > row.metadata.dueDate ? 'Late' : 'OnTime')
-                        : row.invoice.status === 'Defaulted'
-                          ? 'Defaulted'
-                          : 'OnTime',
-                      daysLate:
-                        row.metadata.paidDate && row.metadata.paidDate > row.metadata.dueDate
-                          ? Math.floor((row.metadata.paidDate - row.metadata.dueDate) / 86400)
-                          : undefined,
-                    }))}
+                    .map((row) => {
+                      const paidDate = row.invoice.paidAt > 0 ? row.invoice.paidAt : null;
+                      return {
+                        invoiceId: row.invoice.id,
+                        amount: row.invoice.amount,
+                        dueDate: row.metadata.dueDate,
+                        paidDate,
+                        status: paidDate
+                          ? (paidDate > row.metadata.dueDate ? 'Late' : 'OnTime')
+                          : row.invoice.status === 'Defaulted'
+                            ? 'Defaulted'
+                            : 'OnTime',
+                        daysLate:
+                          paidDate && paidDate > row.metadata.dueDate
+                            ? Math.floor((paidDate - row.metadata.dueDate) / 86400)
+                            : undefined,
+                      };
+                    })}
                 />
               )}
             </div>

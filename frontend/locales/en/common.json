@@ -22,7 +22,24 @@
       "disputed": "Disputed",
       "funded": "Funded",
       "paid": "Paid",
-      "defaulted": "Defaulted"
+      "defaulted": "Defaulted",
+      "cancelled": "Cancelled",
+      "expired": "Expired"
+    },
+    "view": {
+      "list": "List",
+      "pipeline": "Pipeline"
+    },
+    "pipeline": {
+      "needsAttention": "Needs Attention",
+      "noAttention": "No invoices need attention right now.",
+      "columns": {
+        "pending": "Pending",
+        "awaitingVerification": "Awaiting Verification",
+        "verified": "Verified",
+        "funded": "Funded",
+        "paid": "Paid / Completed"
+      }
     },
     "sort": {
       "createdDesc": "Created date (newest)",

@@ -22,7 +22,24 @@
       "disputed": "Conteste",
       "funded": "Financé",
       "paid": "Payé",
-      "defaulted": "En défaut"
+      "defaulted": "En défaut",
+      "cancelled": "Annulé",
+      "expired": "Expiré"
+    },
+    "view": {
+      "list": "Liste",
+      "pipeline": "Pipeline"
+    },
+    "pipeline": {
+      "needsAttention": "Nécessite une attention",
+      "noAttention": "Aucune facture ne nécessite une attention pour le moment.",
+      "columns": {
+        "pending": "En attente",
+        "awaitingVerification": "En attente de vérification",
+        "verified": "Vérifié",
+        "funded": "Financé",
+        "paid": "Payé / Terminé"
+      }
     },
     "sort": {
       "createdDesc": "Date de création (plus récente)",
