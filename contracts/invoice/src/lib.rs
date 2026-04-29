@@ -1,5 +1,11 @@
 #![no_std]
 
+// === AUTHORIZED CALLERS ===
+// - Admin: initialize(), admin-only setters
+// - Pool contract: mark_funded(), mark_paid(), mark_defaulted()
+// - Oracle: mark_verified(), mark_disputed()
+// - Anyone: read-only view functions (e.g., get_invoice)
+
 extern crate alloc;
 use alloc::string::ToString;
 

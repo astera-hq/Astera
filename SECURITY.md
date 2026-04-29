@@ -59,6 +59,8 @@ All smart contracts follow these security practices:
 
 ### Access Control Matrix
 
+> See the full [Authorization Matrix](./docs/authorization-matrix.md) for a complete cross-contract call table and auditor checklist.
+
 | Operation | Invoice Contract | Pool Contract | Credit Score |
 |-----------|-----------------|---------------|--------------|
 | Initialize | Admin | Admin | Admin |
