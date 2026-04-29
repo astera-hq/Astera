@@ -89,7 +89,14 @@ pub enum PoolError {
     WithdrawalRequestNotFound = 21,
     AlreadyQueuedForWithdrawal = 22,
     InvalidRequestId = 23,
-    TokenDepositCapReached = 26,
+    // Insurance reserve errors
+    InsufficientReserve = 26,
+    InvalidReserveRatio = 27,
+    // Missing error variants used in code
+    TokenHasActiveBalances = 28,
+    TokenHasDeployedCapital = 29,
+    YieldProposalNotFound = 30,
+    YieldChangeNotReady = 31,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -110,6 +117,8 @@ const DEFAULT_YIELD_TIMELOCK_SECS: u64 = 172_800; // 48 hours
 const DEFAULT_MIN_DEPOSIT_AMOUNT: i128 = 0;
 // #233: max single-investor concentration — 2_000 bps = 20% (0 = disabled, 10_000 = 100%)
 const DEFAULT_MAX_SINGLE_INVESTOR_BPS: u32 = 2_000;
+/// Default reserve ratio: 5% of factoring fees go to insurance reserve (500 bps).
+const DEFAULT_RESERVE_RATIO_BPS: u32 = 500;
 // #244: withdrawal rate limiting — 10_000 bps (100%) and 0s = disabled by default
 const DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS: u32 = 10_000;
 const DEFAULT_WITHDRAWAL_COOLDOWN_SECS: u64 = 0;
@@ -153,6 +162,8 @@ pub struct PoolConfig {
     // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
     pub max_single_withdrawal_bps: u32,
     pub withdrawal_cooldown_secs: u64,
+    // Insurance reserve: fraction of factoring fees directed to reserve (bps, default 500 = 5%)
+    pub reserve_ratio_bps: u32,
 }
 
 #[contracttype]
@@ -166,6 +177,8 @@ pub struct PoolTokenTotals {
     pub reward_per_share: i128,
     // #236: protocol fee revenue available for treasury withdrawal (separate from investor pool)
     pub protocol_revenue: i128,
+    // Insurance reserve: built from factoring fees, used to cover default shortfalls
+    pub reserve_balance: i128,
 }
 
 #[contracttype]
@@ -583,6 +596,8 @@ impl FundingPool {
             // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
             max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
             withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
+            // Insurance reserve: default 5% of factoring fees
+            reserve_ratio_bps: DEFAULT_RESERVE_RATIO_BPS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -1514,11 +1529,23 @@ impl FundingPool {
             .get(&DataKey::StorageStats)
             .unwrap_or_default();
 
+        // Compute reserve contribution from factoring fee (available for event emission later)
+        let reserve_contribution = if fully_repaid {
+            (record.factoring_fee as u128 * config.reserve_ratio_bps as u128 / BPS_DENOM as u128) as i128
+        } else {
+            0
+        };
+
         if fully_repaid {
             tt.total_deployed -= record.principal;
             tt.pool_value += total_interest as i128;
             tt.total_fee_revenue += record.factoring_fee;
-            tt.protocol_revenue += record.factoring_fee; // #236: track separately for treasury
+
+            // Split factoring fee between insurance reserve and protocol revenue
+            let protocol_revenue = record.factoring_fee - reserve_contribution;
+            tt.reserve_balance += reserve_contribution;
+            tt.protocol_revenue += protocol_revenue;
+
             tt.total_paid_out += total_due;
             stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
 
@@ -1593,6 +1620,14 @@ impl FundingPool {
                 (EVT, symbol_short!("repaid")),
                 (invoice_id, record.principal, total_interest as i128),
             );
+
+            // Emit reserve deposit event if reserve received contribution
+            if reserve_contribution > 0 {
+                env.events().publish(
+                    (EVT, symbol_short!("res_dep")),
+                    (invoice_id, reserve_contribution, tt.reserve_balance),
+                );
+            }
         } else {
             env.events().publish(
                 (EVT, symbol_short!("part_pay")),
@@ -1795,6 +1830,24 @@ impl FundingPool {
         // reduce total_deployed by the original principal (the invoice is now a loss).
         tt.pool_value += col.amount;
         tt.total_deployed -= record.principal;
+
+        // Draw from insurance reserve to cover the shortfall before investors bear the loss.
+        // shortfall = principal - collateral_seized (the amount investors would otherwise lose)
+        let shortfall = record.principal - col.amount;
+        let reserve_cover = if shortfall > 0 && tt.reserve_balance > 0 {
+            let cover = if shortfall > tt.reserve_balance {
+                tt.reserve_balance
+            } else {
+                shortfall
+            };
+            tt.reserve_balance -= cover;
+            tt.pool_value += cover; // Reserve covers part of the loss
+            cover
+        } else {
+            0
+        };
+        let remaining_shortfall = shortfall - reserve_cover;
+
         env.storage().instance().set(&token_totals_key, &tt);
 
         col.settled = true;
@@ -1807,10 +1860,28 @@ impl FundingPool {
             COMPLETED_INVOICE_TTL,
         );
 
+        // Decrement active funded invoices count since this defaulted invoice is now settled
+        let mut stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+        stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+
         env.events().publish(
             (EVT, symbol_short!("col_seiz")),
             (invoice_id, col.depositor, col.amount),
         );
+
+        // Emit reserve usage event if reserve covered part of the shortfall
+        if reserve_cover > 0 {
+            env.events().publish(
+                (EVT, symbol_short!("res_use")),
+                (invoice_id, reserve_cover, remaining_shortfall),
+            );
+        }
+
         Ok(())
     }
 
@@ -2252,6 +2323,79 @@ impl FundingPool {
         token_client.transfer(&env.current_contract_address(), &treasury, &amount);
         env.events()
             .publish((EVT, symbol_short!("rev_wdraw")), (token, amount, treasury));
+        Ok(())
+    }
+
+    // ---- Insurance reserve admin functions ----
+
+    /// Admin configures the reserve build rate (bps of factoring fees directed to reserve).
+    /// Valid range: 0..=10_000 (0% to 100%).
+    pub fn set_reserve_ratio(env: Env, admin: Address, bps: u32) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if bps > BPS_DENOM {
+            return Err(PoolError::InvalidReserveRatio);
+        }
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.reserve_ratio_bps = bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("res_cfg")),
+            (admin, bps),
+        );
+        Ok(())
+    }
+
+    /// Returns the current reserve balance for a given token.
+    pub fn get_reserve_balance(env: Env, token: Address) -> i128 {
+        bump_instance(&env);
+        let tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token))
+            .unwrap_or_default();
+        tt.reserve_balance
+    }
+
+    /// Admin withdraws excess reserve to treasury.
+    /// The amount must not exceed the current reserve balance.
+    pub fn withdraw_reserve(env: Env, admin: Address, token: Address, amount: i128) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Treasury)
+            .ok_or(PoolError::TreasuryNotConfigured)?;
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+        if amount > tt.reserve_balance {
+            return Err(PoolError::InsufficientReserve);
+        }
+        tt.reserve_balance -= amount;
+        tt.pool_value -= amount;
+        env.storage().instance().set(&token_totals_key, &tt);
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &treasury, &amount);
+        env.events().publish(
+            (EVT, symbol_short!("res_wd")),
+            (token, amount, treasury, tt.reserve_balance),
+        );
         Ok(())
     }
 
