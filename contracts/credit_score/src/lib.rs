@@ -1,5 +1,10 @@
 #![no_std]
 
+// === AUTHORIZED CALLERS ===
+// - Admin: initialize(), admin-only setters
+// - Pool contract: record_payment(), record_default() (pool address stored in config)
+// - Anyone: view functions (get_credit_score)
+
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };

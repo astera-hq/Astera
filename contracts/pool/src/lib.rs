@@ -1,3 +1,9 @@
+// === AUTHORIZED CALLERS ===
+// - Admin: pause(), unpause(), set_yield(), add_token(), admin-only setters
+// - Pool contract: N/A (this is the pool contract)
+// - Invoice contract: may call pool for state reads
+// - Anyone: public view functions
+
 // IMPLEMENTATION APPROACH for #222 - Pool Token Removal Safety Checks
 //
 // RECON FINDINGS:
