@@ -16,7 +16,8 @@ fn setup(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address) {
     let pool = Address::generate(env);
     let sme = Address::generate(env);
     let expiration = 30u64 * 86_400u64;
-    client.initialize(&admin, &pool, &i128::MAX, &expiration, &u32::MAX);
+    // Contract enforces `grace_period_days <= 90`.
+    client.initialize(&admin, &pool, &i128::MAX, &expiration, &90u32);
     (client, admin, pool, sme)
 }
 

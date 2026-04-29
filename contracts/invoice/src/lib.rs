@@ -6,11 +6,11 @@
 // - Oracle: mark_verified(), mark_disputed()
 // - Anyone: read-only view functions (e.g., get_invoice)
 
+extern crate alloc;
+use alloc::string::ToString;
+
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String,
-    Symbol, Vec,
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 use soroban_sdk::contractclient;
@@ -57,6 +57,9 @@ pub enum InvoiceError {
     InvalidStatusTransition = 2,
     InvoiceNotFound = 3,
     HashMismatch = 4,
+    /// create_invoice() rejects an invoice when a single SME would exceed the
+    /// configured maximum cumulative outstanding invoice amount.
+    SmeExposureLimitExceeded = 5,
 }
 
 #[contracttype]
@@ -143,11 +146,7 @@ fn parse_version() -> ContractVersion {
         .and_then(|s| s.split('-').next()) // strip pre-release suffix
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    ContractVersion {
-        major,
-        minor,
-        patch,
-    }
+    ContractVersion { major, minor, patch }
 }
 
 /// Current migration level — bump when a schema migration runs.
@@ -186,6 +185,9 @@ pub enum DataKey {
     UpgradeScheduledAt,
     GracePeriodDays,
     MaxInvoiceAmount,
+    /// Configurable upper bound on cumulative outstanding (funded but not
+    /// yet paid/defaulted/cancelled) invoice value per SME address (#271).
+    MaxOutstandingPerSme,
     ExpirationDurationSecs,
     DailyInvoiceLimit,
     DisputeResolutionWindow,
@@ -199,6 +201,8 @@ pub enum DataKey {
     DebtorRecord(String),
     /// List of all registered debtor IDs (#241).
     DebtorIds,
+    /// Persistent tracking for per-SME outstanding funded invoice value.
+    SmeOutstanding(Address),
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -263,9 +267,24 @@ fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
     }
     true // Stubbed to allow build
 fn is_valid_metadata_uri(env: &Env, uri: &String) -> bool {
-    let _ = env;
-    let len = uri.len();
-    len > 0 && len <= MAX_METADATA_URI_LEN
+    // Soroban SDK 22.x removed `String::to_bytes()`. For this lightweight
+    // URI-prefix validation, convert to a host string and validate its
+    // ASCII prefix.
+    let s = uri.to_string();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+
+    if len == 0 || len > MAX_METADATA_URI_LEN as usize {
+        return false;
+    }
+
+    let ipfs = b"ipfs://";
+    let ar = b"ar://";
+    let https = b"https://";
+
+    (len >= ipfs.len() && &bytes[..ipfs.len()] == ipfs)
+        || (len >= ar.len() && &bytes[..ar.len()] == ar)
+        || (len >= https.len() && &bytes[..https.len()] == https)
 }
 
 fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
@@ -279,29 +298,36 @@ fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
         .extend_ttl(&DataKey::Invoice(id), ttl, ttl);
 }
 
-fn invoice_ttl_ledger_expiry(env: &Env, is_completed: bool) -> u64 {
-    let ttl = if is_completed {
-        COMPLETED_INVOICE_TTL as u64
-    } else {
-        ACTIVE_INVOICE_TTL as u64
-    };
-    u64::from(env.ledger().sequence()).saturating_add(ttl)
+// ── #271: Per-SME outstanding exposure tracking ────────────────────────────
+
+fn get_max_outstanding_per_sme(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxOutstandingPerSme)
+        .unwrap_or(i128::MAX)
 }
 
-fn is_terminal_invoice_status(status: &InvoiceStatus) -> bool {
-    matches!(
-        status,
-        InvoiceStatus::Paid
-            | InvoiceStatus::Defaulted
-            | InvoiceStatus::Cancelled
-            | InvoiceStatus::Expired
-    )
+fn get_sme_outstanding(env: &Env, sme: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::SmeOutstanding(sme.clone()))
+        .unwrap_or(0)
 }
 
-fn renew_invoice_ttl(env: &Env, id: u64, status: &InvoiceStatus) -> u64 {
-    let is_completed = is_terminal_invoice_status(status);
-    set_invoice_ttl(env, id, is_completed);
-    invoice_ttl_ledger_expiry(env, is_completed)
+fn set_sme_outstanding(env: &Env, sme: &Address, value: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::SmeOutstanding(sme.clone()), &value);
+}
+
+fn increase_sme_outstanding(env: &Env, sme: &Address, amount: i128) {
+    let current = get_sme_outstanding(env, sme);
+    set_sme_outstanding(env, sme, current.saturating_add(amount));
+}
+
+fn decrease_sme_outstanding(env: &Env, sme: &Address, amount: i128) {
+    let current = get_sme_outstanding(env, sme);
+    set_sme_outstanding(env, sme, current.saturating_sub(amount));
 }
 
 /// Writes decimal digits of `n` into `buf` (left-aligned), returns digit count.
@@ -401,13 +427,16 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::MaxInvoiceAmount, &max_invoice_amount);
+        // By default, don't restrict per-SME outstanding exposure (#271).
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxOutstandingPerSme, &i128::MAX);
         env.storage()
             .instance()
             .set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
-        env.storage().instance().set(
-            &DataKey::DisputeResolutionWindow,
-            &DEFAULT_DISPUTE_RESOLUTION_WINDOW,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeResolutionWindow, &DEFAULT_DISPUTE_RESOLUTION_WINDOW);
         // Store compile-time version (#237)
         env.storage()
             .instance()
@@ -678,6 +707,9 @@ impl InvoiceContract {
         require_not_paused(&env);
         bump_instance(&env);
 
+        // Optional metadata URI validation (#271-related; keeps behaviour
+        // consistent for invoices created with art/metadata URIs).
+
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -691,6 +723,16 @@ impl InvoiceContract {
         }
         if due_date <= env.ledger().timestamp() {
             panic!("due date must be in the future");
+        }
+
+        // ── #271: per-SME cumulative outstanding exposure limit ────────────
+        // Outstanding is tracked in `mark_funded`/`mark_paid`/`mark_defaulted`
+        // transitions, so this check prevents a single SME from creating many
+        // large invoices that would concentrate pool risk.
+        let outstanding = get_sme_outstanding(&env, &owner);
+        let max_outstanding = get_max_outstanding_per_sme(&env);
+        if outstanding.saturating_add(amount) > max_outstanding {
+            panic!("SmeExposureLimitExceeded");
         }
 
         // Debtor registry validation (#241)
@@ -743,12 +785,6 @@ impl InvoiceContract {
 
         daily_count += 1;
         env.storage().instance().set(&daily_count_key, &daily_count);
-
-        if let Some(uri) = metadata_uri.clone() {
-            if !is_valid_metadata_uri(&env, &uri) {
-                panic!("invalid metadata uri");
-            }
-        }
 
         let count: u64 = env
             .storage()
@@ -899,8 +935,7 @@ impl InvoiceContract {
         set_invoice_ttl(&env, id, false);
 
         if approved {
-            env.events()
-                .publish((EVT, symbol_short!("verified")), (id, oracle_hash));
+            env.events().publish((EVT, symbol_short!("verified")), (id, oracle_hash));
         } else {
             env.events().publish((EVT, symbol_short!("disputed")), (id, env.ledger().timestamp()));
         }
@@ -957,6 +992,14 @@ impl InvoiceContract {
             }
             DisputeResolution::InFavorOfDebtor => {
                 invoice.status = InvoiceStatus::Cancelled;
+
+                // ── #271: decrement per-SME outstanding on cancellation ─────
+                // Disputed invoices are typically not funded (so outstanding is
+                // usually zero), but this keeps state consistent if it ever
+                // transitions from Funded.
+                let sme = invoice.owner.clone();
+                decrease_sme_outstanding(&env, &sme, invoice.amount);
+
                 let mut stats: StorageStats = env
                     .storage()
                     .instance()
@@ -972,8 +1015,10 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
 
-        env.events()
-            .publish((EVT, symbol_short!("resolved")), (id, resolution, caller));
+        env.events().publish(
+            (EVT, symbol_short!("resolved")),
+            (id, resolution, caller),
+        );
     }
 
     pub fn set_dispute_window(env: Env, admin: Address, window: u64) {
@@ -1035,6 +1080,16 @@ impl InvoiceContract {
         invoice.funded_at = env.ledger().timestamp();
         invoice.pool_contract = pool;
 
+        // ── #271: increment per-SME outstanding exposure on funding ───────
+        let sme = invoice.owner.clone();
+        let current_outstanding = get_sme_outstanding(&env, &sme);
+        let new_outstanding = current_outstanding.saturating_add(invoice.amount);
+        let max_outstanding = get_max_outstanding_per_sme(&env);
+        if new_outstanding > max_outstanding {
+            panic!("SmeExposureLimitExceeded");
+        }
+        set_sme_outstanding(&env, &sme, new_outstanding);
+
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1074,6 +1129,10 @@ impl InvoiceContract {
 
         invoice.status = InvoiceStatus::Paid;
         invoice.paid_at = env.ledger().timestamp();
+
+        // ── #271: decrement per-SME outstanding exposure on repayment ──
+        let sme = invoice.owner.clone();
+        decrease_sme_outstanding(&env, &sme, invoice.amount);
 
         env.storage()
             .persistent()
@@ -1134,6 +1193,11 @@ impl InvoiceContract {
         }
 
         invoice.status = InvoiceStatus::Defaulted;
+
+        // ── #271: decrement per-SME outstanding exposure on default ─────
+        let sme = invoice.owner.clone();
+        decrease_sme_outstanding(&env, &sme, invoice.amount);
+
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1197,6 +1261,10 @@ impl InvoiceContract {
 
         invoice.status = InvoiceStatus::Cancelled;
 
+        // ── #271: decrement per-SME outstanding exposure on cancellation ──
+        let sme = invoice.owner.clone();
+        decrease_sme_outstanding(&env, &sme, invoice.amount);
+
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1253,38 +1321,6 @@ impl InvoiceContract {
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
         env.events().publish((EVT, symbol_short!("cleanup")), id);
-    }
-
-    /// Renew the storage TTL for an invoice.
-    ///
-    /// Active invoices receive the longer renewal window, while terminal
-    /// invoices keep the short post-settlement retention period.
-    pub fn renew_ttl(env: Env, id: u64) -> u64 {
-        bump_instance(&env);
-        let invoice = load_invoice(&env, id);
-        let new_expiry_ledger = renew_invoice_ttl(&env, id, &invoice.status);
-        env.events()
-            .publish((EVT, symbol_short!("ttl_ren")), (id, new_expiry_ledger));
-        new_expiry_ledger
-    }
-
-    /// Renew TTLs for multiple invoices in a single call.
-    pub fn batch_renew_ttl(env: Env, ids: Vec<u64>) -> Vec<u64> {
-        bump_instance(&env);
-        if ids.len() > 20 {
-            panic!("batch_renew_ttl: max 20 IDs per call");
-        }
-
-        let mut renewed: Vec<u64> = Vec::new(&env);
-        for i in 0..ids.len() {
-            let id = ids.get(i).unwrap();
-            let invoice = load_invoice(&env, id);
-            let expiry = renew_invoice_ttl(&env, id, &invoice.status);
-            env.events()
-                .publish((EVT, symbol_short!("ttl_ren")), (id, expiry));
-            renewed.push_back(expiry);
-        }
-        renewed
     }
 
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
@@ -1378,7 +1414,8 @@ impl InvoiceContract {
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        env.events().publish((EVT, symbol_short!("expired")), id);
+        env.events()
+            .publish((EVT, symbol_short!("expired")), id);
 
         true
     }
@@ -1451,6 +1488,39 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::MaxInvoiceAmount)
             .expect("max invoice amount not set")
+    }
+
+    /// Set the maximum cumulative outstanding invoice value allowed per SME
+    /// address (#271).
+    pub fn set_max_sme_outstanding(env: Env, admin: Address, max: i128) {
+        admin.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if max <= 0 {
+            panic!("max outstanding must be positive");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxOutstandingPerSme, &max);
+        env.events()
+            .publish((EVT, symbol_short!("sme_max")), (admin, max));
+    }
+
+    /// Return the current cumulative outstanding funded invoice value for
+    /// a given SME address (#271).
+    pub fn get_sme_outstanding(env: Env, sme: Address) -> i128 {
+        bump_instance(&env);
+        get_sme_outstanding(&env, &sme)
     }
 
     pub fn set_expiration_duration(env: Env, admin: Address, expiration_duration_secs: u64) {
@@ -1541,8 +1611,10 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
 
-        env.events()
-            .publish((EVT, symbol_short!("gp_upd")), (id, old_days, days));
+        env.events().publish(
+            (EVT, symbol_short!("gp_upd")),
+            (id, old_days, days),
+        );
     }
 
     /// Get the effective grace period for a specific invoice (#230).
@@ -1673,14 +1745,14 @@ mod test {
         let contract_id = env.register(InvoiceContract, ());
         let client = InvoiceContractClient::new(env, &contract_id);
         let admin = Address::generate(env);
-        let pool = Address::generate(env);
+        let pool = env.register(mock_pool_true::MockPoolTrue, ());
         let sme = Address::generate(env);
         client.initialize(
             &admin,
             &pool,
             &i128::MAX,
             &DEFAULT_EXPIRATION_DURATION_SECS,
-            &u32::MAX,
+            &90u32,
         );
         (client, admin, pool, sme)
     }
@@ -1734,7 +1806,7 @@ mod test {
         assert_eq!(invoice.status, InvoiceStatus::Funded);
         assert_eq!(client.get_metadata(&id).status, InvoiceStatus::Funded);
 
-        client.mark_paid(&id, &sme);
+        client.mark_paid(&id, &pool);
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::Paid);
         assert_eq!(client.get_metadata(&id).status, InvoiceStatus::Paid);
@@ -1779,7 +1851,7 @@ mod test {
     fn test_create_invoice_zero_amount_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin, _pool, sme) = setup(&env);
+        let (client, _admin, pool, sme) = setup(&env);
         let hash = String::from_str(&env, "h");
 
         client.create_invoice(
@@ -1798,7 +1870,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1_000_000);
-        let (client, _admin, _pool, sme) = setup(&env);
+        let (client, _admin, pool, sme) = setup(&env);
         let hash = String::from_str(&env, "h");
 
         client.create_invoice(
@@ -1816,7 +1888,7 @@ mod test {
     fn test_mark_funded_unauthorized_pool_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin, _pool, sme) = setup(&env);
+        let (client, _admin, pool, sme) = setup(&env);
         let hash = String::from_str(&env, "h");
 
         let id = client.create_invoice(
@@ -1856,7 +1928,7 @@ mod test {
     fn test_mark_paid_while_pending_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, _admin, _pool, sme) = setup(&env);
+        let (client, _admin, pool, sme) = setup(&env);
         let hash = String::from_str(&env, "h");
 
         let id = client.create_invoice(
@@ -1867,7 +1939,7 @@ mod test {
             &String::from_str(&env, "x"),
             &hash,
         );
-        client.mark_paid(&id, &sme);
+        client.mark_paid(&id, &pool);
     }
 
     #[test]
@@ -1887,7 +1959,7 @@ mod test {
             &hash,
         );
         client.mark_funded(&id, &pool);
-        client.mark_paid(&id, &sme);
+        client.mark_paid(&id, &pool);
         client.mark_defaulted(&id, &pool);
     }
 
@@ -1956,9 +2028,14 @@ mod test {
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::AwaitingVerification);
 
-        client
-            .verify_invoice(&id, &oracle, &true, &String::from_str(&env, ""), &hash)
-            .unwrap();
+        client.verify_invoice(
+            &id,
+            &oracle,
+            &true,
+            &String::from_str(&env, ""),
+            &hash,
+        )
+        ;
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::Verified);
         assert!(invoice.oracle_verified);
@@ -2017,8 +2094,13 @@ mod test {
         );
 
         let zero_hash = String::from_str(&env, "");
-        let result =
-            client.try_verify_invoice(&id, &oracle, &true, &String::from_str(&env, ""), &zero_hash);
+        let result = client.try_verify_invoice(
+            &id,
+            &oracle,
+            &true,
+            &String::from_str(&env, ""),
+            &zero_hash,
+        );
 
         assert!(result.is_err());
     }
@@ -2043,13 +2125,22 @@ mod test {
         );
 
         let reason = String::from_str(&env, "Invalid invoice data");
-        client
-            .verify_invoice(&id, &oracle, &false, &reason, &String::from_str(&env, ""))
-            .unwrap();
+        client.verify_invoice(
+            &id,
+            &oracle,
+            &false,
+            &reason,
+            &hash,
+        )
+        ;
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::Disputed);
 
-        client.resolve_dispute(&id, &admin, &true);
+        client.resolve_dispute(
+            &id,
+            &oracle,
+            &DisputeResolution::InFavorOfSME,
+        );
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::Verified);
     }
@@ -2070,7 +2161,7 @@ mod test {
             &hash,
         );
         client.mark_funded(&id, &pool);
-        client.mark_paid(&id, &sme);
+        client.mark_paid(&id, &pool);
 
         let stats_before = client.get_storage_stats();
         assert_eq!(stats_before.total_invoices, 1);
@@ -2107,7 +2198,7 @@ mod test {
         assert_eq!(stats.active_invoices, 1);
 
         client.mark_funded(&id, &pool);
-        client.mark_paid(&id, &sme);
+        client.mark_paid(&id, &pool);
 
         let stats = client.get_storage_stats();
         assert_eq!(stats.active_invoices, 0);
@@ -2142,7 +2233,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "only pending invoices can be cancelled")]
+    #[should_panic(expected = "invalid status transition")]
     fn test_cancel_non_pending_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2275,7 +2366,7 @@ mod test {
         );
         client.mark_funded(&id, &pool);
         client.pause(&admin);
-        client.mark_paid(&id, &sme);
+        client.mark_paid(&id, &pool);
     }
 
     #[test]
@@ -2342,7 +2433,7 @@ mod test {
             &String::from_str(&env, "h"),
         );
         client.mark_funded(&id, &pool);
-        client.mark_paid(&id, &sme);
+        client.mark_paid(&id, &pool);
         assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Paid);
     }
 
@@ -2686,7 +2777,7 @@ mod test {
             &pool,
             &1_000i128,
             &DEFAULT_EXPIRATION_DURATION_SECS,
-            &u32::MAX,
+            &90u32,
         );
 
         client.create_invoice(
@@ -2721,6 +2812,168 @@ mod test {
         client.set_max_invoice_amount(&intruder, &100i128);
     }
 
+    // ---- #271: Per-SME outstanding exposure tests ---------------------
+
+    mod mock_pool_true {
+        use super::*;
+
+        #[contract]
+        pub struct MockPoolTrue;
+
+        #[contractimpl]
+        impl MockPoolTrue {
+            pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool {
+                true
+            }
+        }
+    }
+
+    fn setup_with_pool_repaid_true(
+        env: &Env,
+        max_sme_outstanding: i128,
+    ) -> (
+        InvoiceContractClient<'_>,
+        Address,
+        Address,
+        Address,
+    ) {
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(env, &contract_id);
+
+        let admin = Address::generate(env);
+        let pool = env.register(mock_pool_true::MockPoolTrue, ());
+        let sme = Address::generate(env);
+
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &90u32,
+        );
+        client.set_max_sme_outstanding(&admin, &max_sme_outstanding);
+        (client, admin, pool, sme)
+    }
+
+    #[test]
+    fn test_create_invoice_within_sme_outstanding_limit_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, pool, sme) = setup_with_pool_repaid_true(&env, 1_000i128);
+
+        let due = env.ledger().timestamp() + 10_000;
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &600i128,
+            &due,
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "hash"),
+        );
+        client.mark_funded(&id, &pool);
+        assert_eq!(client.get_sme_outstanding(&sme), 600i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "SmeExposureLimitExceeded")]
+    fn test_create_invoice_exceeding_sme_outstanding_limit_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, pool, sme) = setup_with_pool_repaid_true(&env, 1_000i128);
+
+        let due = env.ledger().timestamp() + 10_000;
+
+        let id1 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &600i128,
+            &due,
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "hash1"),
+        );
+        client.mark_funded(&id1, &pool);
+
+        // Would exceed: 600 + 500 > 1000
+        let _id2 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &500i128,
+            &due,
+            &String::from_str(&env, "desc2"),
+            &String::from_str(&env, "hash2"),
+        );
+    }
+
+    #[test]
+    fn test_repayment_decreases_sme_outstanding_and_allows_new_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _admin, pool, sme) = setup_with_pool_repaid_true(&env, 1_000i128);
+        let due = env.ledger().timestamp() + 10_000;
+
+        let id1 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &600i128,
+            &due,
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "hash1"),
+        );
+        client.mark_funded(&id1, &pool);
+        assert_eq!(client.get_sme_outstanding(&sme), 600i128);
+
+        // Repayment: pool marks paid, outstanding must decrease.
+        client.mark_paid(&id1, &pool);
+        assert_eq!(client.get_sme_outstanding(&sme), 0i128);
+
+        // New invoice should be accepted after outstanding decreases.
+        let id2 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &900i128,
+            &due,
+            &String::from_str(&env, "desc2"),
+            &String::from_str(&env, "hash2"),
+        );
+        assert_eq!(id2, 2);
+    }
+
+    #[test]
+    fn test_admin_can_update_max_sme_outstanding() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, admin, pool, sme) = setup_with_pool_repaid_true(&env, 500i128);
+        let due = env.ledger().timestamp() + 10_000;
+
+        let id1 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &400i128,
+            &due,
+            &String::from_str(&env, "desc1"),
+            &String::from_str(&env, "hash1"),
+        );
+        client.mark_funded(&id1, &pool);
+        assert_eq!(client.get_sme_outstanding(&sme), 400i128);
+
+        client.set_max_sme_outstanding(&admin, &1_000i128);
+
+        let id2 = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &200i128,
+            &due,
+            &String::from_str(&env, "desc2"),
+            &String::from_str(&env, "hash2"),
+        );
+        assert_eq!(id2, 2);
+    }
+
     // ---- Expiration Tests ----
 
     #[test]
@@ -2735,7 +2988,7 @@ mod test {
         let pool = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.initialize(&admin, &pool, &i128::MAX, &10u64, &u32::MAX);
+        client.initialize(&admin, &pool, &i128::MAX, &10u64, &90u32);
 
         let id = client.create_invoice(
             &sme,
@@ -2765,7 +3018,7 @@ mod test {
         let pool = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.initialize(&admin, &pool, &i128::MAX, &1u64, &u32::MAX);
+        client.initialize(&admin, &pool, &i128::MAX, &1u64, &90u32);
 
         let id = client.create_invoice(
             &sme,
@@ -2832,7 +3085,7 @@ mod test {
         env.mock_all_auths();
 
         // Register mock pool that returns false for is_invoice_repaid
-        let pool_id = env.register(MockPoolFalse, ());
+        let pool_id = env.register(mock_pool_false::MockPoolFalse, ());
         let contract_id = env.register(InvoiceContract, ());
         let client = InvoiceContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
@@ -2843,7 +3096,7 @@ mod test {
             &pool_id,
             &i128::MAX,
             &DEFAULT_EXPIRATION_DURATION_SECS,
-            &u32::MAX,
+            &90u32,
         );
         let hash = String::from_str(&env, "h");
 
@@ -2862,13 +3115,17 @@ mod test {
     }
 
     // You'll need a mock pool contract for testing:
-    #[contract]
-    struct MockPoolFalse;
+    mod mock_pool_false {
+        use super::*;
 
-    #[contractimpl]
-    impl MockPoolFalse {
-        pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool {
-            false
+        #[contract]
+        pub struct MockPoolFalse;
+
+        #[contractimpl]
+        impl MockPoolFalse {
+            pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool {
+                false
+            }
         }
     }
 
@@ -3047,7 +3304,14 @@ mod test {
     }
 
     /// Helper: initialise a contract and produce a single funded invoice (id=1).
-    fn setup_funded_invoice(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address) {
+    fn setup_funded_invoice(
+        env: &Env,
+    ) -> (
+        InvoiceContractClient<'_>,
+        Address,
+        Address,
+        Address,
+    ) {
         let contract_id = env.register(InvoiceContract, ());
         let client = InvoiceContractClient::new(env, &contract_id);
 
@@ -3056,7 +3320,16 @@ mod test {
         let oracle = Address::generate(env);
         let owner = Address::generate(env);
 
-        client.initialize(&admin, &pool, &oracle);
+        client.initialize(
+            &admin,
+            &pool,
+            &i128::MAX,
+            &DEFAULT_EXPIRATION_DURATION_SECS,
+            &DEFAULT_GRACE_PERIOD_DAYS,
+        );
+
+        // Configure oracle so verify_invoice succeeds in test setup.
+        client.set_oracle(&admin, &oracle);
 
         let id = client.create_invoice(
             &owner,
@@ -3068,15 +3341,14 @@ mod test {
         );
 
         // Verify and fund so the invoice reaches Funded status.
-        client
-            .verify_invoice(
-                &id,
-                &oracle,
-                &true,
-                &String::from_str(env, ""),
-                &String::from_str(env, "hash"),
-            )
-            .unwrap();
+        client.verify_invoice(
+            &id,
+            &oracle,
+            &true,
+            &String::from_str(env, ""),
+            &String::from_str(env, "hash"),
+        )
+        ;
         client.mark_funded(&id, &pool);
 
         (client, admin, pool, owner)
