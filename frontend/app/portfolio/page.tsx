@@ -8,6 +8,7 @@ import {
   getPoolConfig,
   getAcceptedTokens,
   getPoolTokenTotals,
+  getExchangeRate,
 } from '@/lib/contracts';
 import { formatUSDC, stablecoinLabel } from '@/lib/stellar';
 import type { PoolTokenTotals } from '@/lib/types';
@@ -24,6 +25,8 @@ interface TokenRow {
   token: string;
   totals: PoolTokenTotals;
   position: PortfolioSnapshot | null;
+  /** Exchange rate in bps (10_000 = 1:1 USD) */
+  rateBps: number;
 }
 
 function TokenPositionSkeleton() {
@@ -99,12 +102,61 @@ function UtilisationBar({ utilisation }: { utilisation: number }) {
   );
 }
 
+/** Simple SVG pie chart for token allocation */
+function AllocationPie({ slices }: { slices: { label: string; pct: number; color: string }[] }) {
+  const COLORS = ['#F5A623', '#4ADE80', '#60A5FA', '#F472B6', '#A78BFA'];
+  let cumulative = 0;
+  const r = 40;
+  const cx = 50;
+  const cy = 50;
+
+  function polarToXY(pct: number) {
+    const angle = (pct / 100) * 2 * Math.PI - Math.PI / 2;
+    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+  }
+
+  const paths = slices.map((s, i) => {
+    const start = polarToXY(cumulative);
+    cumulative += s.pct;
+    const end = polarToXY(cumulative);
+    const large = s.pct > 50 ? 1 : 0;
+    const d = `M ${cx} ${cy} L ${start.x} ${start.y} A ${r} ${r} 0 ${large} 1 ${end.x} ${end.y} Z`;
+    return <path key={s.label} d={d} fill={COLORS[i % COLORS.length]} opacity={0.85} />;
+  });
+
+  return (
+    <div className="flex items-center gap-6">
+      <svg viewBox="0 0 100 100" className="w-24 h-24 shrink-0">
+        {paths}
+      </svg>
+      <div className="space-y-1.5">
+        {slices.map((s, i) => (
+          <div key={s.label} className="flex items-center gap-2 text-xs">
+            <span
+              className="w-2.5 h-2.5 rounded-full shrink-0"
+              style={{ background: COLORS[i % COLORS.length] }}
+            />
+            <span className="text-brand-muted">{s.label}</span>
+            <span className="text-white font-medium ml-auto">{s.pct.toFixed(1)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Convert raw token amount to USDC-equivalent using rateBps */
+function toUsdcEquiv(amount: bigint, rateBps: number): bigint {
+  return (amount * BigInt(rateBps)) / 10_000n;
+}
+
 export default function PortfolioPage() {
   const { wallet } = useStore();
   const [rows, setRows] = useState<TokenRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     if (!wallet.connected || !wallet.address) return;
@@ -116,9 +168,10 @@ export default function PortfolioPage() {
 
       const rowData: TokenRow[] = await Promise.all(
         tokens.map(async (token) => {
-          const [totals, rawPos] = await Promise.all([
+          const [totals, rawPos, rateBps] = await Promise.all([
             getPoolTokenTotals(token),
             getInvestorPosition(wallet.address!, token),
+            getExchangeRate(token).catch(() => 10_000),
           ]);
 
           const position: PortfolioSnapshot | null = rawPos
@@ -131,12 +184,19 @@ export default function PortfolioPage() {
               }
             : null;
 
-          return { token, totals, position };
+          return { token, totals, position, rateBps };
         }),
       );
 
       setRows(rowData);
       setLastRefresh(new Date());
+
+      // Auto-collapse per-token sections when > 1 token
+      if (rowData.length > 1) {
+        const initial: Record<string, boolean> = {};
+        rowData.forEach((r) => { initial[r.token] = true; });
+        setCollapsed((prev) => ({ ...initial, ...prev }));
+      }
     } catch (e) {
       console.error('[Portfolio] Load error:', e);
       setError('Failed to load portfolio data. Please try again.');
@@ -159,26 +219,48 @@ export default function PortfolioPage() {
     );
   }
 
-  // Aggregate totals across all tokens (using USDC equivalents, single-token
-  // pools are common so we just sum the raw bigint values per-field)
-  const aggregate = rows.reduce(
-    (acc, r) => {
-      if (!r.position) return acc;
-      return {
-        deposited: acc.deposited + r.position.totalDeposited,
-        available: acc.available + r.position.available,
-        deployed: acc.deployed + r.position.deployed,
-        earned: acc.earned + r.position.earned,
-        depositCount: acc.depositCount + r.position.depositCount,
-      };
-    },
-    { deposited: 0n, available: 0n, deployed: 0n, earned: 0n, depositCount: 0 },
-  );
+  // USDC-equivalent aggregates
+  const usdcRows = rows.map((r) => ({
+    ...r,
+    usdcDeposited: r.position ? toUsdcEquiv(r.position.totalDeposited, r.rateBps) : 0n,
+    usdcDeployed: r.position ? toUsdcEquiv(r.position.deployed, r.rateBps) : 0n,
+    usdcEarned: r.position ? toUsdcEquiv(r.position.earned, r.rateBps) : 0n,
+    usdcAvailable: r.position ? toUsdcEquiv(r.position.available, r.rateBps) : 0n,
+  }));
+
+  const totalUsdcDeposited = usdcRows.reduce((a, r) => a + r.usdcDeposited, 0n);
+  const totalUsdcDeployed = usdcRows.reduce((a, r) => a + r.usdcDeployed, 0n);
+  const totalUsdcEarned = usdcRows.reduce((a, r) => a + r.usdcEarned, 0n);
+  const totalUsdcAvailable = usdcRows.reduce((a, r) => a + r.usdcAvailable, 0n);
 
   const totalPoolDeployed = rows.reduce((a, r) => a + r.totals.totalDeployed, 0n);
   const totalPoolDeposited = rows.reduce((a, r) => a + r.totals.totalDeposited, 0n);
   const utilisation =
     totalPoolDeposited > 0n ? Number(totalPoolDeployed) / Number(totalPoolDeposited) : 0;
+
+  // Pie chart slices (by USDC-equivalent deposited)
+  const pieSlices =
+    totalUsdcDeposited > 0n
+      ? usdcRows
+          .filter((r) => r.usdcDeposited > 0n)
+          .map((r) => ({
+            label: stablecoinLabel(r.token),
+            pct: Number((r.usdcDeposited * 10_000n) / totalUsdcDeposited) / 100,
+            color: '',
+          }))
+      : [];
+
+  // Weighted average APY (8% default per token, weighted by deposited)
+  const DEFAULT_APY_BPS = 800;
+  const weightedApy =
+    totalUsdcDeposited > 0n
+      ? usdcRows.reduce((acc, r) => {
+          const weight = totalUsdcDeposited > 0n
+            ? Number(r.usdcDeposited) / Number(totalUsdcDeposited)
+            : 0;
+          return acc + DEFAULT_APY_BPS * weight;
+        }, 0)
+      : DEFAULT_APY_BPS;
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 max-w-7xl mx-auto">
@@ -204,27 +286,20 @@ export default function PortfolioPage() {
         </button>
       </div>
 
-      {/* Error state */}
       {error && (
         <div
           role="alert"
           className="mb-6 flex items-center justify-between bg-red-900/30 border border-red-800/50 text-red-400 rounded-xl px-4 py-3 text-sm"
         >
           <span>{error}</span>
-          <button onClick={load} className="underline ml-4 shrink-0">
-            Retry
-          </button>
+          <button onClick={load} className="underline ml-4 shrink-0">Retry</button>
         </div>
       )}
 
-      {/* Loading skeleton */}
       {loading && rows.length === 0 && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <StatCardSkeleton />
-            <StatCardSkeleton />
-            <StatCardSkeleton />
-            <StatCardSkeleton />
+            <StatCardSkeleton /><StatCardSkeleton /><StatCardSkeleton /><StatCardSkeleton />
           </div>
           <div className="bg-brand-card border border-brand-border rounded-2xl p-6 animate-pulse">
             <Skeleton className="h-5 w-40 mb-4" />
@@ -258,29 +333,52 @@ export default function PortfolioPage() {
 
       {rows.length > 0 && (
         <>
+          {/* #293: Total Portfolio Value (USDC equivalent) */}
+          <div className="bg-brand-card border border-brand-border rounded-2xl p-6 mb-6">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-6">
+              <div className="flex-1">
+                <p className="text-brand-muted text-sm mb-1">Total Portfolio Value</p>
+                <p className="text-4xl font-bold text-white">{formatUSDC(totalUsdcDeposited)}</p>
+                <p className="text-xs text-brand-muted mt-1">
+                  ≈ USDC equivalent
+                  <span className="ml-1 cursor-help" title="Conversion based on protocol exchange rates, not live market prices">ⓘ</span>
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 text-sm">
+                  <div>
+                    <p className="text-brand-muted text-xs">Total Deposited</p>
+                    <p className="text-white font-medium">{formatUSDC(totalUsdcDeposited)}</p>
+                  </div>
+                  <div>
+                    <p className="text-brand-muted text-xs">Total Deployed</p>
+                    <p className="text-white font-medium">{formatUSDC(totalUsdcDeployed)}</p>
+                  </div>
+                  <div>
+                    <p className="text-brand-muted text-xs">Total Earned</p>
+                    <p className="text-brand-gold font-medium">{formatUSDC(totalUsdcEarned)}</p>
+                  </div>
+                  <div>
+                    <p className="text-brand-muted text-xs">Weighted APY</p>
+                    <p className="text-green-400 font-medium">{(weightedApy / 100).toFixed(2)}%</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Pie chart */}
+              {pieSlices.length > 0 && (
+                <div className="shrink-0">
+                  <p className="text-brand-muted text-xs mb-3">Token Allocation</p>
+                  <AllocationPie slices={pieSlices} />
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* Summary stats */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <StatCard
-              label="Total Deposited"
-              value={formatUSDC(aggregate.deposited)}
-              sub={`Across ${aggregate.depositCount} deposit(s)`}
-            />
-            <StatCard
-              label="Available Liquidity"
-              value={formatUSDC(aggregate.available)}
-              sub="Withdrawable now"
-            />
-            <StatCard
-              label="Deployed Capital"
-              value={formatUSDC(aggregate.deployed)}
-              sub="Funding active invoices"
-            />
-            <StatCard
-              label="Yield Earned"
-              value={formatUSDC(aggregate.earned)}
-              sub="Cumulative interest"
-              highlight
-            />
+            <StatCard label="Available Liquidity" value={formatUSDC(totalUsdcAvailable)} sub="Withdrawable now" />
+            <StatCard label="Deployed Capital" value={formatUSDC(totalUsdcDeployed)} sub="Funding active invoices" />
+            <StatCard label="Yield Earned" value={formatUSDC(totalUsdcEarned)} sub="Cumulative interest" highlight />
+            <StatCard label="Weighted APY" value={`${(weightedApy / 100).toFixed(2)}%`} sub="Across all positions" />
           </div>
 
           {/* Pool utilisation */}
@@ -311,63 +409,81 @@ export default function PortfolioPage() {
             </div>
           </div>
 
-          {/* Per-token positions */}
+          {/* Per-token positions (collapsible when > 1 token) */}
           <div className="space-y-4">
             <h2 className="text-white font-semibold text-lg">Token Positions</h2>
-            {rows.map(({ token, position, totals }) => (
-              <div key={token} className="bg-brand-card border border-brand-border rounded-2xl p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-white font-medium text-base">{stablecoinLabel(token)}</h3>
-                  {position ? (
-                    <span className="text-xs px-2 py-1 rounded-lg bg-green-900/30 border border-green-800/50 text-green-400">
-                      Active position
-                    </span>
-                  ) : (
-                    <span className="text-xs px-2 py-1 rounded-lg bg-brand-border text-brand-muted">
-                      No position
-                    </span>
+            {rows.map(({ token, position, totals, rateBps }) => {
+              const isCollapsed = collapsed[token] ?? false;
+              const usdcDeposited = position ? toUsdcEquiv(position.totalDeposited, rateBps) : 0n;
+              return (
+                <div key={token} className="bg-brand-card border border-brand-border rounded-2xl p-6">
+                  <button
+                    className="w-full flex items-center justify-between mb-4"
+                    onClick={() => rows.length > 1 && setCollapsed((p) => ({ ...p, [token]: !p[token] }))}
+                  >
+                    <div className="flex items-center gap-3">
+                      <h3 className="text-white font-medium text-base">{stablecoinLabel(token)}</h3>
+                      {rateBps !== 10_000 && (
+                        <span className="text-xs text-brand-muted">
+                          ≈ {formatUSDC(usdcDeposited)} USDC
+                        </span>
+                      )}
+                      {position ? (
+                        <span className="text-xs px-2 py-1 rounded-lg bg-green-900/30 border border-green-800/50 text-green-400">
+                          Active position
+                        </span>
+                      ) : (
+                        <span className="text-xs px-2 py-1 rounded-lg bg-brand-border text-brand-muted">
+                          No position
+                        </span>
+                      )}
+                    </div>
+                    {rows.length > 1 && (
+                      <span className="text-brand-muted text-sm">{isCollapsed ? '▸' : '▾'}</span>
+                    )}
+                  </button>
+
+                  {!isCollapsed && (
+                    <>
+                      {position ? (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+                          <div>
+                            <p className="text-brand-muted">Deposited</p>
+                            <p className="text-white font-medium">{formatUSDC(position.totalDeposited)}</p>
+                          </div>
+                          <div>
+                            <p className="text-brand-muted">Available</p>
+                            <p className="text-white font-medium">{formatUSDC(position.available)}</p>
+                          </div>
+                          <div>
+                            <p className="text-brand-muted">Deployed</p>
+                            <p className="text-white font-medium">{formatUSDC(position.deployed)}</p>
+                          </div>
+                          <div>
+                            <p className="text-brand-muted">Earned</p>
+                            <p className="text-brand-gold font-medium">{formatUSDC(position.earned)}</p>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-brand-muted text-sm">
+                          You have no {stablecoinLabel(token)} position in this pool yet.
+                        </p>
+                      )}
+
+                      <div className="mt-4 pt-4 border-t border-brand-border">
+                        <UtilisationBar
+                          utilisation={
+                            totals.totalDeposited > 0n
+                              ? Number(totals.totalDeployed) / Number(totals.totalDeposited)
+                              : 0
+                          }
+                        />
+                      </div>
+                    </>
                   )}
                 </div>
-
-                {position ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-                    <div>
-                      <p className="text-brand-muted">Deposited</p>
-                      <p className="text-white font-medium">
-                        {formatUSDC(position.totalDeposited)}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-brand-muted">Available</p>
-                      <p className="text-white font-medium">{formatUSDC(position.available)}</p>
-                    </div>
-                    <div>
-                      <p className="text-brand-muted">Deployed</p>
-                      <p className="text-white font-medium">{formatUSDC(position.deployed)}</p>
-                    </div>
-                    <div>
-                      <p className="text-brand-muted">Earned</p>
-                      <p className="text-brand-gold font-medium">{formatUSDC(position.earned)}</p>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-brand-muted text-sm">
-                    You have no {stablecoinLabel(token)} position in this pool yet.
-                  </p>
-                )}
-
-                {/* Token pool summary */}
-                <div className="mt-4 pt-4 border-t border-brand-border">
-                  <UtilisationBar
-                    utilisation={
-                      totals.totalDeposited > 0n
-                        ? Number(totals.totalDeployed) / Number(totals.totalDeposited)
-                        : 0
-                    }
-                  />
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>
       )}

@@ -795,7 +795,7 @@ impl InvoiceContract {
 
         env.events().publish(
             (EVT, symbol_short!("created")),
-            (id, owner, amount, metadata_uri),
+            (id, owner, amount, metadata_uri, env.ledger().timestamp()),
         );
 
         id
@@ -889,7 +889,7 @@ impl InvoiceContract {
             env.events()
                 .publish((EVT, symbol_short!("verified")), (id, oracle_hash));
         } else {
-            env.events().publish((EVT, symbol_short!("disputed")), id);
+            env.events().publish((EVT, symbol_short!("disputed")), (id, env.ledger().timestamp()));
         }
         Ok(())
     }
@@ -1026,7 +1026,7 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
         set_invoice_ttl(&env, id, false);
-        env.events().publish((EVT, symbol_short!("funded")), id);
+        env.events().publish((EVT, symbol_short!("funded")), (id, env.ledger().timestamp()));
     }
 
     pub fn mark_paid(env: Env, id: u64, pool: Address) {
@@ -1075,7 +1075,7 @@ impl InvoiceContract {
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        env.events().publish((EVT, symbol_short!("paid")), id);
+        env.events().publish((EVT, symbol_short!("paid")), (id, env.ledger().timestamp()));
     }
 
     pub fn mark_defaulted(env: Env, id: u64, pool: Address) {
@@ -1134,7 +1134,7 @@ impl InvoiceContract {
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        env.events().publish((EVT, symbol_short!("default")), id);
+        env.events().publish((EVT, symbol_short!("default")), (id, env.ledger().timestamp()));
     }
 
     pub fn cancel_invoice(env: Env, id: u64, caller: Address) {

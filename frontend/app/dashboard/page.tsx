@@ -9,6 +9,7 @@ import InvoiceCard, { InvoiceCardSkeleton } from '@/components/InvoiceCard';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
 import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
+import TestnetFaucet from '@/components/TestnetFaucet';
 import {
   getMultipleInvoices,
   getInvoiceCount,
@@ -330,19 +331,10 @@ export default function DashboardPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Error state */}
-            {loadError && (
-              <div
-                role="alert"
-                className="lg:col-span-3 flex items-center justify-between bg-red-900/30 border border-red-800/50 text-red-400 rounded-xl px-4 py-3 text-sm"
-              >
-                <span>{loadError}</span>
-                <button
-                  onClick={loadInvoices}
-                  className="underline ml-4 shrink-0 hover:text-red-300"
-                >
-                  {t('retry') || 'Retry'}
-                </button>
+            {/* #274: Testnet faucet banner */}
+            {wallet.address && (
+              <div className="lg:col-span-3">
+                <TestnetFaucet address={wallet.address} />
               </div>
             )}
             {/* Left column */}
