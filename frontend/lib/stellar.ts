@@ -67,10 +67,7 @@ let activeRpcReads = 0;
 let rpcReadTimer: ReturnType<typeof setTimeout> | null = null;
 
 function pruneReadStartTimes(now: number): void {
-  while (
-    rpcReadStartTimes.length > 0 &&
-    now - rpcReadStartTimes[0] >= RPC_READ_LIMIT.windowMs
-  ) {
+  while (rpcReadStartTimes.length > 0 && now - rpcReadStartTimes[0] >= RPC_READ_LIMIT.windowMs) {
     rpcReadStartTimes.shift();
   }
 }
@@ -204,7 +201,7 @@ class RpcConnectionPool {
     const currentUrl = this.connections[index]?.url || RPC_URL;
     const nextUrlIndex = (RPC_ENDPOINTS.indexOf(currentUrl) + 1) % RPC_ENDPOINTS.length;
     const nextUrl = RPC_ENDPOINTS[nextUrlIndex] || RPC_URL;
-    
+
     this.connections[index] = {
       server: new StellarRpc.Server(nextUrl),
       createdAt: now,
@@ -370,7 +367,8 @@ const EXPLORER_BASES: Record<StellarNetwork, string> = {
 export function explorerUrl(
   type: ExplorerEntity,
   id: string,
-  network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ?? 'testnet',
+  network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ??
+    'testnet',
 ): string {
   const base = EXPLORER_BASES[network] ?? EXPLORER_BASES.testnet;
   return `${base}/${type}/${encodeURIComponent(id)}`;

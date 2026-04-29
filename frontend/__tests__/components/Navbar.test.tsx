@@ -6,6 +6,22 @@ import '@testing-library/jest-dom';
 const mockPathname = jest.fn();
 jest.mock('next/navigation', () => ({
   usePathname: () => mockPathname(),
+  useRouter: () => ({ refresh: jest.fn() }),
+}));
+
+jest.mock('next-intl', () => ({
+  useLocale: () => 'en',
+  useTranslations: () => (key: string) => {
+    const map: Record<string, string> = {
+      dashboard: 'Dashboard',
+      invest: 'Invest',
+      analytics: 'Analytics',
+      portfolio: 'Portfolio',
+      newInvoice: 'New Invoice',
+      toggleTheme: 'Toggle Theme',
+    };
+    return map[key] ?? key;
+  },
 }));
 
 // next/link → plain <a>.

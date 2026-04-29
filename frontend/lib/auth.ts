@@ -1,4 +1,4 @@
-import { getStoredWalletAddress } from './store';
+import { getFreighter } from '@/lib/freighter';
 
 const TOKEN_KEY = 'astera_jwt';
 
@@ -45,13 +45,11 @@ export async function ensureAuthWithFreighter(address: string) {
     if (!challenge || !challenge.transaction) return { error: 'no_challenge' };
 
     // ask freighter to sign
-    const freighter = await import('@stellar/freighter-api');
+    const freighter = await getFreighter();
     const { signed_envelope_xdr, error } = await freighter
       .signTransaction(challenge.transaction, {
-        network:
-          challenge.network_passphrase === 'Public Global Stellar Network ; September 2015'
-            ? 'mainnet'
-            : 'testnet',
+        networkPassphrase: String(challenge.network_passphrase ?? ''),
+        address,
       })
       .catch((e) => ({ error: String(e) }) as any);
 

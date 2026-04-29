@@ -105,7 +105,6 @@ function UtilisationBar({ utilisation }: { utilisation: number }) {
 /** Simple SVG pie chart for token allocation */
 function AllocationPie({ slices }: { slices: { label: string; pct: number; color: string }[] }) {
   const COLORS = ['#F5A623', '#4ADE80', '#60A5FA', '#F472B6', '#A78BFA'];
-  let cumulative = 0;
   const r = 40;
   const cx = 50;
   const cy = 50;
@@ -115,10 +114,16 @@ function AllocationPie({ slices }: { slices: { label: string; pct: number; color
     return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
   }
 
+  const cumulativeEnds = slices.reduce<number[]>((acc, s) => {
+    const prev = acc.length > 0 ? acc[acc.length - 1] : 0;
+    return [...acc, prev + s.pct];
+  }, []);
+
   const paths = slices.map((s, i) => {
-    const start = polarToXY(cumulative);
-    cumulative += s.pct;
-    const end = polarToXY(cumulative);
+    const startPct = i === 0 ? 0 : cumulativeEnds[i - 1];
+    const endPct = cumulativeEnds[i];
+    const start = polarToXY(startPct);
+    const end = polarToXY(endPct);
     const large = s.pct > 50 ? 1 : 0;
     const d = `M ${cx} ${cy} L ${start.x} ${start.y} A ${r} ${r} 0 ${large} 1 ${end.x} ${end.y} Z`;
     return <path key={s.label} d={d} fill={COLORS[i % COLORS.length]} opacity={0.85} />;
@@ -194,7 +199,9 @@ export default function PortfolioPage() {
       // Auto-collapse per-token sections when > 1 token
       if (rowData.length > 1) {
         const initial: Record<string, boolean> = {};
-        rowData.forEach((r) => { initial[r.token] = true; });
+        rowData.forEach((r) => {
+          initial[r.token] = true;
+        });
         setCollapsed((prev) => ({ ...initial, ...prev }));
       }
     } catch (e) {
@@ -255,9 +262,8 @@ export default function PortfolioPage() {
   const weightedApy =
     totalUsdcDeposited > 0n
       ? usdcRows.reduce((acc, r) => {
-          const weight = totalUsdcDeposited > 0n
-            ? Number(r.usdcDeposited) / Number(totalUsdcDeposited)
-            : 0;
+          const weight =
+            totalUsdcDeposited > 0n ? Number(r.usdcDeposited) / Number(totalUsdcDeposited) : 0;
           return acc + DEFAULT_APY_BPS * weight;
         }, 0)
       : DEFAULT_APY_BPS;
@@ -292,14 +298,19 @@ export default function PortfolioPage() {
           className="mb-6 flex items-center justify-between bg-red-900/30 border border-red-800/50 text-red-400 rounded-xl px-4 py-3 text-sm"
         >
           <span>{error}</span>
-          <button onClick={load} className="underline ml-4 shrink-0">Retry</button>
+          <button onClick={load} className="underline ml-4 shrink-0">
+            Retry
+          </button>
         </div>
       )}
 
       {loading && rows.length === 0 && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <StatCardSkeleton /><StatCardSkeleton /><StatCardSkeleton /><StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
           </div>
           <div className="bg-brand-card border border-brand-border rounded-2xl p-6 animate-pulse">
             <Skeleton className="h-5 w-40 mb-4" />
@@ -341,7 +352,12 @@ export default function PortfolioPage() {
                 <p className="text-4xl font-bold text-white">{formatUSDC(totalUsdcDeposited)}</p>
                 <p className="text-xs text-brand-muted mt-1">
                   ≈ USDC equivalent
-                  <span className="ml-1 cursor-help" title="Conversion based on protocol exchange rates, not live market prices">ⓘ</span>
+                  <span
+                    className="ml-1 cursor-help"
+                    title="Conversion based on protocol exchange rates, not live market prices"
+                  >
+                    ⓘ
+                  </span>
                 </p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 text-sm">
                   <div>
@@ -375,10 +391,27 @@ export default function PortfolioPage() {
 
           {/* Summary stats */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <StatCard label="Available Liquidity" value={formatUSDC(totalUsdcAvailable)} sub="Withdrawable now" />
-            <StatCard label="Deployed Capital" value={formatUSDC(totalUsdcDeployed)} sub="Funding active invoices" />
-            <StatCard label="Yield Earned" value={formatUSDC(totalUsdcEarned)} sub="Cumulative interest" highlight />
-            <StatCard label="Weighted APY" value={`${(weightedApy / 100).toFixed(2)}%`} sub="Across all positions" />
+            <StatCard
+              label="Available Liquidity"
+              value={formatUSDC(totalUsdcAvailable)}
+              sub="Withdrawable now"
+            />
+            <StatCard
+              label="Deployed Capital"
+              value={formatUSDC(totalUsdcDeployed)}
+              sub="Funding active invoices"
+            />
+            <StatCard
+              label="Yield Earned"
+              value={formatUSDC(totalUsdcEarned)}
+              sub="Cumulative interest"
+              highlight
+            />
+            <StatCard
+              label="Weighted APY"
+              value={`${(weightedApy / 100).toFixed(2)}%`}
+              sub="Across all positions"
+            />
           </div>
 
           {/* Pool utilisation */}
@@ -416,10 +449,15 @@ export default function PortfolioPage() {
               const isCollapsed = collapsed[token] ?? false;
               const usdcDeposited = position ? toUsdcEquiv(position.totalDeposited, rateBps) : 0n;
               return (
-                <div key={token} className="bg-brand-card border border-brand-border rounded-2xl p-6">
+                <div
+                  key={token}
+                  className="bg-brand-card border border-brand-border rounded-2xl p-6"
+                >
                   <button
                     className="w-full flex items-center justify-between mb-4"
-                    onClick={() => rows.length > 1 && setCollapsed((p) => ({ ...p, [token]: !p[token] }))}
+                    onClick={() =>
+                      rows.length > 1 && setCollapsed((p) => ({ ...p, [token]: !p[token] }))
+                    }
                   >
                     <div className="flex items-center gap-3">
                       <h3 className="text-white font-medium text-base">{stablecoinLabel(token)}</h3>
@@ -449,19 +487,27 @@ export default function PortfolioPage() {
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                           <div>
                             <p className="text-brand-muted">Deposited</p>
-                            <p className="text-white font-medium">{formatUSDC(position.totalDeposited)}</p>
+                            <p className="text-white font-medium">
+                              {formatUSDC(position.totalDeposited)}
+                            </p>
                           </div>
                           <div>
                             <p className="text-brand-muted">Available</p>
-                            <p className="text-white font-medium">{formatUSDC(position.available)}</p>
+                            <p className="text-white font-medium">
+                              {formatUSDC(position.available)}
+                            </p>
                           </div>
                           <div>
                             <p className="text-brand-muted">Deployed</p>
-                            <p className="text-white font-medium">{formatUSDC(position.deployed)}</p>
+                            <p className="text-white font-medium">
+                              {formatUSDC(position.deployed)}
+                            </p>
                           </div>
                           <div>
                             <p className="text-brand-muted">Earned</p>
-                            <p className="text-brand-gold font-medium">{formatUSDC(position.earned)}</p>
+                            <p className="text-brand-gold font-medium">
+                              {formatUSDC(position.earned)}
+                            </p>
                           </div>
                         </div>
                       ) : (

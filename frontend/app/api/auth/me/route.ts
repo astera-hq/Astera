@@ -20,7 +20,7 @@ export async function GET(request: Request) {
     if (!sub) return NextResponse.json({ authenticated: false }, { status: 401 });
 
     return NextResponse.json({ authenticated: true, account: sub });
-  } catch (err) {
+  } catch {
     return NextResponse.json({ authenticated: false }, { status: 401 });
   }
 }

@@ -25,7 +25,7 @@ export type AlertPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
  * Liquidity threshold: alert when available liquidity drops below this fraction
  * of total pool deposits (0.10 = 10%).
  */
-export const LOW_LIQUIDITY_THRESHOLD_RATIO = 0.10;
+export const LOW_LIQUIDITY_THRESHOLD_RATIO = 0.1;
 
 /**
  * Default rate threshold: alert when more than this fraction of invoices
@@ -45,6 +45,10 @@ export type AlertType =
   | 'INVOICE_FUNDED'
   | 'INVOICE_PAID'
   | 'INVOICE_DEFAULTED'
+  | 'DISPUTE_RAISED'
+  | 'DISPUTE_RESOLVED'
+  | 'YIELD_RATE_CHANGED'
+  | 'COLLATERAL_REQUIRED'
   | 'LOW_LIQUIDITY'
   | 'HIGH_DEFAULT_RATE'
   | 'CONTRACT_PAUSED'

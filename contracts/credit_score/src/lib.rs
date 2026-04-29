@@ -28,7 +28,11 @@ fn parse_credit_score_version() -> CreditScoreVersion {
         .and_then(|s| s.split('-').next())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    CreditScoreVersion { major, minor, patch }
+    CreditScoreVersion {
+        major,
+        minor,
+        patch,
+    }
 }
 
 pub const MIN_SCORE: u32 = 200;
@@ -339,7 +343,13 @@ impl CreditScoreContract {
 
         env.events().publish(
             (EVT, symbol_short!("payment")),
-            (sme, invoice_id, status, credit_data.score, env.ledger().timestamp()),
+            (
+                sme,
+                invoice_id,
+                status,
+                credit_data.score,
+                env.ledger().timestamp(),
+            ),
         );
     }
 

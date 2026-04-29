@@ -398,7 +398,8 @@ export default function InvestPage() {
                       {tokenDepositCap > 0n && remainingTokenCapacity !== null ? (
                         <>
                           {formatUSDC(remainingTokenCapacity)} remaining of{' '}
-                          {formatUSDC(tokenDepositCap)} capacity for {stablecoinLabel(selectedToken)}
+                          {formatUSDC(tokenDepositCap)} capacity for{' '}
+                          {stablecoinLabel(selectedToken)}
                         </>
                       ) : (
                         <>No deposit cap configured for {stablecoinLabel(selectedToken)}.</>

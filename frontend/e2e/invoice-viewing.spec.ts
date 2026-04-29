@@ -1,17 +1,15 @@
 import { test, expect } from '@playwright/test';
-import { MOCK_ADDRESS } from './mocks/freighter';
+import { MOCK_ADDRESS, freighterMockScript } from './mocks/freighter';
 
 async function injectConnectedWallet(page: import('@playwright/test').Page) {
+  await page.addInitScript(freighterMockScript({ isConnected: true, isAllowed: true }));
   await page.addInitScript((address: string) => {
-    localStorage.setItem(
-      'astera-wallet',
-      JSON.stringify({ state: { wallet: { address, connected: true, network: 'testnet' } }, version: 0 })
-    );
+    localStorage.setItem('astera_wallet_address', address);
   }, MOCK_ADDRESS);
 }
 
 async function stubContractCalls(page: import('@playwright/test').Page) {
-  await page.route('**/soroban-testnet.stellar.org**', (route) => {
+  await page.route('**/*stellar.org*', (route) => {
     route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { entries: [] } }),
@@ -37,7 +35,7 @@ test.describe('Invoice Viewing & Management', () => {
     await stubContractCalls(page);
     await page.goto('/dashboard');
     await expect(
-      page.getByText(/connect.*wallet|wallet.*connect|no invoices|get started/i)
+      page.getByRole('banner').getByRole('button', { name: /connect wallet/i }),
     ).toBeVisible({ timeout: 8000 });
   });
 
@@ -52,7 +50,10 @@ test.describe('Invoice Viewing & Management', () => {
 
   test('navigating to /dashboard from navbar works', async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('link', { name: /dashboard/i }).click();
+    await page
+      .getByRole('banner')
+      .getByRole('link', { name: /dashboard/i })
+      .click();
     await expect(page).toHaveURL('/dashboard');
   });
 
@@ -61,7 +62,10 @@ test.describe('Invoice Viewing & Management', () => {
     const response = await page.goto('/invoice/99999');
     // Either a 404 or a page that indicates invoice not found
     const is404 = response?.status() === 404;
-    const hasNotFound = await page.getByText(/not found|invoice not found|404/i).isVisible().catch(() => false);
+    const hasNotFound = await page
+      .getByText(/not found|invoice not found|404/i)
+      .isVisible()
+      .catch(() => false);
     expect(is404 || hasNotFound || true).toBeTruthy(); // page loads without JS crash
   });
 

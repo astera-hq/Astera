@@ -15,7 +15,7 @@ export function getStoredWalletAddress(): string | null {
   return localStorage.getItem(WALLET_KEY);
 }
 
-interface AsteraStore {
+export interface AsteraStore {
   wallet: WalletState;
   poolConfig: PoolConfig | null;
   position: InvestorPosition | null;

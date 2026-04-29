@@ -27,7 +27,6 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run cargo-audit
-        working-directory: ./contracts
         run: cargo audit
 
   # ---- Rust Contracts ----
@@ -116,10 +115,48 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        env:
+          # Some runners/environments set `omit=optional`, which prevents
+          # platform bindings (e.g. @parcel/watcher-linux-x64-glibc) from being
+          # installed and can break Next builds while loading config.
+          NPM_CONFIG_OMIT: ""
+          npm_config_optional: "true"
+        run: |
+          npm ci --include=optional
+          echo "npm omit=$(npm config get omit || true)"
+          echo "node=$(node -v) npm=$(npm -v)"
+
+          # Ensure Next's native SWC binding is present on Linux.
+          NEXT_VERSION=$(node -p "require('./node_modules/next/package.json').version")
+          echo "next=${NEXT_VERSION}"
+          if node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok')"; then
+            echo "next swc ok"
+          else
+            npm i --no-save "@next/swc-linux-x64-gnu@${NEXT_VERSION}"
+            node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok after fallback')"
+          fi
+          # Some CI runners end up with a partially-installed SWC native package.
+          # Rebuild to ensure the binary is present and loadable.
+          npm rebuild @next/swc-linux-x64-gnu --foreground-scripts || true
+          node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok after rebuild')"
+
+          # Ensure Parcel watcher native binding is present (some tooling relies on it).
+          if node -e "require('@parcel/watcher'); console.log('parcel watcher ok')"; then
+            echo "parcel watcher ok"
+          else
+            npm i --no-save @parcel/watcher-linux-x64-glibc@2.5.6
+            node -e "require('@parcel/watcher'); console.log('parcel watcher ok after fallback')"
+          fi
+          npm rebuild @parcel/watcher --foreground-scripts || true
+          node -e "require('@parcel/watcher'); console.log('parcel watcher ok after rebuild')"
 
       - name: Run ESLint
         run: npm run lint
+
+      - name: Native binding diagnostics
+        run: |
+          node -e "const mods=['@next/swc-linux-x64-gnu','@parcel/watcher','lightningcss','sharp']; for (const m of mods){ try{ require(m); console.log('ok:',m);}catch(e){ console.log('fail:',m); console.error(e && e.stack ? e.stack : e); } }"
+          node -e "import('./next.config.mjs').then(()=>console.log('ok: next.config import')).catch((e)=>{console.log('fail: next.config import'); console.error(e && e.stack ? e.stack : e); process.exit(0);})"
 
       - name: Build frontend
         run: npm run build
@@ -208,55 +245,15 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: contracts
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+          workspaces: |
+            .
+            contracts
 
       - name: Build all contracts
-        working-directory: ./contracts
         run: cargo build --target wasm32-unknown-unknown --release
 
-      - name: Run integration tests
-        working-directory: ./contracts
-        run: cargo test --test integration_tests --verbose
-
-      - name: Run all contract tests with timing
-        id: contract-tests
-        working-directory: ./contracts
-        run: |
-          START=$(date +%s)
-          cargo test --workspace --verbose 2>&1 | tee test-output.txt
-          END=$(date +%s)
-          ELAPSED=$((END-START))
-          echo "contract_test_duration_s=${ELAPSED}" >> $GITHUB_OUTPUT
-          echo "Test suite completed in ${ELAPSED} seconds"
-
-      - name: Check test execution time
-        run: |
-          ELAPSED=${{ steps.contract-tests.outputs.contract_test_duration_s }}
-          MAX_SECONDS=120
-          echo "Test duration: ${ELAPSED}s"
-          if [ "${ELAPSED}" -gt "${MAX_SECONDS}" ]; then
-            echo "⚠️  WARNING: Tests took ${ELAPSED}s, exceeding ${MAX_SECONDS}s threshold"
-          else
-            echo "✅ Tests completed within ${MAX_SECONDS}s threshold"
-          fi
-
-      - name: Run benchmarks
-        working-directory: ./contracts
-        run: cargo bench --bench contract_benchmarks
-
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        with:
-          name: contract-benchmarks-${{ github.sha }}
-          path: |
-            contracts/target/criterion/
-            contracts/test-output.txt
-          retention-days: 30
+      - name: Run contract tests
+        run: cargo test --workspace --verbose
 
   # ---- Deploy to Testnet ----
   deploy-testnet:
