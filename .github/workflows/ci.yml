@@ -135,6 +135,7 @@ jobs:
             npm i --no-save "@next/swc-linux-x64-gnu@${NEXT_VERSION}"
             node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok after fallback')"
           fi
+          node -e "require('next/dist/compiled/@next/swc'); console.log('next compiled swc ok')"
 
           # Ensure Parcel watcher native binding is present (some tooling relies on it).
           if node -e "require('@parcel/watcher'); console.log('parcel watcher ok')"; then
