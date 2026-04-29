@@ -1,10 +1,12 @@
 import { rpc, INVOICE_CONTRACT_ID, POOL_CONTRACT_ID, scValToNative } from './stellar';
+import { getInvoiceCount, getMultipleInvoices } from './contracts';
 import { notificationService } from './notifications';
 import {
   LARGE_TX_THRESHOLD,
   ACTIVITY_THRESHOLD_COUNT,
   ACTIVITY_WINDOW_SECONDS,
 } from './alert-rules';
+import type { Invoice, InvoiceStatus, InvoiceTtlWarning } from './types';
 
 /** Contract Event Interface */
 export interface ContractEvent {
@@ -28,6 +30,10 @@ class ContractMonitor {
   private static instance: ContractMonitor;
   private lastLedger: number = 0;
   private activityHistory: ActivityTracker = {};
+  private static readonly LEDGER_SECONDS = 5;
+  private static readonly WARNING_WINDOW_DAYS = 30;
+  private static readonly ACTIVE_TTL_DAYS = 365;
+  private static readonly TERMINAL_TTL_DAYS = 30;
 
   private constructor() {}
 
@@ -80,6 +86,28 @@ class ContractMonitor {
       return events;
     } catch (error) {
       console.error('[Astera Monitor] Failed to poll events:', error);
+      return [];
+    }
+  }
+
+  public async getInvoiceTtlWarnings(): Promise<InvoiceTtlWarning[]> {
+    if (!INVOICE_CONTRACT_ID) return [];
+
+    try {
+      const latestLedger = await rpc.getLatestLedger();
+      const count = await getInvoiceCount();
+      if (count <= 0) return [];
+
+      const ids = Array.from({ length: count }, (_, index) => index + 1);
+      const invoices = await getMultipleInvoices(ids);
+      const warnings = invoices
+        .map((invoice) => this.buildTtlWarning(invoice, latestLedger.sequence))
+        .filter((warning): warning is InvoiceTtlWarning => warning !== null)
+        .sort((a, b) => a.expiryLedger - b.expiryLedger);
+
+      return warnings;
+    } catch (error) {
+      console.error('[Astera Monitor] Failed to load TTL warnings:', error);
       return [];
     }
   }
@@ -176,6 +204,57 @@ class ContractMonitor {
       // Reset tracker for this address/type to avoid duplicate alerts for the same burst
       this.activityHistory[address][type] = [];
     }
+  }
+
+  private buildTtlWarning(
+    invoice: Invoice,
+    currentLedger: number,
+  ): InvoiceTtlWarning | null {
+    if (!this.shouldTrackInvoice(invoice.status)) {
+      return null;
+    }
+
+    const baseTimestamp =
+      invoice.status === 'Paid' || invoice.status === 'Defaulted' || invoice.status === 'Cancelled'
+        ? invoice.paidAt || invoice.fundedAt || invoice.createdAt
+        : invoice.status === 'Disputed'
+          ? invoice.disputedAt || invoice.fundedAt || invoice.createdAt
+          : invoice.fundedAt || invoice.createdAt;
+
+    const ttlDays = this.isTerminalStatus(invoice.status)
+      ? ContractMonitor.TERMINAL_TTL_DAYS
+      : ContractMonitor.ACTIVE_TTL_DAYS;
+    const ttlLedgers = ttlDays * 17_280;
+    const elapsedLedgers = Math.max(
+      0,
+      Math.floor(
+        (Date.now() - baseTimestamp * 1000) / (ContractMonitor.LEDGER_SECONDS * 1000),
+      ),
+    );
+    const expiryLedger = elapsedLedgers + ttlLedgers;
+    const remainingLedgers = expiryLedger - currentLedger;
+    const remainingDays = Math.ceil(remainingLedgers / 17_280);
+
+    if (remainingDays > ContractMonitor.WARNING_WINDOW_DAYS) {
+      return null;
+    }
+
+    return {
+      id: invoice.id,
+      status: invoice.status,
+      expiryLedger,
+      remainingDays: Math.max(0, remainingDays),
+      severity:
+        remainingDays <= 7 ? 'high' : remainingDays <= 14 ? 'medium' : 'low',
+    };
+  }
+
+  private shouldTrackInvoice(status: InvoiceStatus): boolean {
+    return status !== 'Expired';
+  }
+
+  private isTerminalStatus(status: InvoiceStatus): boolean {
+    return status === 'Paid' || status === 'Defaulted' || status === 'Cancelled' || status === 'Expired';
   }
 }
 

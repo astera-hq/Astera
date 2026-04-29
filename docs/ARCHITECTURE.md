@@ -2,7 +2,7 @@
 
 ## Overview
 
-Astera is a Real World Assets (RWA) financing platform on Stellar blockchain that enables Small and Medium Enterprises (SMEs) to tokenize unpaid invoices and connect with community investors through Soroban smart contracts. The system comprises four coordinated contracts: an Invoice Contract managing the lifecycle of tokenized invoices, a Pool Contract handling investor deposits and liquidity, a Credit Score Contract building on-chain credit history, and a Share Token Contract for managing pool share distribution.
+Astera is a Real World Assets (RWA) financing platform on Stellar blockchain that enables Small and Medium Enterprises (SMEs) to tokenize unpaid invoices and connect with community investors through Soroban smart contracts. The system comprises five coordinated contracts: an Invoice Contract managing the lifecycle of tokenized invoices, a Pool Contract handling investor deposits and liquidity, a Credit Score Contract building on-chain credit history, a Share Token Contract for managing pool share distribution, and a Governance Contract for share-weighted proposal voting.
 
 The platform operates on the core principle that invoices become RWA tokens, a liquidity pool funded by investors provides capital to SMEs, and automatic repayment + yield distribution closes the loop between all parties.
 
@@ -20,6 +20,7 @@ The platform operates on the core principle that invoices become RWA tokens, a l
 - **Pool Contract** (`contracts/pool/src/lib.rs`): Written in Rust, compiles to WebAssembly
 - **Credit Score Contract** (`contracts/credit_score/src/lib.rs`): Written in Rust, compiles to WebAssembly
 - **Share Token Contract** (`contracts/share/src/lib.rs`): Written in Rust, compiles to WebAssembly
+- **Governance Contract** (`contracts/governance/src/lib.rs`): Written in Rust, compiles to WebAssembly
 
 ### Frontend
 - **Framework**: Next.js 15 with TypeScript
@@ -62,6 +63,9 @@ contracts/
 ├── share/
 │   ├── Cargo.toml           # Share token contract crate
 │   └── src/lib.rs           # Share token contract implementation (simple share token)
+├── governance/
+│   ├── Cargo.toml           # Governance contract crate
+│   └── src/lib.rs           # Share-weighted governance proposal lifecycle
 ├── tests/
 │   └── integration_tests.rs  # Cross-contract integration tests (373 lines)
 └── Dockerfile               # Contract build environment
@@ -383,7 +387,31 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 
 ---
 
-### 5. Event Indexer (`indexer/`)
+### 5. Governance Contract (`contracts/governance/src/lib.rs`)
+
+**Purpose**: Provides a lightweight share-weighted governance layer for protocol parameters and administrative actions.
+
+**Responsibilities**:
+- Create proposals targeting protocol contracts or governance actions
+- Weight votes by current share-token balance
+- Enforce quorum and supermajority thresholds before execution
+- Track proposal history and lifecycle state for the UI
+
+**Key State Variables**:
+- `Config` -> GovernanceConfig: admin, share token, voting window, quorum, pass threshold, execution delay
+- `Proposal(u64)` -> Proposal record with proposer, target contract, calldata, tallies, and status
+- `ProposalCount` -> Sequential proposal ID counter
+- `Vote((proposal_id, voter))` -> One-vote-per-address guard
+
+**Status Flow**:
+- `Active` -> Proposal open for voting
+- `Passed` / `Rejected` -> Voting closed and tallied
+- `Executed` -> Proposal executed after timelock
+- `Cancelled` -> Proposal withdrawn by proposer or admin
+
+---
+
+### 6. Event Indexer (`indexer/`)
 
 **Purpose**: Index Stellar Horizon events for fast historical queries and analytics.
 

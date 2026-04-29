@@ -4,6 +4,7 @@ members = [
     "contracts/pool", 
     "contracts/credit_score",
     "contracts/share",
+    "contracts/governance",
     "benchmarks",
 ]
 resolver = "2"

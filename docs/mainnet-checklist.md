@@ -15,6 +15,8 @@ Quick reference checklist for mainnet deployment. See [Mainnet Deployment Guide]
 - [ ] Audit report reviewed and published
 - [ ] Economic model validated by financial experts
 - [ ] Legal compliance review completed
+- [ ] Audit findings recorded in [security audit tracking](security-audit/audit-tracking.md)
+- [ ] No unresolved critical/high findings remain in the audit tracker
 
 ### Code Quality
 

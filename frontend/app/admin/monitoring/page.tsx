@@ -1,24 +1,31 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useStore } from '@/lib/store';
 import { monitorService, ContractEvent } from '@/lib/monitoring';
 import { notificationService, NotificationAlert } from '@/lib/notifications';
-import { formatUSDC, truncateAddress } from '@/lib/stellar';
+import type { InvoiceTtlWarning } from '@/lib/types';
+import { buildRenewInvoiceTtlTx, submitTx } from '@/lib/contracts';
 
 export default function MonitoringPage() {
+  const { wallet } = useStore();
   const [events, setEvents] = useState<ContractEvent[]>([]);
   const [alerts, setAlerts] = useState<NotificationAlert[]>([]);
+  const [ttlWarnings, setTtlWarnings] = useState<InvoiceTtlWarning[]>([]);
   const [isPolling, setIsPolling] = useState(false);
   const [lastCheck, setLastCheck] = useState<Date | null>(null);
   const [autoPoll, setAutoPoll] = useState(true);
+  const [renewingId, setRenewingId] = useState<number | null>(null);
 
   const fetchEvents = useCallback(async () => {
     setIsPolling(true);
     try {
       const newEvents = await monitorService.pollEvents();
+      const warnings = await monitorService.getInvoiceTtlWarnings();
       if (newEvents.length > 0) {
         setEvents((prev) => [...newEvents, ...prev].slice(0, 100));
       }
+      setTtlWarnings(warnings);
       setLastCheck(new Date());
     } catch (error) {
       console.error('Polling error:', error);
@@ -26,6 +33,31 @@ export default function MonitoringPage() {
       setIsPolling(false);
     }
   }, []);
+
+  async function renewInvoice(invoiceId: number) {
+    if (!wallet.connected || !wallet.address) {
+      return;
+    }
+    setRenewingId(invoiceId);
+    try {
+      const xdr = await buildRenewInvoiceTtlTx({
+        operator: wallet.address,
+        invoiceId,
+      });
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+      if (error) throw new Error(error.message);
+      await submitTx(signedTxXdr);
+      await fetchEvents();
+    } catch (error) {
+      console.error('[Astera Monitor] Failed to renew invoice TTL:', error);
+    } finally {
+      setRenewingId(null);
+    }
+  }
 
   useEffect(() => {
     // Initial fetch
@@ -107,6 +139,62 @@ export default function MonitoringPage() {
           </p>
           <p className="text-xs text-brand-muted mt-2">Next check in ~30 seconds</p>
         </div>
+      </div>
+
+      <div className="bg-brand-card border border-brand-border rounded-2xl p-6">
+        <div className="flex items-center justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-xl font-bold text-white">Storage TTL Watchlist</h2>
+            <p className="text-sm text-brand-muted">
+              Estimated invoices whose persistent storage is approaching expiry.
+            </p>
+          </div>
+          <span className="text-xs font-bold uppercase tracking-widest text-brand-gold">
+            {ttlWarnings.length} at risk
+          </span>
+        </div>
+
+        {ttlWarnings.length === 0 ? (
+          <div className="text-sm text-brand-muted">
+            No invoices are currently within the 30-day renewal window.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            {ttlWarnings.map((warning) => (
+              <div
+                key={warning.id}
+                className={`rounded-xl border p-4 ${
+                  warning.severity === 'high'
+                    ? 'border-red-500/40 bg-red-500/10'
+                    : warning.severity === 'medium'
+                      ? 'border-orange-500/40 bg-orange-500/10'
+                      : 'border-yellow-500/30 bg-yellow-500/10'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <span className="text-sm font-bold text-white">Invoice #{warning.id}</span>
+                  <span className="text-[10px] uppercase tracking-widest text-brand-muted">
+                    {warning.severity}
+                  </span>
+                </div>
+                <p className="text-xs text-brand-muted mb-1">Status: {warning.status}</p>
+                <p className="text-sm text-white font-medium">
+                  Expires in {warning.remainingDays} day{warning.remainingDays === 1 ? '' : 's'}
+                </p>
+                <p className="text-[10px] text-brand-muted mt-1 font-mono">
+                  Ledger {warning.expiryLedger}
+                </p>
+                <button
+                  onClick={() => void renewInvoice(warning.id)}
+                  disabled={!wallet.connected || renewingId === warning.id}
+                  className="mt-3 w-full rounded-lg border border-brand-border px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  {renewingId === warning.id ? 'Renewing...' : 'Renew TTL'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">

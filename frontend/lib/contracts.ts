@@ -2,6 +2,7 @@ import {
   rpc,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
+  GOVERNANCE_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -22,6 +23,7 @@ import type {
   FundedInvoice,
   CollateralConfig,
   CollateralDeposit,
+  GovernanceProposal,
 } from './types';
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -147,6 +149,28 @@ export async function buildCreateInvoiceTx(params: {
   return prepared.toXDR();
 }
 
+export async function buildRenewInvoiceTtlTx(params: {
+  operator: string;
+  invoiceId: number;
+}): Promise<string> {
+  const account = await rpc.getAccount(params.operator);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(contract.call('renew_ttl', nativeToScVal(params.invoiceId, { type: 'u64' })))
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
 // ---- Pool Contract ----
 
 export async function getPoolConfig(): Promise<PoolConfig> {
@@ -198,6 +222,18 @@ export async function getPoolTokenTotals(token: string): Promise<PoolTokenTotals
     totalPaidOut: BigInt(raw.total_paid_out as string),
     totalFeeRevenue: BigInt((raw.total_fee_revenue as string | number | bigint) ?? 0),
   };
+}
+
+export async function getTokenDepositCap(token: string): Promise<bigint> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_token_deposit_cap',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return BigInt(String(scValToNative(result!.retval) ?? 0));
 }
 
 export async function getInvestorPosition(
@@ -869,6 +905,136 @@ export async function buildDepositCollateralTx(params: {
         nativeToScVal(params.amount, { type: 'i128' }),
       ),
     )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- Governance ----
+
+export async function listGovernanceProposals(): Promise<GovernanceProposal[]> {
+  if (!GOVERNANCE_CONTRACT_ID) return [];
+
+  const sim = await simulateTx(
+    GOVERNANCE_CONTRACT_ID,
+    'list_proposals',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Array<Record<string, unknown>>;
+  return raw.map((proposal) => ({
+    id: Number(proposal.id),
+    proposer: proposal.proposer as string,
+    description: proposal.description as string,
+    targetContract: proposal.target_contract as string,
+    functionName: String(proposal.function_name),
+    calldata: String(proposal.calldata),
+    votesFor: BigInt(String(proposal.votes_for)),
+    votesAgainst: BigInt(String(proposal.votes_against)),
+    status: proposal.status as GovernanceProposal['status'],
+    createdAt: Number(proposal.created_at),
+    votingEndsAt: Number(proposal.voting_ends_at),
+    executionDelay: Number(proposal.execution_delay),
+  }));
+}
+
+export async function buildCreateProposalTx(params: {
+  proposer: string;
+  description: string;
+  targetContract: string;
+  functionName: string;
+  calldata: string;
+}): Promise<string> {
+  const account = await rpc.getAccount(params.proposer);
+  const contract = new Contract(GOVERNANCE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'create_proposal',
+        nativeToScVal(params.description, { type: 'string' }),
+        new Address(params.targetContract).toScVal(),
+        nativeToScVal(params.functionName, { type: 'string' }),
+        nativeToScVal(params.calldata, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildVoteProposalTx(params: {
+  voter: string;
+  proposalId: number;
+  inFavor: boolean;
+}): Promise<string> {
+  const account = await rpc.getAccount(params.voter);
+  const contract = new Contract(GOVERNANCE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'vote',
+        nativeToScVal(params.proposalId, { type: 'u64' }),
+        nativeToScVal(params.inFavor, { type: 'bool' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildExecuteProposalTx(executor: string, proposalId: number): Promise<string> {
+  const account = await rpc.getAccount(executor);
+  const contract = new Contract(GOVERNANCE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(contract.call('execute_proposal', nativeToScVal(proposalId, { type: 'u64' })))
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildCancelProposalTx(cancelledBy: string, proposalId: number): Promise<string> {
+  const account = await rpc.getAccount(cancelledBy);
+  const contract = new Contract(GOVERNANCE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(contract.call('cancel_proposal', nativeToScVal(proposalId, { type: 'u64' })))
     .setTimeout(30)
     .build();
 

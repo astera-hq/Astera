@@ -12,6 +12,7 @@ import {
   getInvestorPosition,
   getAcceptedTokens,
   getPoolTokenTotals,
+  getTokenDepositCap,
   buildDepositTx,
   buildWithdrawTx,
   submitTx,
@@ -36,6 +37,7 @@ export default function InvestPage() {
   const [acceptedTokens, setAcceptedTokens] = useState<string[]>([]);
   const [selectedToken, setSelectedToken] = useState<string>('');
   const [tokenTotals, setTokenTotals] = useState<PoolTokenTotals | null>(null);
+  const [tokenDepositCap, setTokenDepositCap] = useState<bigint>(0n);
 
   // #109: KYC status
   const [kycRequired, setKycRequired] = useState(false);
@@ -101,10 +103,12 @@ export default function InvestPage() {
   async function loadTokenTotals(token: string) {
     if (!POOL_CONFIGURED) return;
     try {
-      const tt = await getPoolTokenTotals(token);
+      const [tt, cap] = await Promise.all([getPoolTokenTotals(token), getTokenDepositCap(token)]);
       setTokenTotals(tt);
+      setTokenDepositCap(cap);
     } catch {
       setTokenTotals(null);
+      setTokenDepositCap(0n);
     }
   }
 
@@ -118,6 +122,16 @@ export default function InvestPage() {
   }
 
   const POOL_CONFIGURED = Boolean(process.env.NEXT_PUBLIC_POOL_CONTRACT_ID);
+  const remainingTokenCapacity =
+    tokenDepositCap > 0n && tokenTotals
+      ? tokenDepositCap > tokenTotals.totalDeposited
+        ? tokenDepositCap - tokenTotals.totalDeposited
+        : 0n
+      : null;
+  const depositAtCapacity =
+    mode === 'deposit' && tokenDepositCap > 0n && tokenTotals
+      ? tokenTotals.totalDeposited >= tokenDepositCap
+      : false;
 
   async function submitTransaction() {
     if (!wallet.address || !amount || !selectedToken) return;
@@ -348,7 +362,8 @@ export default function InvestPage() {
                       txLoading ||
                       !amount ||
                       !selectedToken ||
-                      (mode === 'deposit' && kycRequired && !kycApproved)
+                      (mode === 'deposit' && kycRequired && !kycApproved) ||
+                      depositAtCapacity
                     }
                     className="w-full py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 capitalize"
                   >
@@ -356,6 +371,11 @@ export default function InvestPage() {
                       ? t('processing')
                       : `${t(`modes.${mode}`)} ${stablecoinLabel(selectedToken)}`}
                   </button>
+                  {depositAtCapacity && mode === 'deposit' && (
+                    <p className="text-xs text-red-300">
+                      This token is at its configured deposit cap.
+                    </p>
+                  )}
                   {txStatus === 'failed' && (
                     <button
                       type="button"
@@ -372,6 +392,19 @@ export default function InvestPage() {
                   <p>• {t('notes.stablecoin')}</p>
                   <p>• {t('notes.repayment')}</p>
                   <p>• {t('notes.withdrawal')}</p>
+                  {selectedToken && (
+                    <p>
+                      •{' '}
+                      {tokenDepositCap > 0n && remainingTokenCapacity !== null ? (
+                        <>
+                          {formatUSDC(remainingTokenCapacity)} remaining of{' '}
+                          {formatUSDC(tokenDepositCap)} capacity for {stablecoinLabel(selectedToken)}
+                        </>
+                      ) : (
+                        <>No deposit cap configured for {stablecoinLabel(selectedToken)}.</>
+                      )}
+                    </p>
+                  )}
                 </div>
               </>
             )}

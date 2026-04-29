@@ -49,3 +49,5 @@ Check each item before deploying to mainnet.
 - [ ] Admin keys stored in hardware wallet or multisig
 - [ ] Testnet deployment verified before mainnet
 - [ ] `docs/mainnet-checklist.md` completed
+- [ ] `docs/security-audit/audit-tracking.md` completed
+- [ ] No `Critical`/`High` findings remain open in the audit tracker

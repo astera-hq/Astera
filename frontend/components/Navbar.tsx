@@ -59,6 +59,7 @@ export default function Navbar() {
     { href: '/dashboard', label: t('dashboard') },
     { href: '/invest', label: t('invest') },
     { href: '/analytics', label: t('analytics') },
+    { href: '/governance', label: 'Governance' },
     { href: '/portfolio', label: t('portfolio') },
     { href: '/invoice/new', label: t('newInvoice') },
   ];
