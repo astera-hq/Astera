@@ -19,15 +19,13 @@ import {
   MAX_EVENTS_HISTORY,
   EVENT_TOAST_MAP,
 } from '../../lib/sse-events';
-import { rpc } from '../../lib/stellar';
+import { rpcGetEvents, rpcGetLatestLedger } from '../../lib/stellar';
 
 // ---- Mocks ----
 
 jest.mock('../../lib/stellar', () => ({
-  rpc: {
-    getLatestLedger: jest.fn(),
-    getEvents: jest.fn(),
-  },
+  rpcGetEvents: jest.fn(),
+  rpcGetLatestLedger: jest.fn(),
   INVOICE_CONTRACT_ID: 'TEST_INVOICE_CONTRACT',
   POOL_CONTRACT_ID: 'TEST_POOL_CONTRACT',
   scValToNative: jest.fn((val: unknown) => val),
@@ -79,11 +77,11 @@ describe('SSE Events Polling Service', () => {
     });
 
     // Default mock responses
-    (rpc.getLatestLedger as jest.Mock).mockResolvedValue({
+    (rpcGetLatestLedger as jest.Mock).mockResolvedValue({
       sequence: 1000,
     });
 
-    (rpc.getEvents as jest.Mock).mockResolvedValue({ events: [] });
+    (rpcGetEvents as jest.Mock).mockResolvedValue({ events: [] });
   });
 
   afterEach(() => {
@@ -276,7 +274,7 @@ describe('SSE Events Polling Service', () => {
   // ---- Test 8: Error Handling ----
   describe('Error Handling', () => {
     it('should handle RPC errors gracefully', async () => {
-      (rpc.getLatestLedger as jest.Mock).mockRejectedValue(new Error('Network error'));
+      (rpcGetLatestLedger as jest.Mock).mockRejectedValue(new Error('Network error'));
 
       sseEventsService.start();
       await jest.advanceTimersByTimeAsync(0);

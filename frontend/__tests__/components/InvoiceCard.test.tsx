@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import InvoiceCard from '@/components/InvoiceCard';
+import InvoiceCard, { InvoiceCardSkeleton } from '@/components/InvoiceCard';
 import type { InvoiceMetadata } from '@/lib/types';
 
 // next/link is fine in jsdom, but mock to a plain anchor to keep the test
@@ -81,5 +81,13 @@ describe('InvoiceCard', () => {
     rerender(<InvoiceCard id={1} metadata={meta} fundedAmount={25_000_000n} />);
     expect(screen.getByText(/Co-funding progress/)).toBeInTheDocument();
     expect(screen.getByText(/25\.0%/)).toBeInTheDocument();
+  });
+
+  it('renders InvoiceCardSkeleton with pulse animation', () => {
+    const { container } = render(<InvoiceCardSkeleton />);
+    const root = container.firstChild as HTMLElement;
+    expect(root).toHaveClass('animate-pulse');
+    const skeletons = container.querySelectorAll('[role="status"]');
+    expect(skeletons.length).toBeGreaterThan(3);
   });
 });

@@ -1,0 +1,292 @@
+   Compiling pool v0.1.0 (/home/bilal/bilal_projects/open-source/drips/Astera/contracts/pool)
+error: symbol too long: length 17, max 9
+    --> contracts/pool/src/lib.rs:1128:37
+     |
+1128 |                 (EVT, symbol_short!("withdrawal_queued")),
+     |                                     ^^^^^^^^^^^^^^^^^^^
+
+error: symbol too long: length 20, max 9
+    --> contracts/pool/src/lib.rs:1172:33
+     |
+1172 |             (EVT, symbol_short!("withdrawal_cancelled")),
+     |                                 ^^^^^^^^^^^^^^^^^^^^^^
+
+error: symbol too long: length 20, max 9
+    --> contracts/pool/src/lib.rs:1214:33
+     |
+1214 |             (EVT, symbol_short!("withdrawal_fulfilled")),
+     |                                 ^^^^^^^^^^^^^^^^^^^^^^
+
+error: symbol too long: length 20, max 9
+    --> contracts/pool/src/lib.rs:1289:41
+     |
+1289 |                     (EVT, symbol_short!("withdrawal_fulfilled")),
+     |                                         ^^^^^^^^^^^^^^^^^^^^^^
+
+error: generics unsupported on user-defined types in contract functions
+   --> contracts/pool/src/lib.rs:644:57
+    |
+644 |     pub fn pause(env: Env, admin: Address) -> PoolResult<()> {
+    |                                                         ^
+
+error: cannot find attribute `contractclient` in this scope
+   --> contracts/pool/src/lib.rs:336:3
+    |
+336 | #[contractclient(name = "CreditScoreClient")]
+    |   ^^^^^^^^^^^^^^
+    |
+help: consider importing this attribute macro
+    |
+ 26 + use soroban_sdk::contractclient;
+    |
+
+error: cannot find macro `format` in this scope
+    --> contracts/pool/src/lib.rs:1618:27
+     |
+1618 | ...   .add(&format!("Failed to process withdrawal queue: {:?}", e));
+     |             ^^^^^^
+
+error[E0425]: cannot find value `DEFAULT_FACTOING_FEE_BPS` in this scope
+   --> contracts/pool/src/lib.rs:581:32
+    |
+100 | const DEFAULT_FACTORING_FEE_BPS: u32 = 0;
+    | ----------------------------------------- similarly named constant `DEFAULT_FACTORING_FEE_BPS` defined here
+...
+581 |             factoring_fee_bps: DEFAULT_FACTOING_FEE_BPS,
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: a constant with a similar name exists
+    |
+581 |             factoring_fee_bps: DEFAULT_FACTORING_FEE_BPS,
+    |                                             +
+
+error[E0425]: cannot find value `request_id` in this scope
+    --> contracts/pool/src/lib.rs:1134:12
+     |
+1134 |         Ok(request_id)
+     |            ^^^^^^^^^^
+     |
+help: the binding `request_id` is available in a different scope in the same function
+    --> contracts/pool/src/lib.rs:1112:17
+     |
+1112 |             let request_id = Self::generate_request_id(&env, &token);
+     |                 ^^^^^^^^^^
+
+error[E0081]: discriminant value `24` assigned more than once
+  --> contracts/pool/src/lib.rs:60:1
+   |
+60 | pub enum PoolError {
+   | ^^^^^^^^^^^^^^^^^^
+...
+72 |     InvalidFeeTier = 24,
+   |                      -- `24` assigned here
+...
+87 |     InsufficientLiquidity = 24,
+   |                             -- `24` assigned here
+
+error[E0081]: discriminant value `25` assigned more than once
+  --> contracts/pool/src/lib.rs:60:1
+   |
+60 | pub enum PoolError {
+   | ^^^^^^^^^^^^^^^^^^
+...
+73 |     FeeTierNotFound = 25,
+   |                       -- `25` assigned here
+...
+93 |     UpgradeExitWindowActive = 25,
+   |                               -- `25` assigned here
+
+error[E0433]: failed to resolve: use of undeclared type `CreditScoreClient`
+   --> contracts/pool/src/lib.rs:444:29
+    |
+444 |         let credit_client = CreditScoreClient::new(env, &cs_contract);
+    |                             ^^^^^^^^^^^^^^^^^ use of undeclared type `CreditScoreClient`
+
+error[E0614]: type `u32` cannot be dereferenced
+   --> contracts/pool/src/lib.rs:454:80
+    |
+454 | ...(&DataKey::FeeTier(*tier_id)) {
+    |                       ^^^^^^^^ can't be dereferenced
+
+error[E0599]: no variant or associated item named `TokenHasActiveBalances` found for enum `PoolError` in the current scope
+   --> contracts/pool/src/lib.rs:758:35
+    |
+ 60 | pub enum PoolError {
+    | ------------------ variant or associated item `TokenHasActiveBalances` not found for this enum
+...
+758 |             return Err(PoolError::TokenHasActiveBalances);
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `PoolError`
+
+error[E0599]: no variant or associated item named `TokenHasDeployedCapital` found for enum `PoolError` in the current scope
+   --> contracts/pool/src/lib.rs:763:35
+    |
+ 60 | pub enum PoolError {
+    | ------------------ variant or associated item `TokenHasDeployedCapital` not found for this enum
+...
+763 |             return Err(PoolError::TokenHasDeployedCapital);
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `PoolError`
+
+error[E0599]: no variant or associated item named `TokenHasActiveBalances` found for enum `PoolError` in the current scope
+   --> contracts/pool/src/lib.rs:785:35
+    |
+ 60 | pub enum PoolError {
+    | ------------------ variant or associated item `TokenHasActiveBalances` not found for this enum
+...
+785 |             return Err(PoolError::TokenHasActiveBalances);
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `PoolError`
+
+error[E0599]: no variant or associated item named `ConcentrationLimitExceeded` found for enum `PoolError` in the current scope
+   --> contracts/pool/src/lib.rs:887:43
+    |
+ 60 | pub enum PoolError {
+    | ------------------ variant or associated item `ConcentrationLimitExceeded` not found for this enum
+...
+887 |                     return Err(PoolError::ConcentrationLimitExceeded);
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `PoolError`
+
+error[E0277]: the trait bound `soroban_sdk::Vec<WithdrawalRequest>: Default` is not satisfied
+    --> contracts/pool/src/lib.rs:1062:14
+     |
+1062 |             .unwrap_or_default();
+     |              ^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `soroban_sdk::Vec<WithdrawalRequest>`
+     |
+note: required by a bound in `core::option::Option::<T>::unwrap_or_default`
+    --> /rustc/4a4ef493e3a1488c6e321570238084b38948f6db/library/core/src/option.rs:1093:4
+
+error[E0609]: no field `total_shares` on type `PoolTokenTotals`
+    --> contracts/pool/src/lib.rs:1094:52
+     |
+1094 |         let amount = (shares * tt.pool_value) / tt.total_shares;
+     |                                                    ^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `pool_value`, `total_deployed`, `total_paid_out`, `total_fee_revenue`, `reward_per_share` ... and 2 others
+
+error[E0277]: the trait bound `soroban_sdk::Vec<WithdrawalRequest>: Default` is not satisfied
+    --> contracts/pool/src/lib.rs:1159:14
+     |
+1159 |             .unwrap_or_default();
+     |              ^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `soroban_sdk::Vec<WithdrawalRequest>`
+     |
+note: required by a bound in `core::option::Option::<T>::unwrap_or_default`
+    --> /rustc/4a4ef493e3a1488c6e321570238084b38948f6db/library/core/src/option.rs:1093:4
+
+error[E0277]: the trait bound `soroban_sdk::Vec<WithdrawalRequest>: Default` is not satisfied
+    --> contracts/pool/src/lib.rs:1185:14
+     |
+1185 |             .unwrap_or_default()
+     |              ^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `soroban_sdk::Vec<WithdrawalRequest>`
+     |
+note: required by a bound in `core::option::Option::<T>::unwrap_or_default`
+    --> /rustc/4a4ef493e3a1488c6e321570238084b38948f6db/library/core/src/option.rs:1093:4
+
+error[E0277]: the trait bound `soroban_sdk::Vec<WithdrawalRequest>: Default` is not satisfied
+    --> contracts/pool/src/lib.rs:1240:14
+     |
+1240 |             .unwrap_or_default();
+     |              ^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `soroban_sdk::Vec<WithdrawalRequest>`
+     |
+note: required by a bound in `core::option::Option::<T>::unwrap_or_default`
+    --> /rustc/4a4ef493e3a1488c6e321570238084b38948f6db/library/core/src/option.rs:1093:4
+
+error[E0609]: no field `total_shares` on type `PoolTokenTotals`
+    --> contracts/pool/src/lib.rs:1255:72
+     |
+1255 | ...tt.pool_value) / tt.total_shares;
+     |                        ^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `pool_value`, `total_deployed`, `total_paid_out`, `total_fee_revenue`, `reward_per_share` ... and 2 others
+
+error[E0609]: no field `reserve_ratio_bps` on type `PoolConfig`
+    --> contracts/pool/src/lib.rs:1536:52
+     |
+1536 | ... as u128 * config.reserve_ratio_bps as u128 / BPS_DENOM as u128) as...
+     |                      ^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `invoice_contract`, `admin`, `yield_bps`, `factoring_fee_bps`, `compound_interest` ... and 11 others
+
+error[E0061]: this method takes 2 arguments but 1 argument was supplied
+    --> contracts/pool/src/lib.rs:1618:22
+     |
+1618 | ...  .add(&format!("Failed to process withdrawal queue: {:?}", e));
+     |       ^^^--------------------------------------------------------- argument #2 of type `&[soroban_sdk::Val]` is missing
+     |
+note: method defined here
+    --> /home/bilal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/soroban-sdk-22.0.11/src/logs.rs:124:12
+     |
+ 124 |     pub fn add(&self, msg: &'static str, args: &[Val]) {
+     |            ^^^
+help: provide the argument
+     |
+1618 |                     .add(&format!("Failed to process withdrawal queue: {:?}", e), /* &[soroban_sdk::Val] */);
+     |                                                                                 +++++++++++++++++++++++++++
+
+error[E0599]: no variant or associated item named `YieldProposalNotFound` found for enum `PoolError` in the current scope
+    --> contracts/pool/src/lib.rs:1943:35
+     |
+  60 | pub enum PoolError {
+     | ------------------ variant or associated item `YieldProposalNotFound` not found for this enum
+...
+1943 |             return Err(PoolError::YieldProposalNotFound);
+     |                                   ^^^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `PoolError`
+
+error[E0599]: no variant or associated item named `YieldChangeNotReady` found for enum `PoolError` in the current scope
+    --> contracts/pool/src/lib.rs:1949:35
+     |
+  60 | pub enum PoolError {
+     | ------------------ variant or associated item `YieldChangeNotReady` not found for this enum
+...
+1949 |             return Err(PoolError::YieldChangeNotReady);
+     |                                   ^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `PoolError`
+
+error[E0614]: type `u32` cannot be dereferenced
+    --> contracts/pool/src/lib.rs:2057:16
+     |
+2057 |             if *existing_id == tier_id {
+     |                ^^^^^^^^^^^^ can't be dereferenced
+
+error[E0599]: no variant or associated item named `InvalidReserveRatio` found for enum `PoolError` in the current scope
+    --> contracts/pool/src/lib.rs:2341:35
+     |
+  60 | pub enum PoolError {
+     | ------------------ variant or associated item `InvalidReserveRatio` not found for this enum
+...
+2341 |             return Err(PoolError::InvalidReserveRatio);
+     |                                   ^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `PoolError`
+
+error[E0609]: no field `reserve_ratio_bps` on type `PoolConfig`
+    --> contracts/pool/src/lib.rs:2348:16
+     |
+2348 |         config.reserve_ratio_bps = bps;
+     |                ^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `invoice_contract`, `admin`, `yield_bps`, `factoring_fee_bps`, `compound_interest` ... and 11 others
+
+error[E0599]: no variant or associated item named `InsufficientReserve` found for enum `PoolError` in the current scope
+    --> contracts/pool/src/lib.rs:2390:35
+     |
+  60 | pub enum PoolError {
+     | ------------------ variant or associated item `InsufficientReserve` not found for this enum
+...
+2390 |             return Err(PoolError::InsufficientReserve);
+     |                                   ^^^^^^^^^^^^^^^^^^^ variant or associated item not found in `PoolError`
+     |
+help: there is a variant with a similar name
+     |
+2390 -             return Err(PoolError::InsufficientReserve);
+2390 +             return Err(PoolError::InsufficientRevenue);
+     |
+
+warning: variable does not need to be mutable
+    --> contracts/pool/src/lib.rs:2081:13
+     |
+2081 |         let mut tier_ids: Vec<u32> = env
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0061, E0081, E0277, E0425, E0433, E0599, E0609, E0614.
+For more information about an error, try `rustc --explain E0061`.
+warning: `pool` (lib) generated 1 warning
+error: could not compile `pool` (lib) due to 31 previous errors; 1 warning emitted

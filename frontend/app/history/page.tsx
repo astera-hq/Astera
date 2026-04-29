@@ -5,7 +5,8 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { HistoryEventSkeleton } from '@/components/Skeleton';
 import {
-  rpc,
+  rpcGetEvents,
+  rpcGetLatestLedger,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
   scValToNative,
@@ -250,6 +251,8 @@ export default function HistoryPage() {
 
       try {
         let parsed: HistoryEvent[] = [];
+        let eventCount = 0;
+        let responseCursor: string | undefined;
 
         // Try indexer API first (Option A optimization from #240)
         if (INDEXER_URL) {
@@ -272,6 +275,7 @@ export default function HistoryPage() {
                 ledgerCloseAt: e.ledgerCloseAt,
                 txHash: e.txHash,
               }));
+              eventCount = raw.length;
               parsed = parseEvents(raw, wallet.address);
             }
           } catch (indexerErr) {
@@ -281,10 +285,10 @@ export default function HistoryPage() {
 
         // Fallback to Horizon RPC if indexer didn't work
         if (parsed.length === 0) {
-          const latest = await rpc.getLatestLedger();
+          const latest = await rpcGetLatestLedger();
           const startLedger = Math.max(1, latest.sequence - 500_000);
 
-          const response = await rpc.getEvents({
+          const response = await rpcGetEvents({
             ...(nextCursor ? { cursor: nextCursor } : { startLedger }),
             filters: [
               {
@@ -296,6 +300,11 @@ export default function HistoryPage() {
           });
 
           const raw = response.events ?? [];
+          eventCount = raw.length;
+          responseCursor =
+            typeof response === 'object' && response !== null && 'cursor' in response
+              ? (response as { cursor?: string }).cursor
+              : undefined;
           parsed = parseEvents(raw, wallet.address);
         }
 
@@ -306,11 +315,7 @@ export default function HistoryPage() {
           setVisible(PAGE_SIZE);
         }
 
-        const responseCursor =
-          typeof response === 'object' && response !== null && 'cursor' in response
-            ? (response as { cursor?: string }).cursor
-            : undefined;
-        setHasMore(raw.length === EVENT_LIMIT && Boolean(responseCursor));
+        setHasMore(eventCount === EVENT_LIMIT && Boolean(responseCursor));
         setCursor(responseCursor);
       } catch (e) {
         toast.error('Failed to load transaction history. Make sure contracts are deployed.');

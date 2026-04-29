@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import PoolStats from '@/components/PoolStats';
+import PoolStats, { PoolStatsSkeleton } from '@/components/PoolStats';
 import type { PoolConfig, PoolTokenTotals } from '@/lib/types';
 
 const baseConfig: PoolConfig = {
@@ -87,5 +87,14 @@ describe('PoolStats', () => {
     );
     expect(screen.getByText('0%')).toBeInTheDocument();
     expect(getUtilizationBar(container)).toHaveStyle({ width: '0%' });
+  });
+
+  it('renders PoolStatsSkeleton with pulse animation and placeholder content', () => {
+    const { container } = render(<PoolStatsSkeleton />);
+    const root = container.firstChild as HTMLElement;
+    expect(root).toHaveClass('animate-pulse');
+    // Skeleton uses role="status" for accessibility
+    const skeletons = container.querySelectorAll('[role="status"]');
+    expect(skeletons.length).toBeGreaterThan(5);
   });
 });

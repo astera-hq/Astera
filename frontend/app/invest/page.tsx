@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import type { FormEvent } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
-import { ChartSkeleton } from '@/components/Skeleton';
+import { PoolStatsSkeleton } from '@/components/PoolStats';
 import PoolStats from '@/components/PoolStats';
 import { APYCalculator } from '@/components/APYCalculator';
 import {
@@ -196,7 +196,7 @@ export default function InvestPage() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="space-y-6">
             {loading ? (
-              <ChartSkeleton />
+              <PoolStatsSkeleton />
             ) : poolConfig ? (
               <PoolStats
                 config={poolConfig}

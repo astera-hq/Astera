@@ -24,7 +24,8 @@ import {
   formatDate,
   daysUntil,
   truncateAddress,
-  rpc,
+  rpcGetEvents,
+  rpcGetLatestLedger,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
   USDC_TOKEN_ID,
@@ -184,9 +185,9 @@ export default function InvoiceDetailPage() {
     setHistoryError(null);
 
     try {
-      const latest = await rpc.getLatestLedger();
+      const latest = await rpcGetLatestLedger();
       const startLedger = Math.max(1, latest.sequence - 50_000);
-      const response = await rpc.getEvents({
+      const response = await rpcGetEvents({
         startLedger,
         limit: 200,
         filters: [

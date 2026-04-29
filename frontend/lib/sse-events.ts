@@ -13,7 +13,7 @@
  * - Deduplication of already-processed events
  */
 
-import { rpc, INVOICE_CONTRACT_ID, POOL_CONTRACT_ID, scValToNative } from './stellar';
+import { rpcGetEvents, rpcGetLatestLedger, INVOICE_CONTRACT_ID, POOL_CONTRACT_ID, scValToNative } from './stellar';
 import { notificationService } from './notifications';
 import { monitorService, ContractEvent } from './monitoring';
 import { useStore } from './store';
@@ -307,10 +307,10 @@ class SseEventsService {
     }
 
     try {
-      const latestLedger = await rpc.getLatestLedger();
+      const latestLedger = await rpcGetLatestLedger();
       const startLedger = Math.max(1, latestLedger.sequence - 50); // Look back 50 ledgers
 
-      const response = await rpc.getEvents({
+      const response = await rpcGetEvents({
         startLedger,
         filters: [{ contractIds: [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID] }],
       });
