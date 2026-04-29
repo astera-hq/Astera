@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { Skeleton } from '@/components/Skeleton';
 
 interface PaymentRecord {
   invoiceId: number;
@@ -402,6 +403,45 @@ function ScoreRow({
           className={`h-full ${color} rounded-full transition-all`}
           style={{ width: `${pct}%` }}
         />
+      </div>
+    </div>
+  );
+}
+
+export function CreditScoreSkeleton() {
+  return (
+    <div className="p-6 bg-brand-card border border-brand-border rounded-2xl animate-pulse">
+      <Skeleton className="h-5 w-44 mb-6" />
+
+      <div className="text-center mb-8">
+        <Skeleton className="h-12 w-24 mx-auto mb-2" />
+        <Skeleton className="h-4 w-16 mx-auto mb-1" />
+        <Skeleton className="h-3 w-32 mx-auto" />
+      </div>
+
+      <div className="space-y-3">
+        {[1, 2, 3].map((i) => (
+          <div key={i}>
+            <div className="flex justify-between text-sm mb-1">
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-4 w-6" />
+            </div>
+            <div className="h-1.5 bg-brand-border rounded-full overflow-hidden">
+              <div className="h-full bg-brand-border/60 rounded-full" style={{ width: '50%' }} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-6 pt-6 border-t border-brand-border grid grid-cols-2 gap-4">
+        <div>
+          <Skeleton className="h-3 w-20 mb-1" />
+          <Skeleton className="h-6 w-14" />
+        </div>
+        <div>
+          <Skeleton className="h-3 w-28 mb-1" />
+          <Skeleton className="h-6 w-14" />
+        </div>
       </div>
     </div>
   );

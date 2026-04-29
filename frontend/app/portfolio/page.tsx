@@ -29,6 +29,38 @@ interface TokenRow {
   rateBps: number;
 }
 
+function TokenPositionSkeleton() {
+  return (
+    <div className="bg-brand-card border border-brand-border rounded-2xl p-6 animate-pulse">
+      <div className="flex items-center justify-between mb-4">
+        <Skeleton className="h-5 w-20" />
+        <Skeleton className="h-5 w-28 rounded-lg" />
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i}>
+            <Skeleton className="h-3 w-16 mb-1" />
+            <Skeleton className="h-5 w-24" />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4 pt-4 border-t border-brand-border">
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs">
+            <Skeleton className="h-3 w-24" />
+            <Skeleton className="h-3 w-8" />
+          </div>
+          <div className="h-2 rounded-full bg-brand-border overflow-hidden">
+            <div className="h-full rounded-full bg-brand-gold/40" style={{ width: '45%' }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StatCard({
   label,
   value,
@@ -266,12 +298,30 @@ export default function PortfolioPage() {
 
       {loading && rows.length === 0 && (
         <div className="space-y-6">
-          <Skeleton className="h-10 w-48 rounded-lg" />
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCardSkeleton /><StatCardSkeleton /><StatCardSkeleton /><StatCardSkeleton />
           </div>
-          <Skeleton className="h-32 rounded-2xl" />
-          <Skeleton className="h-48 rounded-2xl" />
+          <div className="bg-brand-card border border-brand-border rounded-2xl p-6 animate-pulse">
+            <Skeleton className="h-5 w-40 mb-4" />
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <Skeleton className="h-3 w-24" />
+                <Skeleton className="h-3 w-8" />
+              </div>
+              <div className="h-2 rounded-full bg-brand-border overflow-hidden">
+                <div className="h-full rounded-full bg-brand-gold/40" style={{ width: '60%' }} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 text-sm">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i}>
+                  <Skeleton className="h-3 w-20 mb-1" />
+                  <Skeleton className="h-5 w-24" />
+                </div>
+              ))}
+            </div>
+          </div>
+          <TokenPositionSkeleton />
         </div>
       )}
 

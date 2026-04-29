@@ -1,5 +1,6 @@
 import type { PoolConfig, PoolTokenTotals } from '@/lib/types';
 import { formatUSDC } from '@/lib/stellar';
+import { Skeleton } from '@/components/Skeleton';
 
 interface Props {
   config: PoolConfig;
@@ -65,6 +66,44 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
       <p className={`font-semibold text-sm ${highlight ? 'text-brand-gold' : 'text-white'}`}>
         {value}
       </p>
+    </div>
+  );
+}
+
+export function PoolStatsSkeleton() {
+  return (
+    <div className="p-6 bg-brand-card border border-brand-border rounded-2xl animate-pulse">
+      <Skeleton className="h-5 w-32 mb-1" />
+      <Skeleton className="h-3 w-48 mb-6" />
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+        {[1, 2, 3, 4, 5].map((i) => (
+          <div key={i} className="p-3 bg-brand-dark rounded-xl border border-brand-border">
+            <Skeleton className="h-3 w-20 mb-2" />
+            <Skeleton className="h-4 w-28" />
+          </div>
+        ))}
+      </div>
+
+      <div className="mb-4">
+        <div className="flex justify-between text-sm mb-2">
+          <Skeleton className="h-4 w-20" />
+          <Skeleton className="h-4 w-10" />
+        </div>
+        <div className="h-2 bg-brand-border rounded-full overflow-hidden">
+          <div className="h-full bg-brand-gold/40 rounded-full" style={{ width: '60%' }} />
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between p-3 bg-brand-gold/10 border border-brand-gold/20 rounded-xl">
+        <Skeleton className="h-4 w-20" />
+        <Skeleton className="h-6 w-14" />
+      </div>
+
+      <div className="flex items-center justify-between p-3 mt-3 bg-brand-dark rounded-xl border border-brand-border">
+        <Skeleton className="h-4 w-24" />
+        <Skeleton className="h-6 w-14" />
+      </div>
     </div>
   );
 }
