@@ -251,7 +251,6 @@ export default function HistoryPage() {
 
       try {
         let parsed: HistoryEvent[] = [];
-        let eventCount = 0;
         let responseCursor: string | undefined;
 
         // Try indexer API first (Option A optimization from #240)
@@ -267,15 +266,17 @@ export default function HistoryPage() {
             const res = await fetch(`${INDEXER_URL}/events?${params.toString()}`);
             if (res.ok) {
               const data = await res.json();
-              const raw = (data.events || []).map((e: any) => ({
-                contractId: e.contractId,
-                topic: e.topic || [],
-                value: e.value,
-                ledger: e.ledgerSequence,
-                ledgerCloseAt: e.ledgerCloseAt,
-                txHash: e.txHash,
-              }));
-              eventCount = raw.length;
+              const raw = (Array.isArray(data.events) ? data.events : []).map((e: unknown) => {
+                const evt = e as Record<string, unknown>;
+                return {
+                  contractId: evt.contractId,
+                  topic: evt.topic ?? [],
+                  value: evt.value,
+                  ledger: evt.ledgerSequence,
+                  ledgerClosedAt: evt.ledgerClosedAt,
+                  txHash: evt.txHash,
+                };
+              });
               parsed = parseEvents(raw, wallet.address);
             }
           } catch (indexerErr) {

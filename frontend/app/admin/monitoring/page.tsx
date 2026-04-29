@@ -20,7 +20,7 @@ interface TokenUtilization {
   utilizationBps: number;
 }
 
-function UtilizationGauge({ token, label, utilizationBps }: TokenUtilization) {
+function UtilizationGauge({ label, utilizationBps }: TokenUtilization) {
   const pct = Math.min(100, Math.round(utilizationBps / 100));
   const color = pct >= 90 ? 'bg-red-500' : pct >= 80 ? 'bg-yellow-400' : 'bg-green-500';
   const textColor = pct >= 90 ? 'text-red-400' : pct >= 80 ? 'text-yellow-400' : 'text-green-400';

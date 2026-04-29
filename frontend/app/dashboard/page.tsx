@@ -34,6 +34,7 @@ type SortOption =
 
 /** Number of invoices to load per page */
 const PAGE_SIZE = 20;
+const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
 
 export default function DashboardPage() {
   const t = useTranslations('Dashboard');
@@ -51,17 +52,17 @@ export default function DashboardPage() {
   const [statusFilters, setStatusFilters] = useState<StatusFilter[]>([]);
   const [sort, setSort] = useState<SortOption>('created-desc');
   const [hydrated, setHydrated] = useState(false);
-
-  const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
-
-  const SORT_OPTIONS: { value: SortOption; label: string }[] = [
-    { value: 'created-desc', label: t('sort.createdDesc') },
-    { value: 'created-asc', label: t('sort.createdAsc') },
-    { value: 'amount-desc', label: t('sort.amountDesc') },
-    { value: 'amount-asc', label: t('sort.amountAsc') },
-    { value: 'due-asc', label: t('sort.dueAsc') },
-    { value: 'due-desc', label: t('sort.dueDesc') },
-  ];
+  const sortOptions = useMemo<{ value: SortOption; label: string }[]>(
+    () => [
+      { value: 'created-desc', label: t('sort.createdDesc') },
+      { value: 'created-asc', label: t('sort.createdAsc') },
+      { value: 'amount-desc', label: t('sort.amountDesc') },
+      { value: 'amount-asc', label: t('sort.amountAsc') },
+      { value: 'due-asc', label: t('sort.dueAsc') },
+      { value: 'due-desc', label: t('sort.dueDesc') },
+    ],
+    [t],
+  );
 
   /** Total number of on-chain invoices (not just the user's) */
   const [totalOnChainCount, setTotalOnChainCount] = useState(0);
@@ -72,8 +73,6 @@ export default function DashboardPage() {
 
   /** Ref used to preserve scroll position when loading more */
   const listRef = useRef<HTMLDivElement>(null);
-
-  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     setHydrated(true);
@@ -91,7 +90,7 @@ export default function DashboardPage() {
           .filter((value): value is StatusFilter => STATUS_TABS.includes(value as StatusFilter))
       : [];
     const initialSort = params.get('sort');
-    const initialSortValue = SORT_OPTIONS.some((opt) => opt.value === initialSort)
+    const initialSortValue = sortOptions.some((opt) => opt.value === initialSort)
       ? (initialSort as SortOption)
       : 'created-desc';
 
@@ -101,7 +100,7 @@ export default function DashboardPage() {
       setStatusFilters(initialStatuses);
       setSort(initialSortValue);
     });
-  }, [hydrated]);
+  }, [hydrated, sortOptions]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -173,7 +172,6 @@ export default function DashboardPage() {
   /** Initial load — fetches the first PAGE_SIZE invoices (from newest) */
   const loadInvoices = useCallback(async () => {
     setLoading(true);
-    setLoadError(null);
     try {
       const count = await getInvoiceCount();
       setTotalOnChainCount(count);
@@ -190,7 +188,6 @@ export default function DashboardPage() {
       setCommittedMap(committed);
       setScannedCount(count - Math.max(scannedUpTo, 0));
     } catch (e) {
-      setLoadError('Failed to load invoices. Make sure contracts are deployed.');
       toast.error('Failed to load invoices. Make sure contracts are deployed.');
       console.error(e);
     } finally {
@@ -453,7 +450,7 @@ export default function DashboardPage() {
                     onChange={(e) => setSort(e.target.value as SortOption)}
                     className="w-full sm:w-auto bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-gold cursor-pointer min-h-[36px]"
                   >
-                    {SORT_OPTIONS.map((opt) => (
+                    {sortOptions.map((opt) => (
                       <option key={opt.value} value={opt.value}>
                         {opt.label}
                       </option>

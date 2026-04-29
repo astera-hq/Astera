@@ -1,5 +1,12 @@
 import { NextResponse } from 'next/server';
-import { Keypair, TransactionBuilder, Networks, BASE_FEE, Operation } from '@stellar/stellar-sdk';
+import {
+  Account,
+  Keypair,
+  TransactionBuilder,
+  Networks,
+  BASE_FEE,
+  Operation,
+} from '@stellar/stellar-sdk';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +37,7 @@ export async function POST(request: Request) {
     const serverKey = Keypair.fromSecret(SERVER_SEED);
 
     // Build a challenge transaction per SEP-0010: server -> client ManageData
-    const serverAccount = { accountId: serverKey.publicKey(), sequence: '0' } as any;
+    const serverAccount = new Account(serverKey.publicKey(), '0');
 
     const tx = new TransactionBuilder(serverAccount, {
       fee: BASE_FEE,

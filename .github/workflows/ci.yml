@@ -147,6 +147,11 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
+      - name: Native binding diagnostics
+        run: |
+          node -e "const mods=['@next/swc-linux-x64-gnu','@parcel/watcher','lightningcss','sharp']; for (const m of mods){ try{ require(m); console.log('ok:',m);}catch(e){ console.log('fail:',m); console.error(e && e.stack ? e.stack : e); } }"
+          node -e "import('./next.config.mjs').then(()=>console.log('ok: next.config import')).catch((e)=>{console.log('fail: next.config import'); console.error(e && e.stack ? e.stack : e); process.exit(0);})"
+
       - name: Build frontend
         run: npm run build
 
