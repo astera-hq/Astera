@@ -124,10 +124,12 @@ jobs:
         run: |
           npm ci --include=optional
           # Fallback: ensure the Linux binding exists (sometimes optional deps are still skipped).
-          node -e "require('@parcel/watcher'); console.log('parcel watcher ok')" || ( \
-            npm i --no-save @parcel/watcher-linux-x64-glibc@2.5.6 && \
-            node -e \"require('@parcel/watcher'); console.log('parcel watcher ok after fallback')\" \
-          )
+          if node -e "require('@parcel/watcher'); console.log('parcel watcher ok')"; then
+            echo "parcel watcher ok"
+          else
+            npm i --no-save @parcel/watcher-linux-x64-glibc@2.5.6
+            node -e "require('@parcel/watcher'); console.log('parcel watcher ok after fallback')"
+          fi
 
       - name: Run ESLint
         run: npm run lint
