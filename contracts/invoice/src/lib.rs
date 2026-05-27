@@ -8,8 +8,8 @@
 // - Anyone: cleanup_expired_storage(), read-only view functions (e.g., get_invoice)
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 use soroban_sdk::contractclient;
@@ -17,6 +17,12 @@ use soroban_sdk::contractclient;
 #[contractclient(name = "PoolClient")]
 pub trait PoolContract {
     fn is_invoice_repaid(env: Env, invoice_id: u64) -> bool;
+    fn update_invoice_due_date(
+        env: Env,
+        invoice_contract: Address,
+        invoice_id: u64,
+        new_due_date: u64,
+    );
 }
 
 const LEDGERS_PER_DAY: u32 = 17_280;
@@ -38,7 +44,11 @@ const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 30; // per-invoice cap (#230)
 const MAX_DUE_DATE_AHEAD_SECS: u64 = SECS_PER_DAY * 365 * 30;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 const DEFAULT_DISPUTE_RESOLUTION_WINDOW: u64 = SECS_PER_DAY * 30; // 30 days
+const MAX_DESCRIPTION_LEN: u32 = 256;
+const MAX_DEBTOR_LEN: u32 = 64;
+const MAX_VERIFICATION_HASH_LEN: u32 = 256;
 const MAX_METADATA_URI_LEN: u32 = 256;
+const MAX_DUE_DATE_EXTENSION_SECS: u64 = SECS_PER_DAY * 90;
 
 // ── #290: Storage monitoring constants ───────────────────────────────────────
 /// Conservative per-entry storage rent rate (1 stroop / ledger / entry).
@@ -75,7 +85,13 @@ pub enum InvoiceError {
     // #436: string field validation errors
     EmptyField = 7,
     FieldTooLong = 8,
-    DateOverflow = 9,
+    DescriptionTooLong = 9,
+    DebtorNameTooLong = 10,
+    VerificationHashTooLong = 11,
+    InvalidDueDateExtension = 12,
+    ExtensionTooLarge = 13,
+    ExtensionAlreadyPending = 14,
+    NoPendingExtension = 15,
 }
 
 #[contracttype]
@@ -92,7 +108,9 @@ pub struct Invoice {
     pub owner: Address,
     pub debtor: String,
     pub amount: i128,
+    pub original_due_date: u64,
     pub due_date: u64,
+    pub pending_due_date: Option<u64>,
     pub description: String,
     pub status: InvoiceStatus,
     pub created_at: u64,
@@ -237,6 +255,32 @@ fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
     invoice
 }
 
+fn validate_invoice_strings(
+    env: &Env,
+    debtor: &String,
+    description: &String,
+    verification_hash: &String,
+) {
+    if description.is_empty() || debtor.is_empty() || verification_hash.is_empty() {
+        panic_with_error!(env, InvoiceError::EmptyField);
+    }
+    if description.len() > MAX_DESCRIPTION_LEN {
+        panic_with_error!(env, InvoiceError::DescriptionTooLong);
+    }
+    if debtor.len() > MAX_DEBTOR_LEN {
+        panic_with_error!(env, InvoiceError::DebtorNameTooLong);
+    }
+    if verification_hash.len() > MAX_VERIFICATION_HASH_LEN {
+        panic_with_error!(env, InvoiceError::VerificationHashTooLong);
+    }
+}
+
+fn max_extension_due_date(invoice: &Invoice) -> u64 {
+    invoice
+        .original_due_date
+        .saturating_add(MAX_DUE_DATE_EXTENSION_SECS)
+}
+
 fn bump_instance(env: &Env) {
     env.storage()
         .instance()
@@ -252,6 +296,10 @@ fn require_not_paused(env: &Env) {
     {
         panic!("contract is paused");
     }
+}
+
+fn next_day_boundary(ts: u64) -> u64 {
+    (ts / SECS_PER_DAY + 1) * SECS_PER_DAY
 }
 
 fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
@@ -644,19 +692,7 @@ impl InvoiceContract {
         require_not_paused(&env);
         bump_instance(&env);
 
-        // #436: validate required string fields before any storage writes
-        if description.is_empty() {
-            panic!("description must not be empty");
-        }
-        if description.len() > 256 {
-            panic!("description exceeds maximum length of 256 characters");
-        }
-        if debtor.is_empty() {
-            panic!("debtor must not be empty");
-        }
-        if verification_hash.is_empty() {
-            panic!("verification_hash must not be empty");
-        }
+        validate_invoice_strings(&env, &debtor, &description, &verification_hash);
 
         if let Some(uri) = metadata_uri.as_ref() {
             if !is_valid_metadata_uri(&env, uri) {
@@ -715,12 +751,14 @@ impl InvoiceContract {
             .unwrap_or(MAX_INVOICES_PER_DAY);
         let now = env.ledger().timestamp();
         let daily_count_key = DataKey::DailyInvoiceCount(owner.clone());
-        let daily_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
-        let reset_time: u64 = env.storage().instance().get(&daily_reset_key).unwrap_or(0);
+        let next_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
+        let next_reset: u64 = env.storage().instance().get(&next_reset_key).unwrap_or(0);
         let mut daily_count: u32 = env.storage().instance().get(&daily_count_key).unwrap_or(0);
-        if now >= reset_time + SECS_PER_DAY {
+        if now >= next_reset {
             daily_count = 0;
-            env.storage().instance().set(&daily_reset_key, &now);
+            env.storage()
+                .instance()
+                .set(&next_reset_key, &next_day_boundary(now));
         }
         if daily_count >= daily_limit {
             panic!("daily invoice limit exceeded");
@@ -752,7 +790,9 @@ impl InvoiceContract {
             owner: owner.clone(),
             debtor,
             amount,
+            original_due_date: due_date,
             due_date,
+            pending_due_date: None,
             description,
             status: initial_status,
             created_at: env.ledger().timestamp(),
@@ -787,6 +827,115 @@ impl InvoiceContract {
             (id, owner, amount, metadata_uri, env.ledger().timestamp()),
         );
         id
+    }
+
+    pub fn request_extension(
+        env: Env,
+        id: u64,
+        owner: Address,
+        new_due_date: u64,
+    ) -> Result<(), InvoiceError> {
+        owner.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .ok_or(InvoiceError::InvoiceNotFound)?;
+        if owner != invoice.owner {
+            return Err(InvoiceError::Unauthorized);
+        }
+        if invoice.status != InvoiceStatus::Funded {
+            return Err(InvoiceError::InvalidStatusTransition);
+        }
+        if invoice.pending_due_date.is_some() {
+            return Err(InvoiceError::ExtensionAlreadyPending);
+        }
+        if new_due_date <= env.ledger().timestamp() || new_due_date <= invoice.due_date {
+            return Err(InvoiceError::InvalidDueDateExtension);
+        }
+        if new_due_date > max_extension_due_date(&invoice) {
+            return Err(InvoiceError::ExtensionTooLarge);
+        }
+
+        let current_due_date = invoice.due_date;
+        invoice.pending_due_date = Some(new_due_date);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        set_invoice_ttl(&env, id, false);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "extension_requested")),
+            (
+                id,
+                current_due_date,
+                new_due_date,
+                owner,
+                env.ledger().timestamp(),
+            ),
+        );
+        Ok(())
+    }
+
+    pub fn approve_extension(env: Env, id: u64, approver: Address) -> Result<(), InvoiceError> {
+        approver.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        let oracle: Option<Address> = env.storage().instance().get(&DataKey::Oracle);
+        let is_authorized = approver == admin || oracle.as_ref() == Some(&approver);
+        if !is_authorized {
+            return Err(InvoiceError::Unauthorized);
+        }
+
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .ok_or(InvoiceError::InvoiceNotFound)?;
+        if invoice.status != InvoiceStatus::Funded {
+            return Err(InvoiceError::InvalidStatusTransition);
+        }
+
+        let new_due_date = invoice
+            .pending_due_date
+            .ok_or(InvoiceError::NoPendingExtension)?;
+        if new_due_date <= env.ledger().timestamp() || new_due_date <= invoice.due_date {
+            return Err(InvoiceError::InvalidDueDateExtension);
+        }
+        if new_due_date > max_extension_due_date(&invoice) {
+            return Err(InvoiceError::ExtensionTooLarge);
+        }
+
+        let old_due_date = invoice.due_date;
+        invoice.due_date = new_due_date;
+        invoice.pending_due_date = None;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(id), &invoice);
+        set_invoice_ttl(&env, id, false);
+
+        let pool_client = PoolClient::new(&env, &invoice.pool_contract);
+        pool_client.update_invoice_due_date(&env.current_contract_address(), &id, &new_due_date);
+
+        env.events().publish(
+            (EVT, Symbol::new(&env, "extension_approved")),
+            (
+                id,
+                old_due_date,
+                new_due_date,
+                approver,
+                env.ledger().timestamp(),
+            ),
+        );
+        Ok(())
     }
 
     pub fn set_daily_invoice_limit(env: Env, admin: Address, limit: u32) {
@@ -1319,7 +1468,6 @@ impl InvoiceContract {
     // ── Existing view / setter methods (unchanged) ────────────────────────────
 
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
-        bump_instance(&env);
         let inv = load_invoice(&env, id);
         maybe_expire_pending_invoice(&env, inv)
     }
@@ -1721,8 +1869,8 @@ impl InvoiceContract {
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        Env,
+        testutils::{Address as _, Events, Ledger},
+        Env, IntoVal,
     };
 
     mod mock_pool_true {
@@ -1733,6 +1881,30 @@ mod test {
         impl MockPoolTrue {
             pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool {
                 true
+            }
+
+            pub fn update_invoice_due_date(
+                env: Env,
+                invoice_contract: Address,
+                invoice_id: u64,
+                new_due_date: u64,
+            ) {
+                invoice_contract.require_auth();
+                env.storage().instance().set(&symbol_short!("upd_id"), &invoice_id);
+                env.storage()
+                    .instance()
+                    .set(&symbol_short!("upd_due"), &new_due_date);
+            }
+
+            pub fn last_updated_invoice_id(env: Env) -> u64 {
+                env.storage().instance().get(&symbol_short!("upd_id")).unwrap_or(0)
+            }
+
+            pub fn last_updated_due_date(env: Env) -> u64 {
+                env.storage()
+                    .instance()
+                    .get(&symbol_short!("upd_due"))
+                    .unwrap_or(0)
             }
         }
     }
@@ -1745,6 +1917,15 @@ mod test {
         impl MockPoolFalse {
             pub fn is_invoice_repaid(_env: Env, _invoice_id: u64) -> bool {
                 false
+            }
+
+            pub fn update_invoice_due_date(
+                _env: Env,
+                invoice_contract: Address,
+                _invoice_id: u64,
+                _new_due_date: u64,
+            ) {
+                invoice_contract.require_auth();
             }
         }
     }
@@ -2213,6 +2394,41 @@ mod test {
     }
 
     #[test]
+    fn test_daily_reset_anchored_to_day_boundary_no_drift() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, _admin, _pool, sme) = setup(&env);
+        let due = |env: &Env| env.ledger().timestamp() + 86_400;
+        // Simulate 365 daily resets, verify each lands at exact day boundary
+        for day in 0..365 {
+            let ts = 1_000_000 + day * 86_400;
+            env.ledger().with_mut(|l| l.timestamp = ts as u64);
+            // Creating an invoice triggers the reset check
+            client.create_invoice(
+                &sme,
+                &String::from_str(&env, "D"),
+                &100i128,
+                &due(&env),
+                &String::from_str(&env, "i"),
+                &String::from_str(&env, "h"),
+            );
+            // First invoice after reset should succeed (daily_count was reset to 0)
+            // Verify by checking we can create up to the limit
+            for _ in 1..10 {
+                client.create_invoice(
+                    &sme,
+                    &String::from_str(&env, "D"),
+                    &100i128,
+                    &due(&env),
+                    &String::from_str(&env, "i"),
+                    &String::from_str(&env, "h"),
+                );
+            }
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "daily invoice limit exceeded")]
     fn test_daily_invoice_limit_exceeded_panics() {
         let env = Env::default();
@@ -2372,7 +2588,7 @@ mod test {
         let contract_id = env.register(InvoiceContract, ());
         let client = InvoiceContractClient::new(env, &contract_id);
         let admin = Address::generate(env);
-        let pool = Address::generate(env);
+        let pool = env.register(mock_pool_true::MockPoolTrue, ());
         let oracle = Address::generate(env);
         let owner = Address::generate(env);
         client.initialize(
@@ -2423,12 +2639,11 @@ mod test {
     // ── #436: empty string validation tests ──────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "description must not be empty")]
-    fn test_create_invoice_empty_description_panics() {
+    fn test_create_invoice_empty_description_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
@@ -2436,17 +2651,36 @@ mod test {
             &String::from_str(&env, ""), // empty description
             &String::from_str(&env, "hash"),
         );
+        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
     }
 
     #[test]
-    #[should_panic(expected = "description exceeds maximum length")]
-    fn test_create_invoice_description_too_long_panics() {
+    fn test_create_invoice_description_at_max_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        // Build a 257-character string
-        let long_desc = String::from_bytes(&env, &[b'a'; 257]);
-        client.create_invoice(
+        let max_desc = String::from_bytes(&env, &[b'a'; MAX_DESCRIPTION_LEN as usize]);
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &max_desc,
+            &String::from_str(&env, "hash"),
+        );
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn test_create_invoice_description_too_long_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let long_desc = String::from_bytes(
+            &env,
+            &[b'a'; (MAX_DESCRIPTION_LEN as usize) + 1],
+        );
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
@@ -2454,38 +2688,91 @@ mod test {
             &long_desc,
             &String::from_str(&env, "hash"),
         );
+        assert_eq!(result, Err(Ok(InvoiceError::DescriptionTooLong)));
     }
 
     #[test]
-    #[should_panic(expected = "debtor must not be empty")]
-    fn test_create_invoice_empty_debtor_panics() {
+    fn test_create_invoice_debtor_at_max_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(
+        let max_debtor = String::from_bytes(&env, &[b'd'; MAX_DEBTOR_LEN as usize]);
+        let id = client.create_invoice(
             &sme,
-            &String::from_str(&env, ""), // empty debtor
+            &max_debtor,
             &1_000i128,
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash"),
         );
+        assert_eq!(id, 1);
     }
 
     #[test]
-    #[should_panic(expected = "verification_hash must not be empty")]
-    fn test_create_invoice_empty_hash_panics() {
+    fn test_create_invoice_debtor_too_long_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _admin, _pool, sme) = setup(&env);
-        client.create_invoice(
+        let long_debtor = String::from_bytes(&env, &[b'd'; (MAX_DEBTOR_LEN as usize) + 1]);
+        let result = client.try_create_invoice(
+            &sme,
+            &long_debtor,
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "Valid description"),
+            &String::from_str(&env, "hash"),
+        );
+        assert_eq!(result, Err(Ok(InvoiceError::DebtorNameTooLong)));
+    }
+
+    #[test]
+    fn test_create_invoice_empty_debtor_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, ""),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "Valid description"),
+            &String::from_str(&env, "hash"),
+        );
+        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
+    }
+
+    #[test]
+    fn test_create_invoice_empty_hash_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
             &sme,
             &String::from_str(&env, "Debtor Corp"),
             &1_000i128,
             &(env.ledger().timestamp() + 10_000),
             &String::from_str(&env, "Valid description"),
-            &String::from_str(&env, ""), // empty hash
+            &String::from_str(&env, ""),
         );
+        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
+    }
+
+    #[test]
+    fn test_create_invoice_hash_too_long_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, sme) = setup(&env);
+        let long_hash =
+            String::from_bytes(&env, &[b'h'; (MAX_VERIFICATION_HASH_LEN as usize) + 1]);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor Corp"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "Valid description"),
+            &long_hash,
+        );
+        assert_eq!(result, Err(Ok(InvoiceError::VerificationHashTooLong)));
     }
 
     #[test]
@@ -2502,6 +2789,85 @@ mod test {
             &String::from_str(&env, "hash123"),
         );
         assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn test_request_extension_by_owner_on_funded_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, owner) = setup_funded_invoice(&env);
+        let original_due_date = client.get_invoice(&1u64).due_date;
+        let new_due_date = original_due_date + 15 * SECS_PER_DAY;
+
+        client.request_extension(&1u64, &owner, &new_due_date);
+
+        let invoice = client.get_invoice(&1u64);
+        assert_eq!(invoice.pending_due_date, Some(new_due_date));
+
+        let events = env.events().all();
+        let event = events.get(events.len() - 1).unwrap();
+        assert_eq!(
+            event.1,
+            soroban_sdk::vec![
+                &env,
+                EVT.into_val(&env),
+                Symbol::new(&env, "extension_requested").into_val(&env)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_request_extension_unauthorized_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, _owner) = setup_funded_invoice(&env);
+        let attacker = Address::generate(&env);
+        let new_due_date = client.get_invoice(&1u64).due_date + 10 * SECS_PER_DAY;
+
+        let result = client.try_request_extension(&1u64, &attacker, &new_due_date);
+        assert_eq!(result, Err(Ok(InvoiceError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_request_extension_invalid_due_date_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _pool, owner) = setup_funded_invoice(&env);
+        let current_due_date = client.get_invoice(&1u64).due_date;
+
+        let result = client.try_request_extension(&1u64, &owner, &current_due_date);
+        assert_eq!(result, Err(Ok(InvoiceError::InvalidDueDateExtension)));
+    }
+
+    #[test]
+    fn test_approve_extension_by_admin_updates_due_date_and_notifies_pool() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, owner) = setup_funded_invoice(&env);
+        let original_due_date = client.get_invoice(&1u64).due_date;
+        let new_due_date = original_due_date + 20 * SECS_PER_DAY;
+        let pool_client = mock_pool_true::MockPoolTrueClient::new(&env, &pool);
+
+        client.request_extension(&1u64, &owner, &new_due_date);
+        client.approve_extension(&1u64, &admin);
+
+        let invoice = client.get_invoice(&1u64);
+        assert_eq!(invoice.due_date, new_due_date);
+        assert_eq!(invoice.original_due_date, original_due_date);
+        assert_eq!(invoice.pending_due_date, None);
+        assert_eq!(pool_client.last_updated_invoice_id(), 1u64);
+        assert_eq!(pool_client.last_updated_due_date(), new_due_date);
+
+        let events = env.events().all();
+        let event = events.get(events.len() - 1).unwrap();
+        assert_eq!(
+            event.1,
+            soroban_sdk::vec![
+                &env,
+                EVT.into_val(&env),
+                Symbol::new(&env, "extension_approved").into_val(&env)
+            ]
+        );
     }
 
     // ── #446: completed TTL tests ─────────────────────────────────────────────

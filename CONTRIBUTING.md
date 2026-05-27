@@ -498,7 +498,10 @@ E2E tests are located in `frontend/e2e/`. They verify critical user flows such a
 
 E2E tests require a running Stellar testnet RPC (usually `localhost:8000` in development). See [Rapid Local Development](#rapid-local-development-docker-compose) to set up the local Stellar network.
 
----
+All new components and utilities should have test coverage. Check that:
+- Tests exercise the happy path and error cases
+- Component props are validated
+- Hooks are tested with `renderHook`
 
 ### Running the Complete Test Suite Locally
 

@@ -303,7 +303,7 @@ Astera's smart contract system is composed of four interdependent contracts, eac
 
 **Key State Variables**:
 - `CreditScore(Address)` → Credit score data for each SME
-- `PaymentHistory(Address)` → Count of payment records
+- `PaymentHistory(Address)` → Count of retained records in the rolling payment history window
 - `PaymentRecordIdx(Address, u32)` → Individual payment records with index
 - `InvoiceProcessed(u64)` → Flag tracking which invoices have been processed
 - `Admin` → Admin address

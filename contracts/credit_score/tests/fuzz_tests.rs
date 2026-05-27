@@ -120,7 +120,37 @@ proptest! {
 
             // Invariant 4: History integrity
             let history = client.get_payment_history(&sme);
-            prop_assert_eq!(history.len(), total_invoices);
+            let expected_len = total_invoices.min(credit_score::MAX_PAYMENT_HISTORY);
+            prop_assert_eq!(history.len(), expected_len);
         }
+    }
+
+    /// Fuzz test: High-frequency payment recording keeps the history bounded.
+    #[test]
+    fn fuzz_payment_history_window(count in 100u32..200u32) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        for invoice_id in 1..=count as u64 {
+            client.record_payment(
+                &pool,
+                &invoice_id,
+                &sme,
+                &1_000_000_000i128,
+                &due_date,
+                &(due_date - 1000),
+            );
+        }
+
+        prop_assert_eq!(client.get_payment_history_length(&sme), credit_score::MAX_PAYMENT_HISTORY);
+        let history = client.get_payment_history(&sme);
+        prop_assert_eq!(history.len(), credit_score::MAX_PAYMENT_HISTORY);
+        prop_assert_eq!(history.get(0).unwrap().invoice_id, (count as u64) - 99);
+        prop_assert_eq!(history.get(99).unwrap().invoice_id, count as u64);
     }
 }
