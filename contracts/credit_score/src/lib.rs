@@ -1475,6 +1475,46 @@ mod test {
         assert_eq!(data.total_invoices, 1);
     }
 
+    // ---- Issue #405: calculate_average_payment_days divide-by-zero guard ----
+
+    #[test]
+    fn test_average_payment_days_empty_history_returns_zero() {
+        // New borrower with no payment records must return 0, not panic.
+        let result = calculate_average_payment_days(0, 0, 0);
+        assert_eq!(result, 0, "empty history must return 0");
+    }
+
+    #[test]
+    fn test_average_payment_days_single_on_time_payment() {
+        // One on-time payment with 0 late days → average is 0.
+        let result = calculate_average_payment_days(1, 0, 0);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_average_payment_days_single_late_payment() {
+        // One late payment with 5 days late → average is 5.
+        let result = calculate_average_payment_days(0, 1, 5);
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn test_average_payment_days_new_borrower_no_panic() {
+        // Fuzz: zero-length and one-element inputs must never panic.
+        for paid_on_time in 0u32..=1 {
+            for paid_late in 0u32..=1 {
+                let total_late: i64 = (paid_late as i64) * 3;
+                let result = calculate_average_payment_days(paid_on_time, paid_late, total_late);
+                let total_paid = paid_on_time + paid_late;
+                if total_paid == 0 {
+                    assert_eq!(result, 0, "zero-length must return 0");
+                } else {
+                    assert_eq!(result, total_late / total_paid as i64);
+                }
+            }
+        }
+    }
+
     // ---- Issue #61: Edge-Case Tests ----
 
     #[test]
