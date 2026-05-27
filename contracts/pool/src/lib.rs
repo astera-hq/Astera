@@ -112,6 +112,10 @@ pub enum PoolError {
     YieldChangeNotReady = 32,
     // #367: unsupported token decimal precision
     UnsupportedTokenDecimals = 36,
+    // #413: invalid collateral configuration
+    InvalidThreshold = 37,
+    // Pre-existing: fee-on-transfer token mismatch
+    TransferMismatch = 38,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -569,7 +573,7 @@ fn resolve_factoring_fee(
     let normalized_principal = normalize_to_stroops(principal, token_config.decimals);
     let normalized_fee = calculate_factoring_fee(normalized_principal, fee_bps)?;
     // Denormalize fee back to token units
-    let fee = denormalize_from_stroops(normalized_fee?, token_config.decimals);
+    let fee = denormalize_from_stroops(normalized_fee, token_config.decimals);
     Ok(fee)
 }
 
@@ -1115,10 +1119,6 @@ impl FundingPool {
         env.storage()
             .persistent()
             .set(&investor_pos_key, &investor_position);
-
-        // Transfer tokens LAST - interaction
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&investor, &env.current_contract_address(), &amount);
 
         Self::non_reentrant_end(&env);
 
@@ -1920,10 +1920,10 @@ impl FundingPool {
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
         if threshold < 0 {
-            return Err(PoolError::InvalidAmount);
+            return Err(PoolError::InvalidThreshold);
         }
-        if collateral_bps > BPS_DENOM {
-            return Err(PoolError::InvalidAmount);
+        if collateral_bps == 0 || collateral_bps > BPS_DENOM {
+            return Err(PoolError::InvalidThreshold);
         }
         let cfg = CollateralConfig {
             threshold,
@@ -3773,7 +3773,7 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let result = client.try_set_collateral_config(&admin, &1_000i128, &10_001u32);
-        assert_eq!(result, Err(Ok(PoolError::InvalidAmount)));
+        assert_eq!(result, Err(Ok(PoolError::InvalidThreshold)));
     }
 
     #[test]

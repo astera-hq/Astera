@@ -254,6 +254,10 @@ fn require_not_paused(env: &Env) {
     }
 }
 
+fn next_day_boundary(ts: u64) -> u64 {
+    (ts / SECS_PER_DAY + 1) * SECS_PER_DAY
+}
+
 fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
     if uri.is_empty() || uri.len() > MAX_METADATA_URI_LEN {
         return false;
@@ -715,12 +719,12 @@ impl InvoiceContract {
             .unwrap_or(MAX_INVOICES_PER_DAY);
         let now = env.ledger().timestamp();
         let daily_count_key = DataKey::DailyInvoiceCount(owner.clone());
-        let daily_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
-        let reset_time: u64 = env.storage().instance().get(&daily_reset_key).unwrap_or(0);
+        let next_reset_key = DataKey::DailyInvoiceResetTime(owner.clone());
+        let next_reset: u64 = env.storage().instance().get(&next_reset_key).unwrap_or(0);
         let mut daily_count: u32 = env.storage().instance().get(&daily_count_key).unwrap_or(0);
-        if now >= reset_time + SECS_PER_DAY {
+        if now >= next_reset {
             daily_count = 0;
-            env.storage().instance().set(&daily_reset_key, &now);
+            env.storage().instance().set(&next_reset_key, &next_day_boundary(now));
         }
         if daily_count >= daily_limit {
             panic!("daily invoice limit exceeded");
@@ -1319,7 +1323,6 @@ impl InvoiceContract {
     // ── Existing view / setter methods (unchanged) ────────────────────────────
 
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
-        bump_instance(&env);
         let inv = load_invoice(&env, id);
         maybe_expire_pending_invoice(&env, inv)
     }
