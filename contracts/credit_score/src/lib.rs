@@ -126,7 +126,7 @@ fn get_late_threshold(env: &Env) -> i64 {
 }
 
 fn calculate_score(
-    env: &Env,
+    late_threshold: i64,
     total_invoices: u32,
     paid_on_time: u32,
     paid_late: u32,
@@ -153,8 +153,6 @@ fn calculate_score(
     if total_invoices >= 20 {
         score += PTS_NEW_INVOICE as i64;
     }
-
-    let late_threshold = get_late_threshold(env);
 
     if average_payment_days < 0 {
         score += 20;
@@ -337,7 +335,7 @@ impl CreditScoreContract {
             credit_data.average_payment_days * prev_paid + days_late,
         );
         credit_data.score = calculate_score(
-            &env,
+            get_late_threshold(&env),
             credit_data.total_invoices,
             credit_data.paid_on_time,
             credit_data.paid_late,
@@ -432,7 +430,7 @@ impl CreditScoreContract {
         credit_data.total_volume += amount;
         // Defaults do not affect average_payment_days — only paid invoices contribute.
         credit_data.score = calculate_score(
-            &env,
+            get_late_threshold(&env),
             credit_data.total_invoices,
             credit_data.paid_on_time,
             credit_data.paid_late,
@@ -927,7 +925,7 @@ mod test {
     fn test_prop_score_bounds_invariant() {
         // For any combination of inputs, score must always be in [MIN_SCORE, MAX_SCORE].
         // Uses a simple LCG to generate 100 varied input combinations.
-        let env = Env::default();
+        let _env = Env::default();
         let mut seed: u64 = 0xDEAD_BEEF_1234_5678;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -946,7 +944,7 @@ mod test {
             let avg_days = (lcg(&mut seed) % 60) as i64 - 10; // -10 to +49
 
             let score = calculate_score(
-                &env,
+                30,
                 total_invoices,
                 paid_on_time,
                 paid_late,
@@ -968,7 +966,7 @@ mod test {
     fn test_prop_scoring_formula_monotonicity() {
         // For any fixed base, adding an on-time payment scores >= adding a late payment
         // which scores >= adding a default.
-        let env = Env::default();
+        let _env = Env::default();
         let mut seed: u64 = 0xCAFE_BABE_0000_0001;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -987,7 +985,7 @@ mod test {
             let avg = (lcg(&mut seed) % 20) as i64;
 
             let score_on_time = calculate_score(
-                &env,
+                30,
                 base_invoices + 1,
                 base_on_time + 1,
                 base_late,
@@ -996,7 +994,7 @@ mod test {
                 avg,
             );
             let score_late = calculate_score(
-                &env,
+                30,
                 base_invoices + 1,
                 base_on_time,
                 base_late + 1,
@@ -1005,7 +1003,7 @@ mod test {
                 avg,
             );
             let score_default = calculate_score(
-                &env,
+                30,
                 base_invoices + 1,
                 base_on_time,
                 base_late,
@@ -1034,7 +1032,7 @@ mod test {
     #[test]
     fn test_prop_defaults_dominate() {
         // When defaulted > paid_on_time and paid_late == 0, score must be < BASE_SCORE.
-        let env = Env::default();
+        let _env = Env::default();
         let mut seed: u64 = 0xF00D_CAFE_ABCD_EF01;
         let lcg = |s: &mut u64| -> u64 {
             *s = s
@@ -1050,7 +1048,7 @@ mod test {
             let vol = (lcg(&mut seed) % 5_000_000_000) as i128;
             let avg = (lcg(&mut seed) % 15) as i64;
 
-            let score = calculate_score(&env, total, on_time, 0, defaulted, vol, avg);
+            let score = calculate_score(30, total, on_time, 0, defaulted, vol, avg);
             assert!(
                 score < BASE_SCORE,
                 "score {} >= BASE_SCORE {} when defaulted({}) > on_time({}) with no late payments",
@@ -1737,15 +1735,16 @@ mod test {
         let sme1 = Address::generate(&env);
         let sme2 = Address::generate(&env);
 
-        // sme1: threshold=1 (5 days late > 1 → penalty)
+        // sme1: threshold=1 (8 days late > 1 → penalty)
         client.set_late_threshold(&admin, &1);
-        // pay 5 days late
         let due = 200_000u64;
-        let paid_late = due + 5 * 86_400;
+        // Exactly 7 days late → still PaidLate (≤7 day threshold), but days_late=8
+        // so avg_days=8 which is >7 and enters the late_threshold penalty branch
+        let paid_late = due + 7 * 86_400;
         client.record_payment(&pool, &1, &sme1, &1_000_000_000i128, &due, &paid_late);
         let score_strict = client.get_credit_score(&sme1).score;
 
-        // sme2: threshold=60 (5 days late ≤ 60 → no penalty)
+        // sme2: threshold=60 (8 days late ≤ 60 → no penalty)
         client.set_late_threshold(&admin, &60);
         client.record_payment(&pool, &2, &sme2, &1_000_000_000i128, &due, &paid_late);
         let score_lenient = client.get_credit_score(&sme2).score;

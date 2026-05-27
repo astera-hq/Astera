@@ -72,6 +72,7 @@
     ]
   },
   "overrides": {
-    "serialize-javascript": "7.0.5"
+    "serialize-javascript": "7.0.5",
+    "rollup": "4.60.4"
   }
 }

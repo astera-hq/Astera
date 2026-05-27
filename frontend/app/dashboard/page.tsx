@@ -43,7 +43,7 @@ const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaul
 export default function DashboardPage() {
   const { wallet } = useStore();
   return (
-    <ErrorBoundary walletAddress={wallet?.address}>
+    <ErrorBoundary walletAddress={wallet?.address ?? undefined}>
       <DashboardContent />
     </ErrorBoundary>
   );
@@ -628,7 +628,9 @@ function DashboardContent() {
                   defaulted={stats.defaulted}
                   totalVolume={stats.totalVolume}
                   paymentHistory={invoices
-                    .filter((row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted')
+                    .filter(
+                      (row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted',
+                    )
                     .map((row) => {
                       const paidDate = row.invoice.paidAt > 0 ? row.invoice.paidAt : null;
                       return {
@@ -637,7 +639,9 @@ function DashboardContent() {
                         dueDate: row.metadata.dueDate,
                         paidDate,
                         status: paidDate
-                          ? (paidDate > row.metadata.dueDate ? 'Late' : 'OnTime')
+                          ? paidDate > row.metadata.dueDate
+                            ? 'Late'
+                            : 'OnTime'
                           : row.invoice.status === 'Defaulted'
                             ? 'Defaulted'
                             : 'OnTime',
