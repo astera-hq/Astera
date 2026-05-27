@@ -361,7 +361,7 @@ jobs:
       
       - name: Post Failure Comment
         if: failure()
-        uses: peter-evans/commit-comment@v3
+        uses: peter-evans/commit-comment@v4
         with:
           body: "⚠️ Testnet deployment smoke tests failed"
       
