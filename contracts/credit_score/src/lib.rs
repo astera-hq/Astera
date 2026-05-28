@@ -34,6 +34,10 @@ pub enum CreditScoreError {
     UpgradeTimelockNotExpired = 8,
     /// No upgrade has been proposed.
     NoUpgradeProposed = 9,
+    /// #338: upgrade timelock value is below the allowed minimum.
+    InvalidUpgradeTimelock = 10,
+    /// #340: proposed WASM hash is all-zero (invalid).
+    InvalidWasmHash = 11,
 }
 
 /// Semantic version of this credit-score contract (#237).
@@ -85,7 +89,8 @@ const VOLUME_BONUS_POINTS_2: i32 = 15;
 const VOLUME_BONUS_POINTS_3: i32 = 25;
 
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
-const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
+const MIN_UPGRADE_TIMELOCK_SECS: u64 = 3_600; // 1 hour minimum (#338)
 /// Current on-chain storage schema version (#397). Bump by one and add a
 /// matching arm in `run_migration` whenever the persistent storage layout
 /// changes so a deployed contract can migrate state after a WASM upgrade.
@@ -257,6 +262,8 @@ pub enum DataKey {
     LateThreshold,
     /// #428: Configurable score thresholds (Excellent, Very Good, Good, Fair)
     ScoreThresholds,
+    /// #338: configurable upgrade timelock duration in seconds
+    UpgradeTimelockSecs,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -1061,18 +1068,57 @@ impl CreditScoreContract {
         }
     }
 
+    /// Set the upgrade timelock duration in seconds (#338).
+    /// Minimum: 3,600 s (1 h). Default: 86,400 s (24 h).
+    pub fn set_upgrade_timelock(env: Env, admin: Address, secs: u64) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        if secs < MIN_UPGRADE_TIMELOCK_SECS {
+            panic_with_error!(&env, CreditScoreError::InvalidUpgradeTimelock);
+        }
+        let old_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeTimelockSecs)
+            .unwrap_or(UPGRADE_TIMELOCK_SECS);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeTimelockSecs, &secs);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "timelock_updated")),
+            (admin, old_secs, secs),
+        );
+    }
+
+    /// Returns the configured upgrade timelock in seconds (#338).
+    pub fn get_upgrade_timelock(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::UpgradeTimelockSecs)
+            .unwrap_or(UPGRADE_TIMELOCK_SECS)
+    }
+
     pub fn propose_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        // #340: reject all-zero hash
+        if wasm_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            panic_with_error!(&env, CreditScoreError::InvalidWasmHash);
+        }
         env.storage()
             .instance()
             .set(&DataKey::ProposedWasmHash, &wasm_hash);
         env.storage()
             .instance()
             .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
+        let timelock: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeTimelockSecs)
+            .unwrap_or(UPGRADE_TIMELOCK_SECS);
         env.events().publish(
             (EVT, symbol_short!("upg_prop")),
-            (admin, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+            (admin, env.ledger().timestamp() + timelock),
         );
     }
 
@@ -1084,8 +1130,13 @@ impl CreditScoreContract {
             .instance()
             .get(&DataKey::UpgradeScheduledAt)
             .expect("no upgrade proposed");
+        let timelock: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeTimelockSecs)
+            .unwrap_or(UPGRADE_TIMELOCK_SECS);
         let now = env.ledger().timestamp();
-        if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
+        if now < scheduled_at + timelock {
             panic_with_error!(&env, CreditScoreError::UpgradeTimelockNotExpired);
         }
         let wasm_hash: BytesN<32> = env
@@ -2476,5 +2527,70 @@ mod test {
             found,
             "data_inconsistency event not found in emitted events"
         );
+    }
+
+    // ── #338: configurable upgrade timelock tests ─────────────────────────────
+
+    #[test]
+    fn test_credit_score_upgrade_timelock_default_is_24h() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _invoice, _pool) = setup(&env);
+        assert_eq!(client.get_upgrade_timelock(), UPGRADE_TIMELOCK_SECS);
+    }
+
+    #[test]
+    fn test_credit_score_set_upgrade_timelock_configures_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        client.set_upgrade_timelock(&admin, &7_200u64);
+        assert_eq!(client.get_upgrade_timelock(), 7_200u64);
+    }
+
+    #[test]
+    fn test_credit_score_set_upgrade_timelock_below_minimum_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let result = client.try_set_upgrade_timelock(&admin, &(MIN_UPGRADE_TIMELOCK_SECS - 1));
+        assert_eq!(result, Err(Ok(CreditScoreError::InvalidUpgradeTimelock)));
+    }
+
+    #[test]
+    fn test_credit_score_execute_upgrade_before_timelock_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _invoice, _pool) = setup(&env);
+        client.set_upgrade_timelock(&admin, &7_200u64);
+
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.propose_upgrade(&admin, &hash);
+
+        env.ledger().with_mut(|l| l.timestamp += 3_600);
+        let result = client.try_execute_upgrade(&admin);
+        assert_eq!(result, Err(Ok(CreditScoreError::UpgradeTimelockNotExpired)));
+    }
+
+    // ── #340: WASM hash validation tests ─────────────────────────────────────
+
+    #[test]
+    fn test_credit_score_propose_upgrade_zero_hash_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let result = client.try_propose_upgrade(&admin, &zero_hash);
+        assert_eq!(result, Err(Ok(CreditScoreError::InvalidWasmHash)));
+    }
+
+    #[test]
+    fn test_credit_score_propose_upgrade_nonzero_hash_accepted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let valid_hash = BytesN::from_array(&env, &[7u8; 32]);
+        client.propose_upgrade(&admin, &valid_hash);
     }
 }

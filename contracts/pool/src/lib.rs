@@ -131,6 +131,14 @@ pub enum PoolError {
     DuplicateInvoiceId = 45,
     InvalidCollateralThreshold = 46,
     InvalidCollateralBps = 47,
+    // #337: tri-state KYC errors
+    KycNotRequested = 48,
+    KycRejected = 49,
+    // #338: upgrade timelock errors
+    UpgradeTimelockNotExpired = 50,
+    InvalidUpgradeTimelock = 51,
+    // #340: invalid WASM hash (e.g. all-zero)
+    InvalidWasmHash = 52,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -173,7 +181,8 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const SETTLEMENT_COLLATERAL_TTL: u32 = LEDGERS_PER_DAY * 90;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
-const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
+const MIN_UPGRADE_TIMELOCK_SECS: u64 = 3_600; // 1 hour minimum (#338)
 /// Current on-chain storage schema version (#397). Bump by one and add a
 /// matching arm in `run_migration` whenever the persistent storage layout
 /// changes so a deployed contract can migrate state after a WASM upgrade.
@@ -335,6 +344,18 @@ pub struct CollateralConfig {
     pub collateral_bps: u32,
 }
 
+/// #337: Tri-state KYC status — distinguishes "never set" from "explicitly approved/rejected".
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum KycStatus {
+    /// Investor has not started the KYC process.
+    NotRequested,
+    /// Investor KYC was explicitly approved.
+    Approved,
+    /// Investor KYC was explicitly denied.
+    Rejected,
+}
+
 /// Record of collateral deposited for a specific invoice.
 #[contracttype]
 #[derive(Clone)]
@@ -403,6 +424,8 @@ pub enum DataKey {
     WithdrawalQueue(Address),
     /// Withdrawal request data (#217)
     WithdrawalRequest(Address, u64), // (investor, request_id)
+    /// #338: configurable upgrade timelock duration in seconds
+    UpgradeTimelockSecs,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -1180,20 +1203,22 @@ impl FundingPool {
             return Err(PoolError::DepositBelowMinimum);
         }
 
-        // #109: enforce KYC check when required
+        // #109 / #337: enforce KYC check when required — tri-state status
         let kyc_required: bool = env
             .storage()
             .instance()
             .get(&DataKey::KycRequired)
             .unwrap_or(false);
         if kyc_required {
-            let approved: bool = env
+            let status: KycStatus = env
                 .storage()
                 .persistent()
                 .get(&DataKey::InvestorKyc(investor.clone()))
-                .unwrap_or(false);
-            if !approved {
-                return Err(PoolError::KycNotApproved);
+                .unwrap_or(KycStatus::NotRequested);
+            match status {
+                KycStatus::Approved => {}
+                KycStatus::NotRequested => return Err(PoolError::KycNotRequested),
+                KycStatus::Rejected => return Err(PoolError::KycRejected),
             }
         }
 
@@ -2898,20 +2923,22 @@ impl FundingPool {
                 return Err(PoolError::AlreadyFullyRepaid);
             }
 
-            // KYC check on recipient if pool requires it
+            // KYC check on recipient if pool requires it (#337: tri-state)
             let kyc_required: bool = env
                 .storage()
                 .instance()
                 .get(&DataKey::KycRequired)
                 .unwrap_or(false);
             if kyc_required {
-                let approved: bool = env
+                let status: KycStatus = env
                     .storage()
                     .persistent()
                     .get(&DataKey::InvestorKyc(to.clone()))
-                    .unwrap_or(false);
-                if !approved {
-                    return Err(PoolError::KycNotApproved);
+                    .unwrap_or(KycStatus::NotRequested);
+                match status {
+                    KycStatus::Approved => {}
+                    KycStatus::NotRequested => return Err(PoolError::KycNotRequested),
+                    KycStatus::Rejected => return Err(PoolError::KycRejected),
                 }
             }
 
@@ -3278,7 +3305,10 @@ impl FundingPool {
             .unwrap_or(false)
     }
 
-    /// Approve or revoke a specific investor's KYC status.
+    /// Approve or revoke a specific investor's KYC status (legacy bool API).
+    ///
+    /// `true` maps to `KycStatus::Approved`; `false` maps to `KycStatus::Rejected`.
+    /// Prefer `approve_investor_kyc` / `reject_investor_kyc` for new code (#337).
     ///
     /// ## Issue #345 Fix: Validate Against Invalid Addresses
     /// Rejects attempts to approve:
@@ -3304,21 +3334,127 @@ impl FundingPool {
             return Err(PoolError::Unauthorized);
         }
 
+        let status = if approved {
+            KycStatus::Approved
+        } else {
+            KycStatus::Rejected
+        };
         env.storage()
             .persistent()
-            .set(&DataKey::InvestorKyc(investor.clone()), &approved);
+            .set(&DataKey::InvestorKyc(investor.clone()), &status);
         env.events()
             .publish((EVT, symbol_short!("kyc_set")), (admin, investor, approved));
         Ok(())
     }
 
-    /// Returns whether `investor` has been KYC-approved.
-    pub fn get_investor_kyc(env: Env, investor: Address) -> bool {
+    /// Explicitly approve an investor's KYC (#337).
+    pub fn approve_investor_kyc(
+        env: Env,
+        admin: Address,
+        investor: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+
+        let config = get_config_cached(&env)?;
+        if investor == config.admin
+            || investor == env.current_contract_address()
+            || investor == config.invoice_contract
+        {
+            return Err(PoolError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvestorKyc(investor.clone()), &KycStatus::Approved);
+        env.events()
+            .publish((EVT, symbol_short!("kyc_appr")), (admin, investor));
+        Ok(())
+    }
+
+    /// Explicitly reject an investor's KYC (#337).
+    pub fn reject_investor_kyc(
+        env: Env,
+        admin: Address,
+        investor: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+
+        let config = get_config_cached(&env)?;
+        if investor == config.admin
+            || investor == env.current_contract_address()
+            || investor == config.invoice_contract
+        {
+            return Err(PoolError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvestorKyc(investor.clone()), &KycStatus::Rejected);
+        env.events()
+            .publish((EVT, symbol_short!("kyc_rej")), (admin, investor));
+        Ok(())
+    }
+
+    /// Returns the tri-state KYC status for `investor` (#337).
+    pub fn get_investor_kyc_status(env: Env, investor: Address) -> KycStatus {
         bump_instance(&env);
         env.storage()
             .persistent()
             .get(&DataKey::InvestorKyc(investor))
-            .unwrap_or(false)
+            .unwrap_or(KycStatus::NotRequested)
+    }
+
+    /// Returns whether `investor` has been KYC-approved (legacy bool API).
+    pub fn get_investor_kyc(env: Env, investor: Address) -> bool {
+        bump_instance(&env);
+        matches!(
+            env.storage()
+                .persistent()
+                .get::<DataKey, KycStatus>(&DataKey::InvestorKyc(investor))
+                .unwrap_or(KycStatus::NotRequested),
+            KycStatus::Approved
+        )
+    }
+
+    /// Set the upgrade timelock duration in seconds (#338).
+    /// Minimum: 3,600 s (1 h). Default: 86,400 s (24 h).
+    pub fn set_upgrade_timelock(
+        env: Env,
+        admin: Address,
+        secs: u64,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if secs < MIN_UPGRADE_TIMELOCK_SECS {
+            return Err(PoolError::InvalidUpgradeTimelock);
+        }
+        let old_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeTimelockSecs)
+            .unwrap_or(UPGRADE_TIMELOCK_SECS);
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeTimelockSecs, &secs);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "timelock_updated")),
+            (admin, old_secs, secs),
+        );
+        Ok(())
+    }
+
+    /// Returns the configured upgrade timelock in seconds (#338).
+    pub fn get_upgrade_timelock(env: Env) -> u64 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::UpgradeTimelockSecs)
+            .unwrap_or(UPGRADE_TIMELOCK_SECS)
     }
 
     pub fn propose_upgrade(
@@ -3329,15 +3465,24 @@ impl FundingPool {
         admin.require_auth();
         bump_instance(&env);
         Self::require_admin(&env, &admin)?;
+        // #340: reject all-zero hash
+        if wasm_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(PoolError::InvalidWasmHash);
+        }
         env.storage()
             .instance()
             .set(&DataKey::ProposedWasmHash, &wasm_hash);
         env.storage()
             .instance()
             .set(&DataKey::UpgradeScheduledAt, &env.ledger().timestamp());
+        let timelock: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeTimelockSecs)
+            .unwrap_or(UPGRADE_TIMELOCK_SECS);
         env.events().publish(
             (EVT, symbol_short!("upg_prop")),
-            (admin, env.ledger().timestamp() + UPGRADE_TIMELOCK_SECS),
+            (admin, env.ledger().timestamp() + timelock),
         );
         Ok(())
     }
@@ -3351,9 +3496,14 @@ impl FundingPool {
             .instance()
             .get(&DataKey::UpgradeScheduledAt)
             .ok_or(PoolError::NotInitialized)?;
+        let timelock: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeTimelockSecs)
+            .unwrap_or(UPGRADE_TIMELOCK_SECS);
         let now = env.ledger().timestamp();
-        if now < scheduled_at + UPGRADE_TIMELOCK_SECS {
-            return Err(PoolError::InvalidAmount);
+        if now < scheduled_at + timelock {
+            return Err(PoolError::UpgradeTimelockNotExpired);
         }
         let wasm_hash: BytesN<32> = env
             .storage()
@@ -5310,8 +5460,9 @@ mod test {
 
         client.set_kyc_required(&admin, &true);
         mint(&env, &usdc_id, &investor, 1_000);
+        // Investor never started KYC → KycNotRequested (#337)
         let result = client.try_deposit(&investor, &usdc_id, &1_000);
-        assert_eq!(result, Err(Ok(PoolError::KycNotApproved)));
+        assert_eq!(result, Err(Ok(PoolError::KycNotRequested)));
     }
 
     #[test]
@@ -5342,10 +5493,10 @@ mod test {
         mint(&env, &usdc_id, &investor, 2_000);
         client.deposit(&investor, &usdc_id, &1_000);
 
-        // Revoke KYC — subsequent deposit must be blocked
+        // Revoke KYC — subsequent deposit must be blocked with KycRejected (#337)
         client.set_investor_kyc(&admin, &investor, &false);
         let result = client.try_deposit(&investor, &usdc_id, &1_000);
-        assert_eq!(result, Err(Ok(PoolError::KycNotApproved)));
+        assert_eq!(result, Err(Ok(PoolError::KycRejected)));
     }
 
     #[test]
@@ -5373,15 +5524,16 @@ mod test {
 
         mint(&env, &usdc_id, &investor, 3_000);
         client.set_kyc_required(&admin, &true);
+        // Investor never set KYC → KycNotRequested (#337)
         let blocked = client.try_deposit(&investor, &usdc_id, &1_000);
-        assert_eq!(blocked, Err(Ok(PoolError::KycNotApproved)));
+        assert_eq!(blocked, Err(Ok(PoolError::KycNotRequested)));
 
         client.set_kyc_required(&admin, &false);
         client.deposit(&investor, &usdc_id, &1_000);
 
         client.set_kyc_required(&admin, &true);
         let blocked_again = client.try_deposit(&investor, &usdc_id, &1_000);
-        assert_eq!(blocked_again, Err(Ok(PoolError::KycNotApproved)));
+        assert_eq!(blocked_again, Err(Ok(PoolError::KycNotRequested)));
     }
 
     #[test]
@@ -6158,5 +6310,145 @@ mod test {
 
         let record = client.get_funded_invoice(&1u64).unwrap();
         assert_eq!(record.due_date, new_due);
+    }
+
+    // ── #337: KYC tri-state tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_approve_investor_kyc_allows_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_kyc_required(&admin, &true);
+        client.approve_investor_kyc(&admin, &investor);
+        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::Approved);
+        assert!(client.get_investor_kyc(&investor));
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 1_000);
+    }
+
+    #[test]
+    fn test_reject_investor_kyc_returns_kyc_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_kyc_required(&admin, &true);
+        client.reject_investor_kyc(&admin, &investor);
+        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::Rejected);
+        assert!(!client.get_investor_kyc(&investor));
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        let result = client.try_deposit(&investor, &usdc_id, &1_000);
+        assert_eq!(result, Err(Ok(PoolError::KycRejected)));
+    }
+
+    #[test]
+    fn test_kyc_not_requested_returns_distinct_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_kyc_required(&admin, &true);
+        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::NotRequested);
+
+        mint(&env, &usdc_id, &investor, 1_000);
+        let result = client.try_deposit(&investor, &usdc_id, &1_000);
+        assert_eq!(result, Err(Ok(PoolError::KycNotRequested)));
+    }
+
+    #[test]
+    fn test_set_investor_kyc_true_maps_to_approved() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_investor_kyc(&admin, &investor, &true);
+        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::Approved);
+        assert!(client.get_investor_kyc(&investor));
+    }
+
+    #[test]
+    fn test_set_investor_kyc_false_maps_to_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        client.set_investor_kyc(&admin, &investor, &false);
+        assert_eq!(client.get_investor_kyc_status(&investor), KycStatus::Rejected);
+        assert!(!client.get_investor_kyc(&investor));
+    }
+
+    // ── #338: upgrade timelock tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_pool_upgrade_timelock_default_is_24h() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        assert_eq!(client.get_upgrade_timelock(), UPGRADE_TIMELOCK_SECS);
+    }
+
+    #[test]
+    fn test_pool_set_upgrade_timelock_configures_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        client.set_upgrade_timelock(&admin, &7_200u64);
+        assert_eq!(client.get_upgrade_timelock(), 7_200u64);
+    }
+
+    #[test]
+    fn test_pool_set_upgrade_timelock_below_minimum_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let result = client.try_set_upgrade_timelock(&admin, &(MIN_UPGRADE_TIMELOCK_SECS - 1));
+        assert_eq!(result, Err(Ok(PoolError::InvalidUpgradeTimelock)));
+    }
+
+    #[test]
+    fn test_pool_execute_upgrade_before_timelock_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        client.set_upgrade_timelock(&admin, &7_200u64);
+
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.propose_upgrade(&admin, &hash);
+
+        env.ledger().with_mut(|l| l.timestamp += 3_600);
+        let result = client.try_execute_upgrade(&admin);
+        assert_eq!(result, Err(Ok(PoolError::UpgradeTimelockNotExpired)));
+    }
+
+    // ── #340: WASM hash validation tests ─────────────────────────────────────
+
+    #[test]
+    fn test_pool_propose_upgrade_zero_hash_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let result = client.try_propose_upgrade(&admin, &zero_hash);
+        assert_eq!(result, Err(Ok(PoolError::InvalidWasmHash)));
+    }
+
+    #[test]
+    fn test_pool_propose_upgrade_nonzero_hash_accepted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let valid_hash = BytesN::from_array(&env, &[42u8; 32]);
+        client.propose_upgrade(&admin, &valid_hash);
     }
 }

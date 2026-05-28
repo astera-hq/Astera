@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PR title format enforcement via `amannn/action-semantic-pull-request@v5`.
 - Automated release notes generation on tag push via `git-cliff`.
 - `CHANGELOG.md` following Keep a Changelog format.
+- Invoice contract: `set_upgrade_timelock` / `get_upgrade_timelock` — configurable upgrade delay (min 1 h, default 24 h) (#338).
+- Pool contract: `set_upgrade_timelock` / `get_upgrade_timelock` — configurable upgrade delay (#338).
+- Credit-score contract: `set_upgrade_timelock` / `get_upgrade_timelock` — configurable upgrade delay (#338).
+- Pool contract: `approve_investor_kyc`, `reject_investor_kyc`, `get_investor_kyc_status` — tri-state KYC with distinct `KycNotRequested` / `KycRejected` errors (#337).
+- Event reference docs updated with all new admin-setter events for the invoice contract (#347).
+
+### Fixed
+- Invoice contract admin setters (`set_oracle`, `set_daily_invoice_limit`, `set_max_invoice_amount`, `set_expiration_duration`) now emit events carrying the old value, new value, and actor for on-chain auditability (#347).
+- `propose_upgrade` in all three contracts now rejects all-zero WASM hashes to prevent bricking via invalid upgrade (#340).
+- Pool KYC check now distinguishes investors who have never requested KYC (`KycNotRequested`) from those who were explicitly denied (`KycRejected`) (#337).
+- Invoice / pool / credit-score `execute_upgrade` now uses the stored configurable timelock instead of the hardcoded 24-hour constant (#338).
 
 ## [0.5.0] - 2026-04-27
 

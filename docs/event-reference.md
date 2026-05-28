@@ -19,6 +19,14 @@ All contract events follow a consistent schema:
 | `disputed` | `["INVOICE", "disputed"]` | `(id: u64, timestamp: u64)` | Oracle rejects / dispute raised |
 | `paused` | `["INVOICE", "paused"]` | `(admin: Address, timestamp: u64)` | Admin pauses contract |
 | `unpaused` | `["INVOICE", "unpaused"]` | `(admin: Address, timestamp: u64)` | Admin unpauses contract |
+| `oracle_updated` | `["INVOICE", "oracle_updated"]` | `(admin: Address, old_oracle: Option<Address>, new_oracle: Address)` | Admin changes the oracle address (#347) |
+| `daily_limit_updated` | `["INVOICE", "daily_limit_updated"]` | `(admin: Address, old_limit: u32, new_limit: u32)` | Admin changes the daily invoice limit (#347) |
+| `max_amount_updated` | `["INVOICE", "max_amount_updated"]` | `(admin: Address, old_max: i128, new_max: i128)` | Admin changes the max invoice amount (#347) |
+| `expiration_updated` | `["INVOICE", "expiration_updated"]` | `(admin: Address, old_secs: u64, new_secs: u64)` | Admin changes the invoice expiration duration (#347) |
+| `grace_period_updated` | `["INVOICE", "grace_period_updated"]` | `(admin: Address, old_days: u32, new_days: u32)` | Admin changes the global grace period (#347) |
+| `timelock_updated` | `["INVOICE", "timelock_updated"]` | `(admin: Address, old_secs: u64, new_secs: u64)` | Admin changes the upgrade timelock (#338) |
+| `upg_prop` | `["INVOICE", "upg_prop"]` | `(admin: Address, earliest_execute_at: u64)` | Admin proposes a WASM upgrade (#338/#340) |
+| `upgraded` | `["INVOICE", "upgraded"]` | `(admin: Address, timestamp: u64)` | WASM upgrade executed |
 
 ---
 
@@ -43,6 +51,11 @@ All contract events follow a consistent schema:
 | `col_seiz` | `["POOL", "col_seiz"]` | `(invoice_id: u64, depositor: Address, amount: i128, timestamp: u64)` | Collateral seized on default |
 | `set_util` | `["POOL", "set_util"]` | `(admin: Address, bps: u32, timestamp: u64)` | Max utilization threshold updated (#275) |
 | `set_uwarn` | `["POOL", "set_uwarn"]` | `(admin: Address, bps: u32, timestamp: u64)` | Utilization warning threshold updated (#275) |
+| `kyc_appr` | `["POOL", "kyc_appr"]` | `(admin: Address, investor: Address)` | Investor KYC explicitly approved (#337) |
+| `kyc_rej` | `["POOL", "kyc_rej"]` | `(admin: Address, investor: Address)` | Investor KYC explicitly rejected (#337) |
+| `timelock_updated` | `["POOL", "timelock_updated"]` | `(admin: Address, old_secs: u64, new_secs: u64)` | Upgrade timelock changed (#338) |
+| `upg_prop` | `["POOL", "upg_prop"]` | `(admin: Address, earliest_execute_at: u64)` | Admin proposes a WASM upgrade (#338/#340) |
+| `upgraded` | `["POOL", "upgraded"]` | `(admin: Address, timestamp: u64)` | WASM upgrade executed |
 
 ---
 
@@ -54,6 +67,9 @@ All contract events follow a consistent schema:
 | `default` | `["CREDIT", "default"]` | `(sme: Address, invoice_id: u64, score: u32, timestamp: u64)` | Default recorded and score updated |
 | `paused` | `["CREDIT", "paused"]` | `(admin: Address, timestamp: u64)` | Admin pauses contract |
 | `unpaused` | `["CREDIT", "unpaused"]` | `(admin: Address, timestamp: u64)` | Admin unpauses contract |
+| `timelock_updated` | `["CREDIT", "timelock_updated"]` | `(admin: Address, old_secs: u64, new_secs: u64)` | Upgrade timelock changed (#338) |
+| `upg_prop` | `["CREDIT", "upg_prop"]` | `(admin: Address, earliest_execute_at: u64)` | Admin proposes a WASM upgrade (#338/#340) |
+| `upgraded` | `["CREDIT", "upgraded"]` | `(admin: Address, timestamp: u64)` | WASM upgrade executed |
 
 ---
 
