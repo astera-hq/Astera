@@ -40,7 +40,13 @@ const MAX_INVOICES_PER_DAY: u32 = 10;
 const MAX_DAILY_INVOICE_LIMIT: u32 = 1_000;
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7;
-const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 30; // per-invoice cap (#230)
+// Both the global setter (set_grace_period) and the per-invoice setter
+// (set_invoice_grace_period) share the same 90-day maximum. 90 days is the
+// practical upper bound that gives admins meaningful per-invoice flexibility
+// while preventing indefinite extensions that would undermine protocol risk
+// models. Keeping both caps identical ensures per-invoice overrides can always
+// reach the global maximum — making the override meaningful.
+const MAX_GRACE_PERIOD_OVERRIDE_DAYS: u32 = 90;
 const MAX_DUE_DATE_AHEAD_SECS: u64 = SECS_PER_DAY * 365 * 30;
 const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 const MAX_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 365 * 10; // 10 years
@@ -49,6 +55,9 @@ const MAX_DESCRIPTION_LEN: u32 = 256;
 const MAX_DEBTOR_LEN: u32 = 64;
 const MAX_VERIFICATION_HASH_LEN: u32 = 256;
 const MAX_METADATA_URI_LEN: u32 = 256;
+const DEFAULT_MIN_DUE_DATE_WINDOW_SECS: u64 = SECS_PER_DAY;
+const DEFAULT_METADATA_IMAGE_URI: &str =
+    "ipfs://bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku";
 const MAX_DUE_DATE_EXTENSION_SECS: u64 = SECS_PER_DAY * 90;
 
 // ── #290: Storage monitoring constants ───────────────────────────────────────
@@ -208,6 +217,7 @@ pub enum DataKey {
     Initialized,
     StorageStats,
     Paused,
+    MinDueDateWindowSecs,
     DailyInvoiceCount(Address),
     DailyInvoiceResetTime(Address),
     ProposedWasmHash,
@@ -224,6 +234,7 @@ pub enum DataKey {
     DebtorRecord(String),
     DebtorIds,
     SmeOutstanding(Address),
+    MetadataImageUri,
     // #446: admin-configurable TTL for completed invoices
     CompletedInvoiceTtl,
 }
@@ -275,8 +286,14 @@ fn validate_invoice_strings(
     description: &String,
     verification_hash: &String,
 ) {
-    if description.is_empty() || debtor.is_empty() || verification_hash.is_empty() {
-        panic_with_error!(env, InvoiceError::EmptyField);
+    if debtor.is_empty() {
+        panic_with_error!(env, InvoiceError::EmptyDebtorName);
+    }
+    if description.is_empty() {
+        panic_with_error!(env, InvoiceError::EmptyDescription);
+    }
+    if verification_hash.is_empty() {
+        panic_with_error!(env, InvoiceError::InvalidVerificationHash);
     }
     if description.len() > MAX_DESCRIPTION_LEN {
         panic_with_error!(env, InvoiceError::DescriptionTooLong);
@@ -407,7 +424,9 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
 }
 
 fn checked_default_deadline(env: &Env, due_date: u64, grace_period_days: u32) -> u64 {
-    let grace_period_secs = grace_period_days as u64 * SECS_PER_DAY;
+    let grace_period_secs = (grace_period_days as u64)
+        .checked_mul(SECS_PER_DAY)
+        .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow));
     due_date
         .checked_add(grace_period_secs)
         .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow))
@@ -429,6 +448,23 @@ fn validate_due_date(env: &Env, due_date: u64) {
         .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow));
     if due_date > max_due_date {
         soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow);
+    }
+}
+
+fn resolve_min_due_date_window(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MinDueDateWindowSecs)
+        .unwrap_or(DEFAULT_MIN_DUE_DATE_WINDOW_SECS)
+}
+
+fn validate_min_due_date_window(env: &Env, due_date: u64) {
+    let now = env.ledger().timestamp();
+    let min_due_date = now
+        .checked_add(resolve_min_due_date_window(env))
+        .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow));
+    if due_date < min_due_date {
+        soroban_sdk::panic_with_error!(env, InvoiceError::DueDateTooSoon);
     }
 }
 
@@ -485,6 +521,10 @@ impl InvoiceContract {
             &DataKey::DisputeResolutionWindow,
             &DEFAULT_DISPUTE_RESOLUTION_WINDOW,
         );
+        env.storage().instance().set(
+            &DataKey::MinDueDateWindowSecs,
+            &DEFAULT_MIN_DUE_DATE_WINDOW_SECS,
+        );
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &parse_version());
@@ -494,6 +534,10 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::RequireRegisteredDebtor, &false);
+        env.storage().persistent().set(
+            &DataKey::MetadataImageUri,
+            &String::from_str(&env, DEFAULT_METADATA_IMAGE_URI),
+        );
         env.storage()
             .instance()
             .set(&DataKey::DebtorIds, &Vec::<String>::new(&env));
@@ -692,6 +736,34 @@ impl InvoiceContract {
             .publish((EVT, symbol_short!("set_orc")), (admin, oracle));
     }
 
+    pub fn get_metadata_image_uri(env: Env) -> String {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MetadataImageUri)
+            .unwrap_or_else(|| String::from_str(&env, DEFAULT_METADATA_IMAGE_URI))
+    }
+
+    pub fn set_metadata_image_uri(env: Env, admin: Address, uri: String) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if uri.is_empty() || uri.len() > MAX_METADATA_URI_LEN {
+            panic!("invalid metadata image uri");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MetadataImageUri, &uri);
+        env.events()
+            .publish((EVT, symbol_short!("meta_img")), (admin, uri));
+    }
+
     pub fn create_invoice(
         env: Env,
         owner: Address,
@@ -732,8 +804,6 @@ impl InvoiceContract {
     ) -> u64 {
         owner.require_auth();
         require_not_paused(&env);
-        bump_instance(&env);
-
         validate_invoice_strings(&env, &debtor, &description, &verification_hash);
 
         if let Some(uri) = metadata_uri.as_ref() {
@@ -752,9 +822,7 @@ impl InvoiceContract {
         if amount > max_invoice_amount {
             panic!("invoice amount exceeds maximum");
         }
-        if due_date <= env.ledger().timestamp() {
-            panic!("due date must be in the future");
-        }
+        validate_min_due_date_window(&env, due_date);
         validate_due_date(&env, due_date);
 
         let outstanding = get_sme_outstanding(&env, &owner);
@@ -805,6 +873,8 @@ impl InvoiceContract {
         if daily_count >= daily_limit {
             panic!("daily invoice limit exceeded");
         }
+
+        bump_instance(&env);
         daily_count += 1;
         env.storage().instance().set(&daily_count_key, &daily_count);
 
@@ -1537,7 +1607,11 @@ impl InvoiceContract {
         let inv = maybe_expire_pending_invoice(&env, inv);
         let name = concat_prefix_u64(&env, b"Astera Invoice #", inv.id);
         let symbol = concat_prefix_u64(&env, b"INV-", inv.id);
-        let image = String::from_str(&env, "https://astera.io/metadata/invoice/placeholder.svg");
+        let image = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MetadataImageUri)
+            .unwrap_or_else(|| String::from_str(&env, DEFAULT_METADATA_IMAGE_URI));
         InvoiceMetadata {
             name,
             description: inv.description.clone(),
@@ -1645,6 +1719,36 @@ impl InvoiceContract {
             (EVT, Symbol::new(&env, "grace_period_updated")),
             (admin, old_days, days),
         );
+    }
+
+    pub fn set_min_due_date_window(env: Env, admin: Address, window_secs: u64) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        let old_window: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDueDateWindowSecs)
+            .unwrap_or(DEFAULT_MIN_DUE_DATE_WINDOW_SECS);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDueDateWindowSecs, &window_secs);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "due_window_updated")),
+            (admin, old_window, window_secs),
+        );
+    }
+
+    pub fn get_min_due_date_window(env: Env) -> u64 {
+        bump_instance(&env);
+        resolve_min_due_date_window(&env)
     }
 
     pub fn set_max_invoice_amount(env: Env, admin: Address, max_invoice_amount: i128) {
@@ -1865,10 +1969,7 @@ impl InvoiceContract {
     /// Returns true if the invoice with `id` has status Defaulted (#386).
     pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
         bump_instance(&env);
-        let invoice: Option<Invoice> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id));
+        let invoice: Option<Invoice> = env.storage().persistent().get(&DataKey::Invoice(id));
         match invoice {
             Some(inv) => inv.status == InvoiceStatus::Defaulted,
             None => false,
@@ -2837,7 +2938,36 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
-        client.set_invoice_grace_period(&admin, &1u64, &31u32);
+        // Cap is 90 days — 91 must panic
+        client.set_invoice_grace_period(&admin, &1u64, &91u32);
+    }
+
+    #[test]
+    fn test_set_invoice_grace_period_at_max_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        // Exactly 90 days must be accepted (same cap as set_grace_period)
+        client.set_invoice_grace_period(&admin, &1u64, &90u32);
+        assert_eq!(client.get_invoice_grace_period(&1u64), 90);
+    }
+
+    #[test]
+    #[should_panic(expected = "grace period cannot exceed 90 days")]
+    fn test_set_grace_period_exceeds_max_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        client.set_grace_period(&admin, &91u32);
+    }
+
+    #[test]
+    fn test_set_grace_period_at_max_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        client.set_grace_period(&admin, &90u32);
+        assert_eq!(client.get_grace_period(), 90);
     }
 
     // ── #436: empty string validation tests ──────────────────────────────────
@@ -2856,7 +2986,7 @@ mod test {
             &String::from_str(&env, "hash"),
             &String::from_str(&env, "https://example.com/meta"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
+        assert_eq!(result, Err(Ok(InvoiceError::EmptyDescription)));
     }
 
     #[test]
@@ -2942,7 +3072,7 @@ mod test {
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, "hash"),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
+        assert_eq!(result, Err(Ok(InvoiceError::EmptyDebtorName)));
     }
 
     #[test]
@@ -2958,7 +3088,7 @@ mod test {
             &String::from_str(&env, "Valid description"),
             &String::from_str(&env, ""),
         );
-        assert_eq!(result, Err(Ok(InvoiceError::EmptyField)));
+        assert_eq!(result, Err(Ok(InvoiceError::InvalidVerificationHash)));
     }
 
     #[test]

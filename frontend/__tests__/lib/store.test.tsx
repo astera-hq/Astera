@@ -1,4 +1,5 @@
 import { renderHook, act } from '@testing-library/react';
+import { parseStellarAddress } from '@/lib/types';
 import { useStore } from '@/lib/store';
 
 describe('useStore', () => {
@@ -44,7 +45,7 @@ describe('useStore', () => {
     const { result } = renderHook(() => useStore());
     const mockConfig = {
       invoiceContract: 'CONTRACT1',
-      admin: 'ADMIN1',
+      admin: parseStellarAddress('G' + 'A'.repeat(55)),
       yieldBps: 800,
       factoringFeeBps: 0,
       compoundInterest: false,

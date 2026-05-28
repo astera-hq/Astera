@@ -249,33 +249,45 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      - name: Build frontend
-        run: npm run build
-        env:
-          # #395: real deployed testnet contract IDs, configured as repository
-          # variables. E2E must exercise real contracts, never placeholders.
-          NEXT_PUBLIC_NETWORK: testnet
-          NEXT_PUBLIC_INVOICE_CONTRACT_ID: ${{ vars.TESTNET_INVOICE_CONTRACT_ID }}
-          NEXT_PUBLIC_POOL_CONTRACT_ID: ${{ vars.TESTNET_POOL_CONTRACT_ID }}
-          NEXT_PUBLIC_USDC_TOKEN_ID: ${{ vars.TESTNET_USDC_TOKEN_ID }}
+      - name: Start local Docker stack
+        working-directory: ./
+        run: |
+          docker compose up -d --wait
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000 >/dev/null 2>&1; then
+              echo "Frontend ready";
+              exit 0;
+            fi
+            sleep 2;
+          done
+          echo "Frontend did not become ready" >&2
+          exit 1
+
+      - name: Load local contract IDs
+        working-directory: ./
+        run: |
+          docker compose exec -T contracts cat /contract-ids/env > /tmp/contract-ids.env
+          grep -E '^(INVOICE_CONTRACT_ID|POOL_CONTRACT_ID|CREDIT_CONTRACT_ID)=' /tmp/contract-ids.env \
+            | sed 's/^INVOICE_CONTRACT_ID/NEXT_PUBLIC_INVOICE_CONTRACT_ID/' \
+            | sed 's/^POOL_CONTRACT_ID/NEXT_PUBLIC_POOL_CONTRACT_ID/' \
+            | sed 's/^CREDIT_CONTRACT_ID/NEXT_PUBLIC_CREDIT_CONTRACT_ID/' \
+            >> "$GITHUB_ENV"
 
       - name: Configure Playwright base URL
         run: |
-          PORT=$(node -e "const net = require('node:net'); const server = net.createServer(); server.listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => console.log(port)); });")
-          echo "PLAYWRIGHT_BASE_URL=http://127.0.0.1:${PORT}" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000" >> "$GITHUB_ENV"
 
       - name: Run Playwright E2E tests
-        run: npm run test:e2e
+        run: npm run test:e2e -- --config=playwright.local.config.ts
         env:
-          # #395: same real testnet IDs for the test run. The bare *_CONTRACT_ID
-          # vars are read by the fail-fast guard in playwright.config.ts and by
-          # the deployed-contract spec; the run fails if they are placeholders.
-          NEXT_PUBLIC_NETWORK: testnet
-          NEXT_PUBLIC_INVOICE_CONTRACT_ID: ${{ vars.TESTNET_INVOICE_CONTRACT_ID }}
-          NEXT_PUBLIC_POOL_CONTRACT_ID: ${{ vars.TESTNET_POOL_CONTRACT_ID }}
-          NEXT_PUBLIC_USDC_TOKEN_ID: ${{ vars.TESTNET_USDC_TOKEN_ID }}
-          INVOICE_CONTRACT_ID: ${{ vars.TESTNET_INVOICE_CONTRACT_ID }}
-          POOL_CONTRACT_ID: ${{ vars.TESTNET_POOL_CONTRACT_ID }}
+          NEXT_PUBLIC_NETWORK: local
+          NEXT_PUBLIC_HORIZON_URL: http://127.0.0.1:8000
+          NEXT_PUBLIC_SOROBAN_RPC_URL: http://127.0.0.1:8000/soroban/rpc
+
+      - name: Tear down local Docker stack
+        if: always()
+        working-directory: ./
+        run: docker compose down -v
 
       - name: Upload Playwright report
         if: always()

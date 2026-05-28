@@ -328,6 +328,143 @@ proptest! {
     }
 }
 
+// ---- #383: Comprehensive pool invariant fuzz covering all operations ----
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    /// Invariant: pool_value >= total_deployed holds after every operation in
+    /// any sequence of deposit → fund → repay → withdraw.
+    ///
+    /// Additional invariants checked:
+    /// - available_liquidity == pool_value - total_deployed
+    /// - pool_value grows after a full repayment
+    /// - total_shares >= 0 at all times (shares never go negative)
+    #[test]
+    fn prop_pool_invariants_all_operations(
+        deposit in 1_000_000i128..5_000_000_000i128,
+        fund_ratio in 0u32..80u32,  // 0 = skip funding
+        do_repay in proptest::bool::ANY,
+        withdraw_ratio in 0u32..100u32, // 0 = skip withdraw
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        // ── Step 1: deposit ──────────────────────────────────────────────────
+        mint(&env, &usdc_id, &investor, deposit);
+        mint(&env, &usdc_id, &sme, deposit * 2);
+        client.deposit(&investor, &usdc_id, &deposit);
+
+        let tt = client.get_token_totals(&usdc_id);
+        prop_assert!(tt.pool_value >= tt.total_deployed,
+            "after deposit: pool_value={} < total_deployed={}", tt.pool_value, tt.total_deployed);
+        prop_assert_eq!(
+            client.available_liquidity(&usdc_id),
+            tt.pool_value - tt.total_deployed,
+            "liquidity identity broken after deposit"
+        );
+
+        let total_shares: i128 = env.invoke_contract(
+            &share_token,
+            &soroban_sdk::Symbol::new(&env, "total_supply"),
+            soroban_sdk::vec![&env],
+        );
+        prop_assert!(total_shares >= 0, "shares went negative after deposit");
+
+        // ── Step 2: fund invoice (optional) ──────────────────────────────────
+        let principal = if fund_ratio > 0 {
+            let p = (deposit as u128 * fund_ratio as u128 / 100) as i128;
+            if p > 0 {
+                let due_date = env.ledger().timestamp() + 30 * 86_400;
+                client.fund_invoice(&admin, &1u64, &p, &sme, &due_date, &usdc_id);
+
+                let tt2 = client.get_token_totals(&usdc_id);
+                prop_assert!(tt2.pool_value >= tt2.total_deployed,
+                    "after fund: pool_value={} < total_deployed={}", tt2.pool_value, tt2.total_deployed);
+                prop_assert_eq!(
+                    client.available_liquidity(&usdc_id),
+                    tt2.pool_value - tt2.total_deployed,
+                    "liquidity identity broken after fund"
+                );
+                p
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // ── Step 3: repay invoice (optional) ─────────────────────────────────
+        if do_repay && principal > 0 {
+            env.ledger().with_mut(|l| l.timestamp += 15 * 86_400);
+            let amount_due = client.estimate_repayment(&1u64);
+            let pool_value_before_repay = client.get_token_totals(&usdc_id).pool_value;
+
+            client.repay_invoice(&1u64, &sme, &amount_due);
+
+            let tt3 = client.get_token_totals(&usdc_id);
+            prop_assert!(tt3.pool_value >= tt3.total_deployed,
+                "after repay: pool_value={} < total_deployed={}", tt3.pool_value, tt3.total_deployed);
+            prop_assert_eq!(tt3.total_deployed, 0i128,
+                "total_deployed should clear after full repayment");
+            // Repayment always increases pool_value (interest accrued)
+            prop_assert!(tt3.pool_value >= pool_value_before_repay,
+                "pool_value shrank after repayment: before={} after={}",
+                pool_value_before_repay, tt3.pool_value);
+            prop_assert_eq!(
+                client.available_liquidity(&usdc_id),
+                tt3.pool_value - tt3.total_deployed,
+                "liquidity identity broken after repay"
+            );
+        }
+
+        // ── Step 4: withdraw (optional) ───────────────────────────────────────
+        if withdraw_ratio > 0 {
+            let total_shares_now: i128 = env.invoke_contract(
+                &share_token,
+                &soroban_sdk::Symbol::new(&env, "total_supply"),
+                soroban_sdk::vec![&env],
+            );
+            if total_shares_now > 0 {
+                let shares_to_withdraw = (total_shares_now * withdraw_ratio as i128) / 100;
+                if shares_to_withdraw > 0 {
+                    let tt4_before = client.get_token_totals(&usdc_id);
+                    // Only withdraw if liquidity covers it
+                    let available = tt4_before.pool_value - tt4_before.total_deployed;
+                    let usdc_value = if tt4_before.pool_value > 0 {
+                        (shares_to_withdraw * tt4_before.pool_value) / total_shares_now
+                    } else {
+                        0
+                    };
+                    if usdc_value <= available && usdc_value > 0 {
+                        let _ = client.try_withdraw(&investor, &usdc_id, &shares_to_withdraw);
+                        // Invariant holds regardless of whether withdraw succeeded
+                        let tt4 = client.get_token_totals(&usdc_id);
+                        prop_assert!(tt4.pool_value >= tt4.total_deployed,
+                            "after withdraw: pool_value={} < total_deployed={}", tt4.pool_value, tt4.total_deployed);
+                        prop_assert_eq!(
+                            client.available_liquidity(&usdc_id),
+                            tt4.pool_value - tt4.total_deployed,
+                            "liquidity identity broken after withdraw"
+                        );
+                        let shares_after: i128 = env.invoke_contract(
+                            &share_token,
+                            &soroban_sdk::Symbol::new(&env, "total_supply"),
+                            soroban_sdk::vec![&env],
+                        );
+                        prop_assert!(shares_after >= 0,
+                            "total_shares went negative after withdraw: {}", shares_after);
+                        prop_assert!(shares_after <= total_shares_now,
+                            "shares increased during withdraw: before={} after={}", total_shares_now, shares_after);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod deterministic_fuzz {
     use super::*;

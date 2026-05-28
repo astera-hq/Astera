@@ -125,6 +125,10 @@ pub enum PoolError {
     NotDefaulted = 42,
     // #385: pool address stored in invoice contract does not match this pool
     InvoicePoolMismatch = 43,
+    // #333: share token must exist and be initialized before token registration
+    InvalidShareToken = 44,
+    // #335: duplicate invoice IDs in batch funding
+    DuplicateInvoiceId = 45,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -160,6 +164,11 @@ const DEFAULT_WITHDRAWAL_COOLDOWN_SECS: u64 = 0;
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
 const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
+// Collateral records are kept for 90 days after settlement (repayment or
+// seizure) so auditors and the SME have time to verify the record exists.
+// This is longer than COMPLETED_INVOICE_TTL (30 days) because collateral
+// disputes may arise well after the invoice is closed.
+const SETTLEMENT_COLLATERAL_TTL: u32 = LEDGERS_PER_DAY * 90;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
@@ -560,6 +569,13 @@ fn release_collateral(env: &Env, invoice_id: u64, released_by: &Address, settled
             env.storage()
                 .persistent()
                 .set(&DataKey::CollateralDeposit(invoice_id), &col);
+            // Extend TTL so the settled record survives 90 days post-release
+            // for audit purposes, regardless of when the invoice was originally funded.
+            env.storage().persistent().extend_ttl(
+                &DataKey::CollateralDeposit(invoice_id),
+                SETTLEMENT_COLLATERAL_TTL,
+                SETTLEMENT_COLLATERAL_TTL,
+            );
             env.events().publish(
                 (EVT, symbol_short!("col_ret")),
                 (
@@ -981,9 +997,19 @@ impl FundingPool {
         share_token: Address,
     ) -> Result<(), PoolError> {
         admin.require_auth();
-        bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
+
+        // #367: Fetch and validate token decimals
+        let token_client = token::Client::new(&env, &token);
+        let token_decimals = token_client.decimals();
+        if token_decimals != EXPECTED_DECIMALS {
+            return Err(PoolError::UnsupportedTokenDecimals);
+        }
+        let share_client = token::Client::new(&env, &share_token);
+        if share_client.try_decimals().is_err() {
+            return Err(PoolError::InvalidShareToken);
+        }
 
         let mut tokens: Vec<Address> = env
             .storage()
@@ -997,12 +1023,7 @@ impl FundingPool {
             }
         }
 
-        // #367: Fetch and validate token decimals
-        let token_client = token::Client::new(&env, &token);
-        let token_decimals = token_client.decimals();
-        if token_decimals != EXPECTED_DECIMALS {
-            return Err(PoolError::UnsupportedTokenDecimals);
-        }
+        bump_instance(&env);
 
         tokens.push_back(token.clone());
         env.storage()
@@ -1827,11 +1848,8 @@ impl FundingPool {
         requests: Vec<FundingRequest>,
     ) -> Result<(), PoolError> {
         admin.require_auth();
-        bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-
-        Self::non_reentrant_start(&env);
 
         if requests.is_empty() {
             return Err(PoolError::InvalidAmount);
@@ -1839,6 +1857,18 @@ impl FundingPool {
         if requests.len() > MAX_BATCH_SIZE {
             return Err(PoolError::BatchTooLarge);
         }
+        for i in 0..requests.len() {
+            let request_i = requests.get(i).ok_or(PoolError::StorageCorrupted)?;
+            for j in (i + 1)..requests.len() {
+                let request_j = requests.get(j).ok_or(PoolError::StorageCorrupted)?;
+                if request_i.invoice_id == request_j.invoice_id {
+                    return Err(PoolError::DuplicateInvoiceId);
+                }
+            }
+        }
+
+        bump_instance(&env);
+        Self::non_reentrant_start(&env);
 
         let config = get_config_cached(&env)?;
         let accepted_tokens: Vec<Address> = env
@@ -2262,10 +2292,13 @@ impl FundingPool {
             env.storage()
                 .persistent()
                 .set(&DataKey::CollateralDeposit(invoice_id), &col);
+            // Use SETTLEMENT_COLLATERAL_TTL (90 days) so the seizure record
+            // outlives COMPLETED_INVOICE_TTL (30 days) and remains queryable
+            // for the full post-default audit window.
             env.storage().persistent().extend_ttl(
                 &DataKey::CollateralDeposit(invoice_id),
-                COMPLETED_INVOICE_TTL,
-                COMPLETED_INVOICE_TTL,
+                SETTLEMENT_COLLATERAL_TTL,
+                SETTLEMENT_COLLATERAL_TTL,
             );
 
             // #386: emit status-triggered seizure event (invoice was Defaulted).
@@ -3136,16 +3169,14 @@ impl FundingPool {
         if rate_bps == 0 {
             return Err(PoolError::InvalidAmount);
         }
-        let bounds: ExchangeRateBounds = env
+        let bounds = env
             .storage()
             .instance()
-            .get(&DataKey::ExchangeRateBounds(token.clone()))
-            .unwrap_or(ExchangeRateBounds {
-                min_bps: 10_000u32,
-                max_bps: 10_000u32,
-            });
-        if rate_bps < bounds.min_bps || rate_bps > bounds.max_bps {
-            return Err(PoolError::InvalidAmount);
+            .get::<DataKey, ExchangeRateBounds>(&DataKey::ExchangeRateBounds(token.clone()));
+        if let Some(bounds) = bounds {
+            if rate_bps < bounds.min_bps || rate_bps > bounds.max_bps {
+                return Err(PoolError::InvalidAmount);
+            }
         }
         env.storage()
             .instance()
@@ -4249,6 +4280,78 @@ mod test {
         assert_eq!(col.seized_at, 0);
         // Net: sme paid total_due but got collateral back
         assert!(sme_balance_after > sme_balance_before - principal);
+    }
+
+    // #379: CollateralDeposit TTL extended on settlement so records survive
+    // at least 90 days after the invoice is closed.
+    #[test]
+    fn test_collateral_record_exists_after_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, principal * 2 + required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+
+        let amount_due = client.estimate_repayment(&1u64);
+        client.repay_invoice(&1u64, &sme, &amount_due);
+
+        // Record must still be queryable after settlement (TTL was extended)
+        let col = client.get_collateral_deposit(&1u64);
+        assert!(
+            col.is_some(),
+            "collateral record must exist after repayment"
+        );
+        assert!(col.unwrap().settled);
+    }
+
+    #[test]
+    fn test_collateral_record_exists_after_seizure() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let invoice_contract = client.get_config().invoice_contract;
+
+        client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+        let principal: i128 = 5_000;
+        let required = client.required_collateral_for(&principal);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, required);
+
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.deposit_collateral(&1u64, &sme, &usdc_id, &required);
+        let due_date = env.ledger().timestamp() + 1_000;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+
+        // Mark invoice defaulted via dummy invoice contract
+        DummyInvoiceClient::new(&env, &invoice_contract).set_invoice_defaulted(&1u64, &true);
+
+        client.seize_collateral(&admin, &1u64).unwrap();
+
+        // Record must still be queryable after seizure (90-day TTL applied)
+        let col = client.get_collateral_deposit(&1u64);
+        assert!(col.is_some(), "collateral record must exist after seizure");
+        assert!(col.unwrap().settled);
     }
 
     #[test]

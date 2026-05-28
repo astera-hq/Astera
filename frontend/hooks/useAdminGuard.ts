@@ -23,7 +23,7 @@ export interface AdminGuardResult {
 }
 
 export interface AdminGuardOptions {
-  /** Where to send non-admin users. Defaults to `/dashboard`. */
+  /** Where to send non-admin users. Defaults to `/`. */
   redirectTo?: string;
 }
 
@@ -40,7 +40,7 @@ export interface AdminGuardOptions {
  * in an individual admin page component.
  */
 export function useAdminGuard(options: AdminGuardOptions = {}): AdminGuardResult {
-  const { redirectTo = '/dashboard' } = options;
+  const { redirectTo = '/' } = options;
   const { wallet, poolConfig, setPoolConfig } = useStore();
   const router = useRouter();
   const [status, setStatus] = useState<AdminGuardStatus>('loading');

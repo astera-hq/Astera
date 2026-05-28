@@ -52,7 +52,7 @@ export interface InvestorPosition {
 
 export interface PoolConfig {
   invoiceContract: string;
-  admin: string;
+  admin: StellarAddress;
   yieldBps: number;
   factoringFeeBps: number;
   compoundInterest: boolean;
@@ -115,6 +115,21 @@ export type WalletState = {
   connected: boolean;
   network: string;
 };
+
+export type StellarAddress = string & { readonly _brand: 'StellarAddress' };
+
+export const STELLAR_ADDRESS_REGEX = /^[GC][A-Z2-7]{55}$/;
+
+export function parseStellarAddress(value: string): StellarAddress {
+  if (!STELLAR_ADDRESS_REGEX.test(value)) {
+    throw new Error(`Invalid Stellar address: ${value}`);
+  }
+  return value as StellarAddress;
+}
+
+export function isStellarAddress(value: string): value is StellarAddress {
+  return STELLAR_ADDRESS_REGEX.test(value);
+}
 
 export interface CollateralConfig {
   threshold: bigint;
