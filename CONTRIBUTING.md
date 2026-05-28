@@ -349,6 +349,8 @@ cargo test --test fuzz_tests --verbose
 
 # Run fuzz tests with a specific seed for reproducibility
 PROPTEST_SEED=<seed> cargo test --test fuzz_tests
+
+# Each contract declares a named `fuzz_tests` target in Cargo.toml so CI can run this command directly.
 ```
 
 Fuzz tests are **required to pass** in the CI pipeline. If fuzzing finds an issue, fix the underlying code logic and re-run the tests.

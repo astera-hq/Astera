@@ -12,3 +12,7 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.4"
+
+[[test]]
+name = "fuzz_tests"
+path = "tests/fuzz_tests.rs"

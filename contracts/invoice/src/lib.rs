@@ -406,6 +406,15 @@ fn checked_default_deadline(env: &Env, due_date: u64, grace_period_days: u32) ->
         .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, InvoiceError::DateOverflow))
 }
 
+fn resolve_invoice_grace_period_days(env: &Env, invoice: &Invoice) -> u32 {
+    let global_grace: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::GracePeriodDays)
+        .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+    invoice.grace_period_override.unwrap_or(global_grace)
+}
+
 fn validate_due_date(env: &Env, due_date: u64) {
     let now = env.ledger().timestamp();
     let max_due_date = now
@@ -1261,12 +1270,7 @@ impl InvoiceContract {
         if invoice.status != InvoiceStatus::Funded {
             panic!("invoice is not funded");
         }
-        let global_grace: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GracePeriodDays)
-            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
-        let grace_period_days = invoice.grace_period_override.unwrap_or(global_grace);
+        let grace_period_days = resolve_invoice_grace_period_days(&env, &invoice);
         let now = env.ledger().timestamp();
         let default_at = checked_default_deadline(&env, invoice.due_date, grace_period_days);
         if now < default_at {
@@ -1916,11 +1920,7 @@ impl InvoiceContract {
         if invoice.status != InvoiceStatus::Funded {
             return false;
         }
-        let grace_period_days: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GracePeriodDays)
-            .unwrap_or(DEFAULT_GRACE_PERIOD_DAYS);
+        let grace_period_days = resolve_invoice_grace_period_days(&env, &invoice);
         let default_at = checked_default_deadline(&env, invoice.due_date, grace_period_days);
         let now = env.ledger().timestamp();
         if now >= invoice.due_date && now < default_at && default_at - now <= SECS_PER_DAY {
@@ -2717,6 +2717,40 @@ mod test {
         let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
         client.set_invoice_grace_period(&admin, &1u64, &14u32);
         assert_eq!(client.get_invoice_grace_period(&1u64), 14);
+    }
+
+    #[test]
+    fn test_default_warning_uses_invoice_override_grace_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        let id = 1u64;
+        client.set_invoice_grace_period(&admin, &id, &14u32);
+        let due = client.get_invoice(&id).due_date;
+
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (13 * SECS_PER_DAY) + (SECS_PER_DAY / 2));
+
+        assert!(client.check_default_warning(&id));
+    }
+
+    #[test]
+    fn test_mark_defaulted_respects_invoice_override_grace_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, pool, _owner) = setup_funded_invoice(&env);
+        let id = 1u64;
+        client.set_invoice_grace_period(&admin, &id, &14u32);
+        let due = client.get_invoice(&id).due_date;
+
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (8 * SECS_PER_DAY));
+        assert!(client.try_mark_defaulted(&id, &pool).is_err());
+
+        env.ledger()
+            .with_mut(|l| l.timestamp = due + (15 * SECS_PER_DAY));
+        client.mark_defaulted(&id, &pool);
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Defaulted);
     }
 
     #[test]
