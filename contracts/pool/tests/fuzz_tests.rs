@@ -40,6 +40,33 @@ impl DummyShare {
     }
 }
 
+#[contract]
+pub struct DummyInvoice;
+#[contractimpl]
+impl DummyInvoice {
+    pub fn get_authorized_pool(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("pool"))
+            .expect("not initialized")
+    }
+    pub fn set_pool(env: Env, pool: Address) {
+        env.storage().instance().set(&symbol_short!("pool"), &pool);
+    }
+    pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
+        let stored: Option<bool> = env
+            .storage()
+            .persistent()
+            .get(&symbol_short!("inv_def"));
+        stored.unwrap_or(false)
+    }
+    pub fn set_invoice_defaulted(env: Env, id: u64, defaulted: bool) {
+        env.storage()
+            .persistent()
+            .set(&symbol_short!("inv_def"), &defaulted);
+    }
+}
+
 fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
     env.ledger().with_mut(|l| l.timestamp = 100_000);
     let contract_id = env.register(FundingPool, ());
@@ -49,7 +76,8 @@ fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
     let usdc_id = env
         .register_stellar_asset_contract_v2(token_admin)
         .address();
-    let invoice_contract = Address::generate(env);
+    let invoice_contract = env.register(DummyInvoice, ());
+    DummyInvoiceClient::new(env, &invoice_contract).set_pool(&contract_id);
 
     let share_token = env.register(DummyShare, ());
     client.initialize(&admin, &usdc_id, &share_token, &invoice_contract);
