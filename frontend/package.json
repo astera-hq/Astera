@@ -33,7 +33,7 @@
     "react-redux": "^9.2.0",
     "recharts": "^3.8.1",
     "swr": "^2.2.5",
-    "zustand": "^5.0.0"
+    "zustand": "^5.0.13"
   },
   "devDependencies": {
     "@parcel/watcher": "^2.5.6",
