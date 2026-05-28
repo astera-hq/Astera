@@ -659,6 +659,19 @@ fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
     ((principal as u128 * config.collateral_bps as u128) / BPS_DENOM as u128) as i128
 }
 
+fn available_liquidity(tt: &PoolTokenTotals) -> PoolResult<i128> {
+    tt.pool_value
+        .checked_sub(tt.total_deployed)
+        .ok_or(PoolError::AmountOverflow)
+}
+
+fn calculate_reward_delta(total_interest: i128, total_shares: i128) -> PoolResult<i128> {
+    total_interest
+        .checked_mul(REWARD_PRECISION)
+        .and_then(|value| value.checked_div(total_shares))
+        .ok_or(PoolError::AmountOverflow)
+}
+
 fn fund_invoice_request(
     env: &Env,
     config: &PoolConfig,
@@ -677,6 +690,20 @@ fn fund_invoice_request(
         return Err(PoolError::StorageCorrupted);
     }
 
+    // Fail fast on liquidity before scanning token allowlist.
+    // This keeps unsuccessful requests cheap when the pool cannot fund them.
+    // Ensure sufficient liquidity (cash = NAV - deployed).
+    let token_totals_key = DataKey::TokenTotals(request.token.clone());
+    let mut tt: PoolTokenTotals = env
+        .storage()
+        .instance()
+        .get(&token_totals_key)
+        .unwrap_or_default();
+    let available_liquidity = available_liquidity(&tt)?;
+    if available_liquidity < request.principal {
+        return Err(PoolError::InsufficientLiquidity);
+    }
+
     // Verify the token is accepted.
     let mut token_ok = false;
     for i in 0..accepted_tokens.len() {
@@ -688,21 +715,6 @@ fn fund_invoice_request(
     }
     if !token_ok {
         return Err(PoolError::TokenNotAccepted);
-    }
-
-    // Ensure sufficient liquidity (cash = NAV - deployed).
-    let token_totals_key = DataKey::TokenTotals(request.token.clone());
-    let mut tt: PoolTokenTotals = env
-        .storage()
-        .instance()
-        .get(&token_totals_key)
-        .unwrap_or_default();
-    let available_liquidity = tt
-        .pool_value
-        .checked_sub(tt.total_deployed)
-        .ok_or(PoolError::AmountOverflow)?;
-    if available_liquidity < request.principal {
-        return Err(PoolError::InsufficientLiquidity);
     }
 
     let now = env.ledger().timestamp();
@@ -1967,10 +1979,7 @@ impl FundingPool {
                 Vec::new(env),
             );
             if total_shares > 0 {
-                let reward_delta = total_interest_i128
-                    .checked_mul(REWARD_PRECISION)
-                    .and_then(|value| value.checked_div(total_shares))
-                    .ok_or(PoolError::AmountOverflow)?;
+                let reward_delta = calculate_reward_delta(total_interest_i128, total_shares)?;
                 tt.reward_per_share = tt
                     .reward_per_share
                     .checked_add(reward_delta)
@@ -3698,6 +3707,55 @@ mod test {
     }
 
     #[test]
+    fn test_fund_invoice_prioritizes_liquidity_before_token_validation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+        let unknown_token = Address::generate(&env);
+
+        let result = client.try_fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &unknown_token,
+        );
+        assert_eq!(result, Err(Ok(PoolError::InsufficientLiquidity)));
+    }
+
+    #[test]
+    fn test_fund_invoice_returns_token_not_accepted_when_liquidity_exists() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+        let unknown_token = Address::generate(&env);
+        env.storage().instance().set(
+            &DataKey::TokenTotals(unknown_token.clone()),
+            &PoolTokenTotals {
+                pool_value: 5_000,
+                total_deployed: 0,
+                total_paid_out: 0,
+                total_fee_revenue: 0,
+                reward_per_share: 0,
+                protocol_revenue: 0,
+            },
+        );
+
+        let result = client.try_fund_invoice(
+            &admin,
+            &1u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &unknown_token,
+        );
+        assert_eq!(result, Err(Ok(PoolError::TokenNotAccepted)));
+    }
+
+    #[test]
     fn test_fund_invoice_duplicate_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -4649,6 +4707,37 @@ mod test {
             calculate_total_due(&record, &config, u64::MAX),
             Err(PoolError::AmountOverflow)
         );
+    }
+
+    #[test]
+    fn test_calculate_reward_delta_overflow_returns_amount_overflow() {
+        assert_eq!(
+            calculate_reward_delta(i128::MAX, 1),
+            Err(PoolError::AmountOverflow)
+        );
+    }
+
+    #[test]
+    fn test_calculate_reward_delta_large_values_succeed() {
+        let total_interest = 1_000_000_000_000_000_000i128;
+        let total_shares = 2_000_000_000_000i128;
+        let reward_delta = calculate_reward_delta(total_interest, total_shares).unwrap();
+        assert_eq!(reward_delta, 500_000_000_000_000_000i128);
+    }
+
+    #[test]
+    fn test_calculate_reward_delta_multiple_large_inputs() {
+        let cases: [(i128, i128); 4] = [
+            (10_000_000_000_000i128, 10_000i128),
+            (1_000_000_000_000_000i128, 500_000i128),
+            (8_500_000_000_000_000_000i128, 3_000_000_000i128),
+            (90_000_000_000_000_000i128, 9_000_000i128),
+        ];
+        for (total_interest, total_shares) in cases {
+            let expected = (total_interest * REWARD_PRECISION) / total_shares;
+            let actual = calculate_reward_delta(total_interest, total_shares).unwrap();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
