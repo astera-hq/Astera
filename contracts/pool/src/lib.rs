@@ -59,6 +59,13 @@ pub struct ExchangeRateBounds {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct OraclePrice {
+    pub price_bps: u32,
+    pub updated_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub struct InvestorPosition {
     pub deposited: i128,
     pub available: i128,
@@ -143,6 +150,7 @@ pub enum DataKey {
     // #111: exchange rate for each accepted token (bps of USD, e.g. 10000 = 1:1 USD)
     ExchangeRate(Address),
     ExchangeRateBounds(Address),
+    PriceOracle(Address),
     // #109: KYC / investor whitelist
     KycRequired,
     InvestorKyc(Address),
@@ -245,6 +253,64 @@ fn required_collateral(principal: i128, config: &CollateralConfig) -> i128 {
         return 0;
     }
     ((principal as u128 * config.collateral_bps as u128) / BPS_DENOM as u128) as i128
+}
+
+fn div_ceil_i128(numerator: i128, denominator: i128) -> i128 {
+    if denominator <= 0 {
+        panic!("division denominator must be positive");
+    }
+    (numerator + denominator - 1) / denominator
+}
+
+fn validated_exchange_rate(env: &Env, token: &Address) -> u32 {
+    let oracle: Option<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::PriceOracle(token.clone()));
+
+    match oracle {
+        Some(oracle_id) => {
+            let mut args = Vec::new(env);
+            args.push_back(token.clone().into_val(env));
+            let price: OraclePrice =
+                env.invoke_contract(&oracle_id, &Symbol::new(env, "latest_price"), args);
+
+            if price.price_bps == 0 {
+                panic!("oracle price must be positive");
+            }
+
+            let now = env.ledger().timestamp();
+            if price.updated_at > now || now - price.updated_at > 86_400 {
+                panic!("oracle price is stale");
+            }
+
+            price.price_bps
+        }
+        None => env
+            .storage()
+            .instance()
+            .get(&DataKey::ExchangeRate(token.clone()))
+            .unwrap_or(10_000u32),
+    }
+}
+
+fn required_collateral_amount(
+    env: &Env,
+    token: &Address,
+    principal: i128,
+    config: &CollateralConfig,
+) -> i128 {
+    let required_usd = required_collateral(principal, config);
+    if required_usd == 0 {
+        return 0;
+    }
+    let rate_bps = validated_exchange_rate(env, token) as i128;
+    div_ceil_i128(required_usd * BPS_DENOM as i128, rate_bps)
+}
+
+fn collateral_value(env: &Env, token: &Address, amount: i128) -> i128 {
+    let rate_bps = validated_exchange_rate(env, token) as i128;
+    (amount * rate_bps) / BPS_DENOM as i128
 }
 
 fn fund_invoice_request(
@@ -642,11 +708,7 @@ impl FundingPool {
             .unwrap_or_default();
 
         let snapshot_key = DataKey::InvestorRewardSnapshot(investor.clone(), token.clone());
-        let last_rps: i128 = env
-            .storage()
-            .persistent()
-            .get(&snapshot_key)
-            .unwrap_or(0);
+        let last_rps: i128 = env.storage().persistent().get(&snapshot_key).unwrap_or(0);
 
         let share_token: Address = env
             .storage()
@@ -654,15 +716,12 @@ impl FundingPool {
             .get(&DataKey::ShareToken(token.clone()))
             .unwrap();
 
-        let investor_shares: i128 = env.invoke_contract(
-            &share_token,
-            &Symbol::new(&env, "balance"),
-            {
+        let investor_shares: i128 =
+            env.invoke_contract(&share_token, &Symbol::new(&env, "balance"), {
                 let mut args = Vec::new(&env);
                 args.push_back(investor.clone().into_val(&env));
                 args
-            },
-        );
+            });
 
         let claimable = if investor_shares > 0 && tt.reward_per_share > last_rps {
             ((tt.reward_per_share - last_rps) * investor_shares) / REWARD_PRECISION
@@ -734,7 +793,9 @@ impl FundingPool {
                     if d.settled {
                         panic!("collateral already settled");
                     }
-                    if d.amount < req_collateral {
+                    let required_amount =
+                        required_collateral_amount(&env, &d.token, principal, &collateral_cfg);
+                    if d.amount < required_amount {
                         panic!("insufficient collateral deposited");
                     }
                 }
@@ -989,6 +1050,7 @@ impl FundingPool {
         if amount <= 0 {
             panic!("collateral amount must be positive");
         }
+        let _ = validated_exchange_rate(&env, &token);
 
         // Prevent depositing collateral for an already-funded invoice.
         if env
@@ -1095,7 +1157,8 @@ impl FundingPool {
 
         // The seized collateral reduces the effective loss: add it to pool_value and
         // reduce total_deployed by the original principal (the invoice is now a loss).
-        tt.pool_value += col.amount;
+        let seized_value = collateral_value(&env, &col.token, col.amount);
+        tt.pool_value += seized_value;
         tt.total_deployed -= record.principal;
         env.storage().instance().set(&token_totals_key, &tt);
 
@@ -1393,13 +1456,29 @@ impl FundingPool {
             .publish((EVT, symbol_short!("set_rate")), (admin, token, rate_bps));
     }
 
+    /// Set an oracle contract for live token price validation.
+    /// The oracle must expose `latest_price(token: Address) -> OraclePrice`.
+    pub fn set_price_oracle(env: Env, admin: Address, token: Address, oracle: Address) {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        Self::assert_accepted_token(&env, &token);
+        env.storage()
+            .instance()
+            .set(&DataKey::PriceOracle(token.clone()), &oracle);
+        env.events()
+            .publish((EVT, symbol_short!("set_orcl")), (admin, token, oracle));
+    }
+
+    pub fn get_price_oracle(env: Env, token: Address) -> Option<Address> {
+        bump_instance(&env);
+        env.storage().instance().get(&DataKey::PriceOracle(token))
+    }
+
     /// Returns the USD exchange rate for `token` in bps (defaults to 10000 = 1:1).
     pub fn get_exchange_rate(env: Env, token: Address) -> u32 {
         bump_instance(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::ExchangeRate(token))
-            .unwrap_or(10_000u32)
+        validated_exchange_rate(&env, &token)
     }
 
     pub fn get_rate_bounds(env: Env, token: Address) -> ExchangeRateBounds {

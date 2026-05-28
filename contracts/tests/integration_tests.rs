@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{
+    contract, contractimpl, contracttype,
     testutils::{Address as _, Ledger},
     Address, Env, String,
 };
@@ -28,6 +29,190 @@ mod share {
     soroban_sdk::contractimport!(
         file = "../target/wasm32-unknown-unknown/release/share.wasm"
     );
+}
+
+#[contracttype]
+#[derive(Clone)]
+enum MockOracleKey {
+    PriceBps,
+    UpdatedAt,
+    Unavailable,
+}
+
+#[contract]
+struct MockOracle;
+
+#[contractimpl]
+impl MockOracle {
+    pub fn initialize(env: Env, price_bps: u32, updated_at: u64) {
+        env.storage()
+            .instance()
+            .set(&MockOracleKey::PriceBps, &price_bps);
+        env.storage()
+            .instance()
+            .set(&MockOracleKey::UpdatedAt, &updated_at);
+        env.storage()
+            .instance()
+            .set(&MockOracleKey::Unavailable, &false);
+    }
+
+    pub fn set_price(env: Env, price_bps: u32, updated_at: u64) {
+        env.storage()
+            .instance()
+            .set(&MockOracleKey::PriceBps, &price_bps);
+        env.storage()
+            .instance()
+            .set(&MockOracleKey::UpdatedAt, &updated_at);
+    }
+
+    pub fn set_unavailable(env: Env, unavailable: bool) {
+        env.storage()
+            .instance()
+            .set(&MockOracleKey::Unavailable, &unavailable);
+    }
+
+    pub fn latest_price(env: Env, _token: Address) -> pool::OraclePrice {
+        let unavailable: bool = env
+            .storage()
+            .instance()
+            .get(&MockOracleKey::Unavailable)
+            .unwrap_or(false);
+        if unavailable {
+            panic!("oracle unavailable");
+        }
+
+        pool::OraclePrice {
+            price_bps: env
+                .storage()
+                .instance()
+                .get(&MockOracleKey::PriceBps)
+                .unwrap_or(10_000),
+            updated_at: env
+                .storage()
+                .instance()
+                .get(&MockOracleKey::UpdatedAt)
+                .unwrap_or(0),
+        }
+    }
+}
+
+struct TestContracts {
+    env: Env,
+    admin: Address,
+    sme: Address,
+    investor: Address,
+    usdc_id: Address,
+    pool_id: Address,
+    oracle_id: Address,
+}
+
+fn setup_oracle_pool() -> TestContracts {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let oracle_id = env.register_contract(None, MockOracle);
+    let usdc_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let share_client = share::Client::new(&env, &share_id);
+    let oracle_client = MockOracleClient::new(&env, &oracle_id);
+
+    invoice_client.initialize(&admin, &pool_id, &10_000_000_000i128, &30u64 * 86_400u64);
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    pool_client.initialize(&admin, &usdc_id, &share_id, &invoice_id);
+    oracle_client.initialize(&10_000u32, &env.ledger().timestamp());
+    pool_client.set_price_oracle(&admin, &usdc_id, &oracle_id);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &20_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&sme, &20_000_000_000i128);
+
+    TestContracts {
+        env,
+        admin,
+        sme,
+        investor,
+        usdc_id,
+        pool_id,
+        oracle_id,
+    }
+}
+
+#[test]
+#[should_panic(expected = "oracle price is stale")]
+fn test_stale_oracle_price_rejected() {
+    let ctx = setup_oracle_pool();
+    let pool_client = pool::Client::new(&ctx.env, &ctx.pool_id);
+    let oracle_client = MockOracleClient::new(&ctx.env, &ctx.oracle_id);
+
+    oracle_client.set_price(&10_000u32, &(ctx.env.ledger().timestamp() - 86_401));
+    pool_client.deposit_collateral(&1u64, &ctx.sme, &ctx.usdc_id, &2_000i128);
+}
+
+#[test]
+#[should_panic(expected = "oracle price must be positive")]
+fn test_oracle_zero_price_handled() {
+    let ctx = setup_oracle_pool();
+    let pool_client = pool::Client::new(&ctx.env, &ctx.pool_id);
+    let oracle_client = MockOracleClient::new(&ctx.env, &ctx.oracle_id);
+
+    oracle_client.set_price(&0u32, &ctx.env.ledger().timestamp());
+    pool_client.deposit_collateral(&1u64, &ctx.sme, &ctx.usdc_id, &2_000i128);
+}
+
+#[test]
+fn test_price_change_between_deposit_and_seizure() {
+    let ctx = setup_oracle_pool();
+    let pool_client = pool::Client::new(&ctx.env, &ctx.pool_id);
+    let oracle_client = MockOracleClient::new(&ctx.env, &ctx.oracle_id);
+
+    pool_client.set_collateral_config(&ctx.admin, &1i128, &2_000u32);
+    pool_client.deposit(&ctx.investor, &ctx.usdc_id, &20_000i128);
+    pool_client.deposit_collateral(&1u64, &ctx.sme, &ctx.usdc_id, &2_000i128);
+
+    let due_date = ctx.env.ledger().timestamp() + 30 * 86_400;
+    pool_client.fund_invoice(
+        &ctx.admin,
+        &1u64,
+        &10_000i128,
+        &ctx.sme,
+        &due_date,
+        &ctx.usdc_id,
+    );
+
+    oracle_client.set_price(&5_000u32, &ctx.env.ledger().timestamp());
+    pool_client.seize_collateral(&ctx.admin, &1u64);
+
+    let totals = pool_client.get_token_totals(&ctx.usdc_id);
+    assert_eq!(totals.pool_value, 21_000i128);
+    assert_eq!(totals.total_deployed, 0i128);
+}
+
+#[test]
+#[should_panic(expected = "oracle unavailable")]
+fn test_oracle_unavailable_fallback() {
+    let ctx = setup_oracle_pool();
+    let pool_client = pool::Client::new(&ctx.env, &ctx.pool_id);
+    let oracle_client = MockOracleClient::new(&ctx.env, &ctx.oracle_id);
+
+    oracle_client.set_unavailable(&true);
+    pool_client.deposit_collateral(&1u64, &ctx.sme, &ctx.usdc_id, &2_000i128);
 }
 
 /// Integration test: Complete invoice lifecycle with pool funding and credit scoring
