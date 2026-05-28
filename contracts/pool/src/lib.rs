@@ -1979,10 +1979,7 @@ impl FundingPool {
                 Vec::new(env),
             );
             if total_shares > 0 {
-                let reward_delta = total_interest_i128
-                    .checked_mul(REWARD_PRECISION)
-                    .and_then(|value| value.checked_div(total_shares))
-                    .ok_or(PoolError::AmountOverflow)?;
+                let reward_delta = calculate_reward_delta(total_interest_i128, total_shares)?;
                 tt.reward_per_share = tt
                     .reward_per_share
                     .checked_add(reward_delta)
