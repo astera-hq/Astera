@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
+import { parseStellarAddress } from '@/lib/types';
 import {
   getKycRequired,
   getInvestorKyc,
@@ -25,9 +26,11 @@ export default function AdminKycPage() {
 
   // Manual fallback state
   const [lookupAddress, setLookupAddress] = useState('');
+  const [lookupAddressError, setLookupAddressError] = useState<string | null>(null);
   const [lookupResult, setLookupResult] = useState<boolean | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
   const [manageAddress, setManageAddress] = useState('');
+  const [manageAddressError, setManageAddressError] = useState<string | null>(null);
   const [manageApproved, setManageApproved] = useState(true);
 
   async function loadKycData() {
@@ -64,7 +67,8 @@ export default function AdminKycPage() {
     if (!wallet.address) return;
     setTxLoading(true);
     try {
-      const xdr = await buildSetKycRequiredTx(wallet.address, !kycRequired);
+      const admin = parseStellarAddress(wallet.address);
+      const xdr = await buildSetKycRequiredTx(admin, !kycRequired);
       await signAndSubmit(xdr);
       setKycRequired((prev) => !prev);
       toast.success(`KYC requirement ${!kycRequired ? 'enabled' : 'disabled'}.`);
@@ -79,10 +83,12 @@ export default function AdminKycPage() {
     if (!wallet.address) return;
     setTxLoading(true);
     try {
-      const xdr = await buildSetInvestorKycTx(wallet.address, address, approve);
+      const admin = parseStellarAddress(wallet.address);
+      const investor = parseStellarAddress(address);
+      const xdr = await buildSetInvestorKycTx(admin, investor, approve);
       await signAndSubmit(xdr);
       toast.success(
-        `Investor ${address.slice(0, 8)}… has been ${approve ? 'approved' : 'revoked'}.`,
+        `Investor ${investor.slice(0, 8)}… has been ${approve ? 'approved' : 'revoked'}.`,
       );
       // Refresh the lists
       await loadKycData();
@@ -98,11 +104,13 @@ export default function AdminKycPage() {
     if (!lookupAddress) return;
     setLookupLoading(true);
     setLookupResult(null);
+    setLookupAddressError(null);
     try {
-      const approved = await getInvestorKyc(lookupAddress);
+      const investor = parseStellarAddress(lookupAddress.trim());
+      const approved = await getInvestorKyc(investor);
       setLookupResult(approved);
     } catch (e) {
-      console.error(e);
+      setLookupAddressError(e instanceof Error ? e.message : 'Invalid Stellar address.');
       setLookupResult(null);
     } finally {
       setLookupLoading(false);
@@ -112,8 +120,14 @@ export default function AdminKycPage() {
   async function handleManageKyc(e: React.FormEvent) {
     e.preventDefault();
     if (!manageAddress) return;
-    await handleAction(manageAddress, manageApproved);
-    setManageAddress('');
+    setManageAddressError(null);
+    try {
+      const investor = parseStellarAddress(manageAddress.trim());
+      await handleAction(investor, manageApproved);
+      setManageAddress('');
+    } catch (e) {
+      setManageAddressError(e instanceof Error ? e.message : 'Invalid Stellar address.');
+    }
   }
 
   return (
@@ -179,7 +193,9 @@ export default function AdminKycPage() {
                 {pendingInvestors.map((inv) => (
                   <tr key={inv.address} className="hover:bg-brand-dark/50 transition-colors">
                     <td className="px-6 py-4 font-mono text-xs">{inv.address}</td>
-                    <td className="px-6 py-4">{(Number(inv.totalDeposited) / 10_000_000).toLocaleString()} USDC</td>
+                    <td className="px-6 py-4">
+                      {(Number(inv.totalDeposited) / 10_000_000).toLocaleString()} USDC
+                    </td>
                     <td className="px-6 py-4 text-brand-muted">
                       {new Date(inv.firstSeenAt).toLocaleDateString()}
                     </td>
@@ -224,7 +240,9 @@ export default function AdminKycPage() {
                 {approvedInvestors.map((inv) => (
                   <tr key={inv.address} className="hover:bg-brand-dark/50 transition-colors">
                     <td className="px-6 py-4 font-mono text-xs">{inv.address}</td>
-                    <td className="px-6 py-4">{(Number(inv.totalDeposited) / 10_000_000).toLocaleString()} USDC</td>
+                    <td className="px-6 py-4">
+                      {(Number(inv.totalDeposited) / 10_000_000).toLocaleString()} USDC
+                    </td>
                     <td className="px-6 py-4 text-brand-muted">
                       {new Date(inv.firstSeenAt).toLocaleDateString()}
                     </td>
@@ -255,11 +273,17 @@ export default function AdminKycPage() {
               <input
                 type="text"
                 value={manageAddress}
-                onChange={(e) => setManageAddress(e.target.value)}
+                onChange={(e) => {
+                  setManageAddress(e.target.value);
+                  setManageAddressError(null);
+                }}
                 placeholder="G..."
                 required
                 className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold font-mono text-sm"
               />
+              {manageAddressError ? (
+                <p className="mt-2 text-sm text-red-400">{manageAddressError}</p>
+              ) : null}
             </div>
             <div className="flex gap-3">
               <button
@@ -289,7 +313,10 @@ export default function AdminKycPage() {
             <input
               type="text"
               value={lookupAddress}
-              onChange={(e) => setLookupAddress(e.target.value)}
+              onChange={(e) => {
+                setLookupAddress(e.target.value);
+                setLookupAddressError(null);
+              }}
               placeholder="G..."
               required
               className="flex-1 bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold font-mono text-sm w-full"
@@ -302,6 +329,9 @@ export default function AdminKycPage() {
               {lookupLoading ? '…' : 'Check'}
             </button>
           </form>
+          {lookupAddressError ? (
+            <p className="mt-3 text-sm text-red-400">{lookupAddressError}</p>
+          ) : null}
           {lookupResult !== null && (
             <p
               className={`mt-3 text-sm font-medium ${lookupResult ? 'text-green-400' : 'text-red-400'}`}

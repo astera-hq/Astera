@@ -2,11 +2,12 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import PoolStats, { PoolStatsSkeleton } from '@/components/PoolStats';
+import { parseStellarAddress } from '@/lib/types';
 import type { PoolConfig, PoolTokenTotals } from '@/lib/types';
 
 const baseConfig: PoolConfig = {
   invoiceContract: 'INVOICE_CID',
-  admin: 'ADMIN',
+  admin: parseStellarAddress('G' + 'A'.repeat(55)),
   yieldBps: 800, // 8.0%
   factoringFeeBps: 250, // 2.50%
   compoundInterest: false,

@@ -20,6 +20,7 @@ import {
   getKycRequired,
   getInvestorKyc,
 } from '@/lib/contracts';
+import { parseStellarAddress } from '@/lib/types';
 import { toStroops, formatUSDC, stablecoinLabel, USDC_TOKEN_ID } from '@/lib/stellar';
 import type { PoolTokenTotals } from '@/lib/types';
 import { useTranslations } from 'next-intl';
@@ -65,7 +66,7 @@ export default function InvestPage() {
         const required = await getKycRequired();
         setKycRequired(required);
         if (required && wallet.address) {
-          const approved = await getInvestorKyc(wallet.address);
+          const approved = await getInvestorKyc(parseStellarAddress(wallet.address));
           setKycApproved(approved);
         } else {
           setKycApproved(true);
