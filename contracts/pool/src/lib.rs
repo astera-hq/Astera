@@ -3151,16 +3151,14 @@ impl FundingPool {
         if rate_bps == 0 {
             return Err(PoolError::InvalidAmount);
         }
-        let bounds: ExchangeRateBounds = env
+        let bounds = env
             .storage()
             .instance()
-            .get(&DataKey::ExchangeRateBounds(token.clone()))
-            .unwrap_or(ExchangeRateBounds {
-                min_bps: 10_000u32,
-                max_bps: 10_000u32,
-            });
-        if rate_bps < bounds.min_bps || rate_bps > bounds.max_bps {
-            return Err(PoolError::InvalidAmount);
+            .get::<DataKey, ExchangeRateBounds>(&DataKey::ExchangeRateBounds(token.clone()));
+        if let Some(bounds) = bounds {
+            if rate_bps < bounds.min_bps || rate_bps > bounds.max_bps {
+                return Err(PoolError::InvalidAmount);
+            }
         }
         env.storage()
             .instance()
@@ -4299,7 +4297,10 @@ mod test {
 
         // Record must still be queryable after settlement (TTL was extended)
         let col = client.get_collateral_deposit(&1u64);
-        assert!(col.is_some(), "collateral record must exist after repayment");
+        assert!(
+            col.is_some(),
+            "collateral record must exist after repayment"
+        );
         assert!(col.unwrap().settled);
     }
 

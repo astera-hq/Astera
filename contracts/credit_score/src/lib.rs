@@ -42,7 +42,20 @@ pub const BASE_SCORE: u32 = 500;
 const PTS_PAID_ON_TIME: u32 = 30;
 const PTS_PAID_LATE: u32 = 15;
 const PTS_DEFAULTED: i32 = -50;
-const PTS_NEW_INVOICE: u32 = 5;
+const PTS_AVG_PAYMENT_NEGATIVE: i32 = 20;
+const PTS_AVG_PAYMENT_LT3: i32 = 15;
+const PTS_AVG_PAYMENT_LT7: i32 = 10;
+const PTS_AVG_PAYMENT_OVER_LATE: i32 = -15;
+const INVOICE_BONUS_THRESHOLD_1: u32 = 5;
+const INVOICE_BONUS_THRESHOLD_2: u32 = 10;
+const INVOICE_BONUS_THRESHOLD_3: u32 = 20;
+const INVOICE_BONUS_POINTS: i32 = 5;
+const VOLUME_BONUS_THRESHOLD_1: i128 = 1_000_000_000;
+const VOLUME_BONUS_THRESHOLD_2: i128 = 10_000_000_000;
+const VOLUME_BONUS_THRESHOLD_3: i128 = 100_000_000_000;
+const VOLUME_BONUS_POINTS_1: i32 = 5;
+const VOLUME_BONUS_POINTS_2: i32 = 15;
+const VOLUME_BONUS_POINTS_3: i32 = 25;
 
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
@@ -88,6 +101,88 @@ pub struct CreditScoreData {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreCoreConfig {
+    pub paid_on_time_pts: i32,
+    pub paid_late_pts: i32,
+    pub defaulted_pts: i32,
+    pub base_score: u32,
+    pub min_score: u32,
+    pub max_score: u32,
+    pub score_version: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreAverageConfig {
+    pub avg_neg_pts: i32,
+    pub avg_lt3_pts: i32,
+    pub avg_lt7_pts: i32,
+    pub avg_over_late_pts: i32,
+    pub avg_days_lt3: i64,
+    pub avg_days_lt7: i64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreBonusConfig {
+    pub inv_bonus_thr1: u32,
+    pub inv_bonus_thr2: u32,
+    pub inv_bonus_thr3: u32,
+    pub inv_bonus_pts: i32,
+    pub vol_bonus_thr1: i128,
+    pub vol_bonus_thr2: i128,
+    pub vol_bonus_thr3: i128,
+    pub vol_bonus_pts1: i32,
+    pub vol_bonus_pts2: i32,
+    pub vol_bonus_pts3: i32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoringConfig {
+    pub core: ScoreCoreConfig,
+    pub averages: ScoreAverageConfig,
+    pub bonuses: ScoreBonusConfig,
+}
+
+impl ScoringConfig {
+    pub fn defaults() -> Self {
+        Self {
+            core: ScoreCoreConfig {
+                paid_on_time_pts: PTS_PAID_ON_TIME as i32,
+                paid_late_pts: PTS_PAID_LATE as i32,
+                defaulted_pts: PTS_DEFAULTED,
+                base_score: BASE_SCORE,
+                min_score: MIN_SCORE,
+                max_score: MAX_SCORE,
+                score_version: 1,
+            },
+            averages: ScoreAverageConfig {
+                avg_neg_pts: PTS_AVG_PAYMENT_NEGATIVE,
+                avg_lt3_pts: PTS_AVG_PAYMENT_LT3,
+                avg_lt7_pts: PTS_AVG_PAYMENT_LT7,
+                avg_over_late_pts: PTS_AVG_PAYMENT_OVER_LATE,
+                avg_days_lt3: 3,
+                avg_days_lt7: 7,
+            },
+            bonuses: ScoreBonusConfig {
+                inv_bonus_thr1: INVOICE_BONUS_THRESHOLD_1,
+                inv_bonus_thr2: INVOICE_BONUS_THRESHOLD_2,
+                inv_bonus_thr3: INVOICE_BONUS_THRESHOLD_3,
+                inv_bonus_pts: INVOICE_BONUS_POINTS,
+                vol_bonus_thr1: VOLUME_BONUS_THRESHOLD_1,
+                vol_bonus_thr2: VOLUME_BONUS_THRESHOLD_2,
+                vol_bonus_thr3: VOLUME_BONUS_THRESHOLD_3,
+                vol_bonus_pts1: VOLUME_BONUS_POINTS_1,
+                vol_bonus_pts2: VOLUME_BONUS_POINTS_2,
+                vol_bonus_pts3: VOLUME_BONUS_POINTS_3,
+            },
+        }
+    }
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct ScoreThresholds {
     pub excellent: u32,
@@ -114,7 +209,9 @@ pub enum DataKey {
     PaymentHistory(Address),
     PaymentHistoryStart(Address),
     PaymentRecordIdx(Address, u32),
+    PaymentRecordScoreVersion(u64),
     InvoiceProcessed(u64),
+    ScoringConfig,
     Admin,
     InvoiceContract,
     PoolContract,
@@ -165,6 +262,13 @@ fn max_payment_history(env: &Env) -> u32 {
         .unwrap_or(MAX_PAYMENT_HISTORY)
 }
 
+fn load_scoring_config(env: &Env) -> ScoringConfig {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ScoringConfig)
+        .unwrap_or_else(ScoringConfig::defaults)
+}
+
 fn append_payment_record(env: &Env, sme: &Address, record: &PaymentRecord) {
     let max_history = max_payment_history(env);
     if max_history == 0 {
@@ -204,8 +308,9 @@ fn append_payment_record(env: &Env, sme: &Address, record: &PaymentRecord) {
     }
 }
 
-fn calculate_score(
+fn calculate_score_with_config(
     env: &Env,
+    config: &ScoringConfig,
     late_threshold: i64,
     total_invoices: u32,
     paid_on_time: u32,
@@ -255,47 +360,71 @@ fn calculate_score(
         );
     }
 
-    let mut score: i64 = BASE_SCORE as i64;
+    let mut score: i64 = config.core.base_score as i64;
 
-    score += (paid_on_time as i32 * PTS_PAID_ON_TIME as i32) as i64;
-    score += (paid_late as i32 * PTS_PAID_LATE as i32) as i64;
-    score += (defaulted as i32 * PTS_DEFAULTED) as i64;
+    score += (paid_on_time as i32 * config.core.paid_on_time_pts) as i64;
+    score += (paid_late as i32 * config.core.paid_late_pts) as i64;
+    score += (defaulted as i32 * config.core.defaulted_pts) as i64;
 
-    if total_invoices >= 5 {
-        score += PTS_NEW_INVOICE as i64;
+    if total_invoices >= config.bonuses.inv_bonus_thr1 {
+        score += config.bonuses.inv_bonus_pts as i64;
     }
-    if total_invoices >= 10 {
-        score += PTS_NEW_INVOICE as i64;
+    if total_invoices >= config.bonuses.inv_bonus_thr2 {
+        score += config.bonuses.inv_bonus_pts as i64;
     }
-    if total_invoices >= 20 {
-        score += PTS_NEW_INVOICE as i64;
+    if total_invoices >= config.bonuses.inv_bonus_thr3 {
+        score += config.bonuses.inv_bonus_pts as i64;
     }
 
     if average_payment_days < 0 {
-        score += 20;
-    } else if average_payment_days < 3 {
-        score += 15;
-    } else if average_payment_days < 7 {
-        score += 10;
+        score += config.averages.avg_neg_pts as i64;
+    } else if average_payment_days < config.averages.avg_days_lt3 {
+        score += config.averages.avg_lt3_pts as i64;
+    } else if average_payment_days < config.averages.avg_days_lt7 {
+        score += config.averages.avg_lt7_pts as i64;
     } else if average_payment_days > late_threshold {
-        score -= 15;
+        score += config.averages.avg_over_late_pts as i64;
     }
 
-    if total_volume > 100_000_000_000 {
-        score += 25;
-    } else if total_volume > 10_000_000_000 {
-        score += 15;
-    } else if total_volume > 1_000_000_000 {
-        score += 5;
+    if total_volume > config.bonuses.vol_bonus_thr3 {
+        score += config.bonuses.vol_bonus_pts3 as i64;
+    } else if total_volume > config.bonuses.vol_bonus_thr2 {
+        score += config.bonuses.vol_bonus_pts2 as i64;
+    } else if total_volume > config.bonuses.vol_bonus_thr1 {
+        score += config.bonuses.vol_bonus_pts1 as i64;
     }
 
-    if score < MIN_SCORE as i64 {
-        MIN_SCORE
-    } else if score > MAX_SCORE as i64 {
-        MAX_SCORE
+    if score < config.core.min_score as i64 {
+        config.core.min_score
+    } else if score > config.core.max_score as i64 {
+        config.core.max_score
     } else {
         score as u32
     }
+}
+
+fn calculate_score(
+    env: &Env,
+    late_threshold: i64,
+    total_invoices: u32,
+    paid_on_time: u32,
+    paid_late: u32,
+    defaulted: u32,
+    total_volume: i128,
+    average_payment_days: i64,
+) -> u32 {
+    let config = load_scoring_config(env);
+    calculate_score_with_config(
+        env,
+        &config,
+        late_threshold,
+        total_invoices,
+        paid_on_time,
+        paid_late,
+        defaulted,
+        total_volume,
+        average_payment_days,
+    )
 }
 
 fn calculate_average_payment_days(paid_on_time: u32, paid_late: u32, total_late_days: i64) -> i64 {
@@ -325,6 +454,9 @@ impl CreditScoreContract {
         env.storage()
             .instance()
             .set(&DataKey::MaxPaymentHistory, &MAX_PAYMENT_HISTORY);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoringConfig, &ScoringConfig::defaults());
         // Store compile-time version (#237)
         env.storage()
             .instance()
@@ -404,6 +536,7 @@ impl CreditScoreContract {
         invoice_id: u64,
         record: PaymentRecord,
     ) -> CreditScoreData {
+        let scoring_config = load_scoring_config(env);
         let mut credit_data = Self::get_or_create_credit_data(env, sme);
 
         let history_len: u32 = env
@@ -415,6 +548,10 @@ impl CreditScoreContract {
         env.storage().persistent().set(
             &DataKey::PaymentRecordIdx(sme.clone(), history_len),
             &record,
+        );
+        env.storage().persistent().set(
+            &DataKey::PaymentRecordScoreVersion(invoice_id),
+            &scoring_config.core.score_version,
         );
         env.storage()
             .instance()
@@ -447,8 +584,9 @@ impl CreditScoreContract {
                 credit_data.average_payment_days * prev_paid + days_late,
             );
         }
-        credit_data.score = calculate_score(
+        credit_data.score = calculate_score_with_config(
             env,
+            &scoring_config,
             get_late_threshold(env),
             credit_data.total_invoices,
             credit_data.paid_on_time,
@@ -457,6 +595,7 @@ impl CreditScoreContract {
             credit_data.total_volume,
             credit_data.average_payment_days,
         );
+        credit_data.score_version = scoring_config.core.score_version;
         credit_data.last_updated = env.ledger().timestamp();
 
         env.storage()
@@ -511,7 +650,6 @@ impl CreditScoreContract {
         } else {
             -((due_date - paid_at) as i64 / (24 * 60 * 60))
         };
-
         let record = PaymentRecord {
             invoice_id,
             sme: sme.clone(),
@@ -570,7 +708,6 @@ impl CreditScoreContract {
         } else {
             0
         };
-
         let record = PaymentRecord {
             invoice_id,
             sme: sme.clone(),
@@ -620,6 +757,12 @@ impl CreditScoreContract {
         records
     }
 
+    pub fn get_payment_record_score_version(env: Env, invoice_id: u64) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PaymentRecordScoreVersion(invoice_id))
+    }
+
     pub fn get_payment_record(env: Env, sme: Address, index: u32) -> Option<PaymentRecord> {
         let history_len: u32 = env
             .storage()
@@ -650,6 +793,7 @@ impl CreditScoreContract {
 
     pub fn get_score_band(env: Env, score: u32) -> String {
         let thresholds = Self::get_score_thresholds(&env);
+        let config = load_scoring_config(&env);
         if score >= thresholds.excellent {
             String::from_str(&env, "Excellent")
         } else if score >= thresholds.very_good {
@@ -658,7 +802,7 @@ impl CreditScoreContract {
             String::from_str(&env, "Good")
         } else if score >= thresholds.fair {
             String::from_str(&env, "Fair")
-        } else if score >= BASE_SCORE {
+        } else if score >= config.core.base_score {
             String::from_str(&env, "Poor")
         } else {
             String::from_str(&env, "Very Poor")
@@ -691,6 +835,59 @@ impl CreditScoreContract {
         env.events().publish(
             (EVT, symbol_short!("thresh")),
             (old.excellent, old.very_good, old.good, old.fair),
+        );
+    }
+
+    pub fn get_scoring_config(env: Env) -> ScoringConfig {
+        load_scoring_config(&env)
+    }
+
+    pub fn set_scoring_config(env: Env, admin: Address, config: ScoringConfig) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+        if !(config.core.min_score <= config.core.base_score
+            && config.core.base_score <= config.core.max_score)
+        {
+            panic!("invalid scoring config: min/base/max scores out of order");
+        }
+        if !(config.averages.avg_days_lt3 < config.averages.avg_days_lt7) {
+            panic!("invalid scoring config: average-payment thresholds must increase");
+        }
+        if !(config.bonuses.inv_bonus_thr1 < config.bonuses.inv_bonus_thr2
+            && config.bonuses.inv_bonus_thr2 < config.bonuses.inv_bonus_thr3
+            && config.bonuses.vol_bonus_thr1 < config.bonuses.vol_bonus_thr2
+            && config.bonuses.vol_bonus_thr2 < config.bonuses.vol_bonus_thr3)
+        {
+            panic!("invalid scoring config: thresholds must increase");
+        }
+        if config.core.score_version == 0 {
+            panic!("invalid scoring config: score_version must be positive");
+        }
+        if config.core.paid_on_time_pts <= 0
+            || config.core.paid_late_pts <= 0
+            || config.bonuses.inv_bonus_pts <= 0
+            || config.bonuses.vol_bonus_pts1 <= 0
+            || config.bonuses.vol_bonus_pts2 <= 0
+            || config.bonuses.vol_bonus_pts3 <= 0
+        {
+            panic!("invalid scoring config: positive point values required");
+        }
+
+        let old = load_scoring_config(&env);
+        if config.core.score_version <= old.core.score_version {
+            panic!("invalid scoring config: score_version must increase");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ScoringConfig, &config);
+        env.storage()
+            .instance()
+            .set(&DataKey::ScoreVersion, &config.core.score_version);
+        env.events().publish(
+            (EVT, symbol_short!("score_cfg")),
+            (old.core.score_version, config.core.score_version),
         );
     }
 
@@ -789,9 +986,10 @@ impl CreditScoreContract {
         {
             data
         } else {
+            let scoring_config = load_scoring_config(env);
             CreditScoreData {
                 sme: sme.clone(),
-                score: MIN_SCORE,
+                score: scoring_config.core.min_score,
                 total_invoices: 0,
                 paid_on_time: 0,
                 paid_late: 0,
@@ -799,7 +997,7 @@ impl CreditScoreContract {
                 total_volume: 0,
                 average_payment_days: 0,
                 last_updated: env.ledger().timestamp(),
-                score_version: 1,
+                score_version: scoring_config.core.score_version,
             }
         }
     }
@@ -2222,9 +2420,11 @@ mod test {
             let ev = events.get(i).unwrap();
             let topics = ev.1;
             topics.len() >= 2
-                && topics.get(1).unwrap()
-                    == Symbol::new(&env, "data_inconsistency").into_val(&env)
+                && topics.get(1).unwrap() == Symbol::new(&env, "data_inconsistency").into_val(&env)
         });
-        assert!(found, "data_inconsistency event not found in emitted events");
+        assert!(
+            found,
+            "data_inconsistency event not found in emitted events"
+        );
     }
 }

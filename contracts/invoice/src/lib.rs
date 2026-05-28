@@ -54,6 +54,8 @@ const MAX_DESCRIPTION_LEN: u32 = 256;
 const MAX_DEBTOR_LEN: u32 = 64;
 const MAX_VERIFICATION_HASH_LEN: u32 = 256;
 const MAX_METADATA_URI_LEN: u32 = 256;
+const DEFAULT_METADATA_IMAGE_URI: &str =
+    "ipfs://bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku";
 const MAX_DUE_DATE_EXTENSION_SECS: u64 = SECS_PER_DAY * 90;
 
 // ── #290: Storage monitoring constants ───────────────────────────────────────
@@ -227,6 +229,7 @@ pub enum DataKey {
     DebtorRecord(String),
     DebtorIds,
     SmeOutstanding(Address),
+    MetadataImageUri,
     // #446: admin-configurable TTL for completed invoices
     CompletedInvoiceTtl,
 }
@@ -490,6 +493,10 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::RequireRegisteredDebtor, &false);
+        env.storage().persistent().set(
+            &DataKey::MetadataImageUri,
+            &String::from_str(&env, DEFAULT_METADATA_IMAGE_URI),
+        );
         env.storage()
             .instance()
             .set(&DataKey::DebtorIds, &Vec::<String>::new(&env));
@@ -686,6 +693,34 @@ impl InvoiceContract {
         bump_instance(&env);
         env.events()
             .publish((EVT, symbol_short!("set_orc")), (admin, oracle));
+    }
+
+    pub fn get_metadata_image_uri(env: Env) -> String {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MetadataImageUri)
+            .unwrap_or_else(|| String::from_str(&env, DEFAULT_METADATA_IMAGE_URI))
+    }
+
+    pub fn set_metadata_image_uri(env: Env, admin: Address, uri: String) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if uri.is_empty() || uri.len() > MAX_METADATA_URI_LEN {
+            panic!("invalid metadata image uri");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MetadataImageUri, &uri);
+        env.events()
+            .publish((EVT, symbol_short!("meta_img")), (admin, uri));
     }
 
     pub fn create_invoice(
@@ -1533,7 +1568,11 @@ impl InvoiceContract {
         let inv = maybe_expire_pending_invoice(&env, inv);
         let name = concat_prefix_u64(&env, b"Astera Invoice #", inv.id);
         let symbol = concat_prefix_u64(&env, b"INV-", inv.id);
-        let image = String::from_str(&env, "https://astera.io/metadata/invoice/placeholder.svg");
+        let image = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MetadataImageUri)
+            .unwrap_or_else(|| String::from_str(&env, DEFAULT_METADATA_IMAGE_URI));
         InvoiceMetadata {
             name,
             description: inv.description.clone(),
@@ -1854,10 +1893,7 @@ impl InvoiceContract {
     /// Returns true if the invoice with `id` has status Defaulted (#386).
     pub fn is_invoice_defaulted(env: Env, id: u64) -> bool {
         bump_instance(&env);
-        let invoice: Option<Invoice> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id));
+        let invoice: Option<Invoice> = env.storage().persistent().get(&DataKey::Invoice(id));
         match invoice {
             Some(inv) => inv.status == InvoiceStatus::Defaulted,
             None => false,
