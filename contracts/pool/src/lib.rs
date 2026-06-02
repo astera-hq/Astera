@@ -139,6 +139,8 @@ pub enum PoolError {
     InvalidUpgradeTimelock = 51,
     // #340: invalid WASM hash (e.g. all-zero)
     InvalidWasmHash = 52,
+    // #532: pool token balance insufficient to cover withdrawal
+    InsufficientPoolFunds = 53,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1396,13 +1398,21 @@ impl FundingPool {
         );
 
         // pool_value is USDC-denominated; compute USDC then convert to token amount
-        let usdc_amount = (shares * tt.pool_value) / total_shares;
+        let usdc_amount = shares
+            .checked_mul(tt.pool_value)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(total_shares)
+            .ok_or(PoolError::AmountOverflow)?;
         let rate_bps: u32 = env
             .storage()
             .instance()
             .get(&DataKey::ExchangeRate(token.clone()))
             .unwrap_or(10_000u32);
-        let amount = (usdc_amount * 10_000i128) / rate_bps as i128;
+        let amount = usdc_amount
+            .checked_mul(10_000i128)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(rate_bps as i128)
+            .ok_or(PoolError::AmountOverflow)?;
 
         let available_liquidity = tt.pool_value - tt.total_deployed;
         if available_liquidity < usdc_amount {
@@ -1436,8 +1446,12 @@ impl FundingPool {
             );
         }
 
-        // Transfer actual token amount LAST - interaction
+        // #532: verify pool has sufficient token balance before transfer
         let token_client = token::Client::new(&env, &token);
+        let pool_balance = token_client.balance(&env.current_contract_address());
+        if amount > pool_balance {
+            return Err(PoolError::InsufficientPoolFunds);
+        }
         token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
         Self::non_reentrant_end(&env); // <- ADD GUARD END

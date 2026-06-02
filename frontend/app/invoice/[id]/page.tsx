@@ -77,8 +77,11 @@ function parseInvoiceHistory(rawEvents: RawEvent[], invoiceId: number): InvoiceE
     if (topics.length < 2) continue;
 
     const contract = event.contractId ?? '';
-    const namespace = scValToNative(topics[0]) as string;
-    const action = scValToNative(topics[1]) as string;
+    const t0 = topics[0];
+    const t1 = topics[1];
+    if (!t0 || !t1) continue;
+    const namespace = scValToNative(t0) as string;
+    const action = scValToNative(t1) as string;
     const value = event.value ? scValToNative(event.value) : null;
 
     if (contract === INVOICE_CONTRACT_ID && namespace === 'INVOICE') {

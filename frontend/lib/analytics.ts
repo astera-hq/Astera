@@ -146,8 +146,9 @@ function generateInvoiceFunnel(invoices: Invoice[]): InvoiceFunnelData[] {
     const status = inv.status as InvoiceStatus;
     const amount = Number(inv.amount) / 10_000_000;
     if (status in stages) {
-      stages[status].count++;
-      stages[status].value += amount;
+      const stage = stages[status as keyof typeof stages]!;
+      stage.count++;
+      stage.value += amount;
     }
   }
 
@@ -188,12 +189,12 @@ function generateCreditScoreDistribution(invoices: Invoice[]): CreditScoreBucket
         score = 300 + Math.floor(Math.random() * 550);
     }
 
-    if (score >= 850) buckets[5].count++;
-    else if (score >= 750) buckets[4].count++;
-    else if (score >= 650) buckets[3].count++;
-    else if (score >= 500) buckets[2].count++;
-    else if (score >= 300) buckets[1].count++;
-    else buckets[0].count++;
+    if (score >= 850) buckets[5]!.count++;
+    else if (score >= 750) buckets[4]!.count++;
+    else if (score >= 650) buckets[3]!.count++;
+    else if (score >= 500) buckets[2]!.count++;
+    else if (score >= 300) buckets[1]!.count++;
+    else buckets[0]!.count++;
   }
 
   return buckets;

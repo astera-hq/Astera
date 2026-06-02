@@ -78,7 +78,7 @@ class ContractMonitor {
         value: scValToNative(e.value),
         ledger: e.ledger,
         ledgerCloseAt: e.ledgerCloseAt,
-        txHash: e.txHash,
+        txHash: e.txHash ?? '',
       }));
 
       // 3. Process each event for alerts
@@ -119,7 +119,8 @@ class ContractMonitor {
   }
 
   private async processEvent(event: ContractEvent): Promise<void> {
-    const [contractType, eventType] = event.topic;
+    const contractType = event.topic[0] ?? '';
+    const eventType = event.topic[1] ?? '';
     const value = event.value;
 
     // A. Check for Large Transactions
@@ -172,7 +173,7 @@ class ContractMonitor {
           priority: pct >= 90 ? 'HIGH' : 'MEDIUM',
           message: `Pool utilization alert: ${pct}% for token ${String(token).slice(0, 8)}…`,
           timestamp: Date.now(),
-          data: { token, utilizationBps, txHash: event.txHash },
+          data: { token, utilizationBps, txHash: event.txHash ?? '' },
         });
       }
     }
@@ -187,13 +188,13 @@ class ContractMonitor {
         priority: 'HIGH',
         message: `Large ${eventType} detected: ${humanAmount.toLocaleString()} units.`,
         timestamp: Date.now(),
-        data: { amount: humanAmount, type: eventType, source: sourceAddress, txHash: event.txHash },
+        data: { amount: humanAmount, type: eventType, source: sourceAddress, txHash: event.txHash ?? '' },
       });
     }
 
     // B. Check for Unusual Activity Patterns (Spamming)
     if (sourceAddress) {
-      await this.checkUnusualActivity(sourceAddress, eventType, event.txHash);
+      await this.checkUnusualActivity(sourceAddress, eventType, event.txHash ?? '');
     }
   }
 

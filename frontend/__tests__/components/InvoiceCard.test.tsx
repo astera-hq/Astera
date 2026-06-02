@@ -2,7 +2,7 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import InvoiceCard, { InvoiceCardSkeleton } from '@/components/InvoiceCard';
-import type { InvoiceMetadata } from '@/lib/types';
+import type { InvoiceMetadata, InvoiceStatus } from '@/lib/types';
 
 // next/link is fine in jsdom, but mock to a plain anchor to keep the test
 // independent of Next's client-side router.
@@ -70,7 +70,7 @@ describe('InvoiceCard', () => {
     const { rerender } = render(<InvoiceCard id={1} metadata={makeMeta({ status: 'Pending' })} />);
 
     for (const [status, classes] of Object.entries(expectedClasses)) {
-      rerender(<InvoiceCard id={1} metadata={makeMeta({ status })} />);
+      rerender(<InvoiceCard id={1} metadata={makeMeta({ status: status as InvoiceStatus })} />);
       expect(screen.getByText(status)).toHaveClass(...classes);
     }
   });

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useStore, type AsteraStore } from '@/lib/store';
+import { getFreighter } from '@/lib/freighter';
 import { pushToast } from './Toast';
 import { useTranslations } from 'next-intl';
 

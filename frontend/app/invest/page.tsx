@@ -82,7 +82,7 @@ export default function InvestPage() {
   function pickDefaultToken(tokens: string[]): string {
     if (tokens.length === 0) return '';
     if (USDC_TOKEN_ID && tokens.includes(USDC_TOKEN_ID)) return USDC_TOKEN_ID;
-    return tokens[0];
+    return tokens[0] ?? '';
   }
 
   async function loadPool() {

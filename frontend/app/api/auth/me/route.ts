@@ -13,7 +13,7 @@ export async function GET(request: Request) {
     const m = auth.match(/^Bearer\s+(.+)$/i);
     if (!m) return NextResponse.json({ authenticated: false }, { status: 401 });
 
-    const token = m[1];
+    const token = m[1]!;
     const key = new TextEncoder().encode(JWT_SECRET);
     const { payload } = await jwtVerify(token, key);
     const sub = payload.sub as string | undefined;

@@ -207,7 +207,7 @@ export default function CreditScore({
         )}
 
         {/* Score Tier Progress Bar */}
-        {nextTier && (
+        {nextTier && currentTier && (
           <div className="mt-6 pt-6 border-t border-brand-border">
             <div className="flex justify-between text-xs text-brand-muted mb-2">
               <span>

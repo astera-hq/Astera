@@ -39,7 +39,7 @@ export default function ImportInvoicePage() {
     const lines = content.trim().split('\n');
     if (lines.length < 2) return [];
 
-    const header = lines[0].toLowerCase().split(',').map(h => h.trim());
+    const header = lines[0]!.toLowerCase().split(',').map(h => h.trim());
     const debtorIdx = header.indexOf('debtor_name');
     const amountIdx = header.indexOf('amount');
     const dueDateIdx = header.indexOf('due_date');
@@ -53,7 +53,7 @@ export default function ImportInvoicePage() {
 
     const rows: ParsedRow[] = [];
     for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].split(',').map(c => c.trim().replace(/^"|"$/g, ''));
+      const cols = lines[i]!.split(',').map(c => c.trim().replace(/^"|"$/g, ''));
       const debtor = cols[debtorIdx] || '';
       const amount = cols[amountIdx] || '';
       const dueDate = cols[dueDateIdx] || '';
@@ -142,7 +142,7 @@ export default function ImportInvoicePage() {
 
     for (let i = 0; i < validRows.length; i++) {
       setCurrentIndex(i);
-      const row = validRows[i];
+      const row = validRows[i]!;
 
       try {
         const dueTimestamp = Math.floor(new Date(row.dueDate).getTime() / 1000);

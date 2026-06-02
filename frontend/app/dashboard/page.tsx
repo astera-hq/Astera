@@ -174,7 +174,7 @@ function DashboardContent() {
       const fetched = await getMultipleInvoices(ids);
 
       const mine = fetched
-        .map((invoice, index) => ({ id: ids[index], invoice }))
+        .map((invoice, index) => ({ id: ids[index]!, invoice }))
         .filter((row) => row.invoice.owner === wallet.address);
       const rows: DashboardRow[] = await Promise.all(
         mine.map(async ({ id, invoice }) => ({

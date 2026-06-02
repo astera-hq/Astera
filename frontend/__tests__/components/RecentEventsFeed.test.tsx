@@ -73,7 +73,7 @@ describe('RecentEventsFeed', () => {
   });
 
   it('renders with single event', () => {
-    render(<RecentEventsFeed events={[mockEvents[0]]} isLoading={false} />);
+    render(<RecentEventsFeed events={[mockEvents[0]!]} isLoading={false} />);
     expect(screen.getByText('CREATED')).toBeInTheDocument();
     expect(screen.queryByText('FUNDED')).not.toBeInTheDocument();
   });

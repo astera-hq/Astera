@@ -215,32 +215,32 @@ describe('SSE Events Polling Service', () => {
   // ---- Test 6: Toast Notifications ----
   describe('Toast Notifications', () => {
     it('should map funded event to success toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['funded']([1, 'sme-addr', BigInt(10000000)], 'tx-hash');
+      const toastConfig = EVENT_TOAST_MAP['funded']!([1, 'sme-addr', BigInt(10000000)], 'tx-hash');
       expect(toastConfig.kind).toBe('success');
       expect(toastConfig.title).toBe('Invoice Funded');
       expect(toastConfig.description).toContain('Invoice #1');
     });
 
     it('should map repaid event to info toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['repaid']([1, BigInt(10000000), BigInt(500000)]);
+      const toastConfig = EVENT_TOAST_MAP['repaid']!([1, BigInt(10000000), BigInt(500000)]);
       expect(toastConfig.kind).toBe('info');
       expect(toastConfig.title).toBe('Invoice Repaid');
     });
 
     it('should map default event to error toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['default'](undefined);
+      const toastConfig = EVENT_TOAST_MAP['default']!(undefined);
       expect(toastConfig.kind).toBe('error');
       expect(toastConfig.title).toBe('Invoice Defaulted');
     });
 
     it('should map deposit event to info toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['deposit'](['investor-addr', BigInt(5000000)]);
+      const toastConfig = EVENT_TOAST_MAP['deposit']!(['investor-addr', BigInt(5000000)]);
       expect(toastConfig.kind).toBe('info');
       expect(toastConfig.title).toBe('Pool Deposit');
     });
 
     it('should map withdraw event to warning toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['withdraw'](['investor-addr', BigInt(5000000)]);
+      const toastConfig = EVENT_TOAST_MAP['withdraw']!(['investor-addr', BigInt(5000000)]);
       expect(toastConfig.kind).toBe('warning');
       expect(toastConfig.title).toBe('Pool Withdrawal');
     });

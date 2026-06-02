@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { HistoryEventSkeleton } from '@/components/Skeleton';
@@ -16,7 +16,7 @@ import {
 } from '@/lib/stellar';
 
 const EXPLORER_BASE = 'https://stellar.expert/explorer/testnet';
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 50;
 const EVENT_LIMIT = 200;
 const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
 
@@ -233,6 +233,16 @@ export default function HistoryPage() {
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [kindFilter, setKindFilter] = useState<EventKind | 'all'>('all');
+  const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
+
+  const filteredEvents = useMemo(() => {
+    let filtered = kindFilter === 'all' ? events : events.filter((e) => e.kind === kindFilter);
+    return filtered.sort((a, b) => {
+      const cmp = a.ledger - b.ledger;
+      return sortDir === 'desc' ? -cmp : cmp;
+    });
+  }, [events, kindFilter, sortDir]);
 
   const fetchEvents = useCallback(
     async (append = false, nextCursor?: string) => {
@@ -336,8 +346,8 @@ export default function HistoryPage() {
     fetchEvents();
   }, [wallet.connected, wallet.address, fetchEvents]);
 
-  const visibleEvents = events.slice(0, visible);
-  const canRevealMore = visible < events.length;
+  const visibleEvents = filteredEvents.slice(0, visible);
+  const canRevealMore = visible < filteredEvents.length;
 
   function handleLoadMore() {
     if (canRevealMore) {
@@ -358,7 +368,7 @@ export default function HistoryPage() {
           {events.length > 0 && (
             <div className="flex gap-2 print:hidden">
               <button
-                onClick={() => exportCSV(events)}
+                onClick={() => exportCSV(filteredEvents)}
                 className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium hover:border-brand-gold/50 hover:text-brand-gold transition-colors"
               >
                 Export CSV
@@ -373,6 +383,32 @@ export default function HistoryPage() {
           )}
         </div>
 
+        {events.length > 0 && (
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap gap-1.5">
+              {(['all', ...Object.keys(KIND_LABELS) as EventKind[]] as const).map((k) => (
+                <button
+                  key={k}
+                  onClick={() => setKindFilter(k)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                    kindFilter === k
+                      ? 'bg-brand-gold text-brand-dark border-brand-gold'
+                      : 'bg-brand-card border-brand-border text-brand-muted hover:text-white'
+                  }`}
+                >
+                  {k === 'all' ? 'All' : KIND_LABELS[k]}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-brand-border bg-brand-card text-brand-muted hover:text-white transition-colors"
+            >
+              {sortDir === 'desc' ? '↓ Newest' : '↑ Oldest'}
+            </button>
+          </div>
+        )}
+
         {!wallet.connected ? (
           <div className="flex flex-col items-center justify-center py-32 text-center">
             <div className="text-4xl mb-4">◈</div>
@@ -385,9 +421,13 @@ export default function HistoryPage() {
               <HistoryEventSkeleton key={i} />
             ))}
           </div>
-        ) : events.length === 0 ? (
+        ) : filteredEvents.length === 0 ? (
           <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
-            <p className="text-brand-muted">No on-chain activity found for this wallet.</p>
+            <p className="text-brand-muted">
+              {kindFilter !== 'all'
+                ? 'No events match the selected filter.'
+                : 'No on-chain activity found for this wallet.'}
+            </p>
           </div>
         ) : (
           <>

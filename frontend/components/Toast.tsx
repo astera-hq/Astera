@@ -37,7 +37,7 @@ const KIND_STYLES: Record<ToastKind, string> = {
 };
 
 export default function ToastHost() {
-  const t = useTranslations('Notifications.toast');
+  const tr = useTranslations('Notifications.toast');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   useEffect(() => {
@@ -86,7 +86,7 @@ export default function ToastHost() {
             </div>
             <button
               onClick={() => dismiss(t.id)}
-              aria-label={t('dismiss')}
+              aria-label={tr('dismiss')}
               className="shrink-0 opacity-70 hover:opacity-100 transition-opacity"
             >
               <svg

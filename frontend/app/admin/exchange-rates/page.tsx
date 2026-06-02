@@ -27,7 +27,7 @@ export default function AdminExchangeRatesPage() {
       try {
         const accepted = await getAcceptedTokens();
         setTokens(accepted);
-        if (accepted.length > 0) setSelectedToken(accepted[0]);
+        if (accepted.length > 0) setSelectedToken(accepted[0]!);
         const rateMap: Record<string, number> = {};
         await Promise.all(
           accepted.map(async (t) => {

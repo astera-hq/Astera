@@ -37,7 +37,7 @@ export default function GovernancePage() {
       const items = await listGovernanceProposals();
       setProposals(items);
       if (selectedId === null && items.length > 0) {
-        setSelectedId(items[0].id);
+        setSelectedId(items[0]!.id);
       }
     } catch (error) {
       console.error('[Governance] Failed to load proposals:', error);

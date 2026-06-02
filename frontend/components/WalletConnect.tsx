@@ -53,7 +53,7 @@ async function checkNetworkMismatch(): Promise<{
 
 export default function WalletConnect() {
   const t = useTranslations('Notifications.wallet');
-  const { wallet, setWallet, disconnect } = useStore();
+  const { wallet, setWallet, disconnect, setNetworkMismatch } = useStore();
   const [step, setStep] = useState<WalletStep>('idle');
   const [retryCount, setRetryCount] = useState(0);
   const [inlineError, setInlineError] = useState<string | null>(null);
@@ -87,7 +87,7 @@ export default function WalletConnect() {
         const networkCheck = await checkNetworkMismatch();
         setNetworkMismatch(networkCheck);
 
-        setWallet({ address, connected: true, network: 'testnet' });
+        setWallet({ address: address ?? null, connected: true, network: 'testnet' });
       } catch {
         // Silent failure - user can reconnect manually
       }
@@ -126,7 +126,7 @@ export default function WalletConnect() {
       const networkCheck = await checkNetworkMismatch();
       setNetworkMismatch(networkCheck);
 
-      setWallet({ address, connected: true, network: 'testnet' });
+      setWallet({ address: address ?? null, connected: true, network: 'testnet' });
       toast.success(t('connected'));
       setRetryCount(0);
       setStep('idle');

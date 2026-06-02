@@ -85,7 +85,7 @@ describe('stellar RPC rate limiting', () => {
     expect(started).toBe(5);
     expect(maxActive).toBe(5);
 
-    blockers[0].resolve(0);
+    blockers[0]!.resolve(0);
     await flushMicrotasks();
 
     expect(started).toBe(6);
@@ -141,8 +141,8 @@ describe('stellar RPC rate limiting', () => {
     await flushMicrotasks();
     expect(started).toBe(5);
 
-    blockers[0].resolve(0);
-    await expect(calls[0]).rejects.toThrow('read failed');
+    blockers[0]!.resolve(0);
+    await expect(calls[0]!).rejects.toThrow('read failed');
     await flushMicrotasks();
 
     expect(started).toBe(6);

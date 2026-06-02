@@ -115,13 +115,13 @@ function AllocationPie({ slices }: { slices: { label: string; pct: number; color
   }
 
   const cumulativeEnds = slices.reduce<number[]>((acc, s) => {
-    const prev = acc.length > 0 ? acc[acc.length - 1] : 0;
+    const prev = acc.length > 0 ? acc[acc.length - 1] ?? 0 : 0;
     return [...acc, prev + s.pct];
   }, []);
 
   const paths = slices.map((s, i) => {
-    const startPct = i === 0 ? 0 : cumulativeEnds[i - 1];
-    const endPct = cumulativeEnds[i];
+    const startPct = i === 0 ? 0 : cumulativeEnds[i - 1]!;
+    const endPct = cumulativeEnds[i]!;
     const start = polarToXY(startPct);
     const end = polarToXY(endPct);
     const large = s.pct > 50 ? 1 : 0;

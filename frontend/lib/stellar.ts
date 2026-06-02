@@ -18,7 +18,7 @@ export const RPC_ENDPOINTS = [
   'https://soroban-testnet.stellar.org',
   'https://rpc-testnet.stellar.org',
 ].filter(Boolean) as string[];
-export const RPC_URL = RPC_ENDPOINTS[0];
+export const RPC_URL = RPC_ENDPOINTS[0]!;
 export const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 
 // Set these after deploying your contracts
@@ -67,7 +67,7 @@ let activeRpcReads = 0;
 let rpcReadTimer: ReturnType<typeof setTimeout> | null = null;
 
 function pruneReadStartTimes(now: number): void {
-  while (rpcReadStartTimes.length > 0 && now - rpcReadStartTimes[0] >= RPC_READ_LIMIT.windowMs) {
+  while (rpcReadStartTimes.length > 0 && now - rpcReadStartTimes[0]! >= RPC_READ_LIMIT.windowMs) {
     rpcReadStartTimes.shift();
   }
 }
@@ -83,7 +83,7 @@ function scheduleReadQueue(): void {
     return;
   }
 
-  const nextSlotIn = Math.max(0, RPC_READ_LIMIT.windowMs - (now - rpcReadStartTimes[0]));
+  const nextSlotIn = Math.max(0, RPC_READ_LIMIT.windowMs - (now - rpcReadStartTimes[0]!));
   rpcReadTimer = setTimeout(() => {
     rpcReadTimer = null;
     processReadQueue();
@@ -149,7 +149,7 @@ class RpcConnectionPool {
   private initPool(): void {
     const now = Date.now();
     for (let i = 0; i < RPC_POOL_CONFIG.poolSize; i++) {
-      const url = RPC_ENDPOINTS[i % RPC_ENDPOINTS.length] || RPC_URL;
+      const url = RPC_ENDPOINTS[i % RPC_ENDPOINTS.length] ?? RPC_URL ?? '';
       this.connections.push({
         server: new StellarRpc.Server(url),
         createdAt: now,
@@ -175,7 +175,7 @@ class RpcConnectionPool {
   private async performHealthChecks(): Promise<void> {
     const now = Date.now();
     for (let i = 0; i < this.connections.length; i++) {
-      const conn = this.connections[i];
+      const conn = this.connections[i]!;
 
       // Recycle connections that are too old
       if (now - conn.createdAt > RPC_POOL_CONFIG.maxConnectionAge) {
@@ -198,9 +198,9 @@ class RpcConnectionPool {
   private recycleConnection(index: number): void {
     const now = Date.now();
     // Try the next endpoint in the fallback list
-    const currentUrl = this.connections[index]?.url || RPC_URL;
+    const currentUrl = this.connections[index]?.url ?? RPC_URL ?? '';
     const nextUrlIndex = (RPC_ENDPOINTS.indexOf(currentUrl) + 1) % RPC_ENDPOINTS.length;
-    const nextUrl = RPC_ENDPOINTS[nextUrlIndex] || RPC_URL;
+    const nextUrl = RPC_ENDPOINTS[nextUrlIndex] ?? RPC_URL ?? '';
 
     this.connections[index] = {
       server: new StellarRpc.Server(nextUrl),
@@ -222,7 +222,7 @@ class RpcConnectionPool {
       .filter((c) => c.healthy)
       .sort((a, b) => a.inFlightRequests - b.inFlightRequests);
 
-    const conn = sorted[0] ?? this.connections[0];
+    const conn = sorted[0] ?? this.connections[0]!;
     conn.lastUsed = Date.now();
     return conn;
   }

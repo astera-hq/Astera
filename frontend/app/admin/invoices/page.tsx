@@ -170,7 +170,7 @@ export default function AdminInvoicesPage() {
 
     try {
       for (let index = 0; index < invoicesToFund.length; index += 1) {
-        const invoice = invoicesToFund[index];
+        const invoice = invoicesToFund[index]!;
         setBatchProgress({ current: index + 1, total: invoicesToFund.length, finished: false });
 
         try {
