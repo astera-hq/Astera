@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, Address,
@@ -36,6 +37,10 @@ pub struct Proposal {
     pub created_at: u64,
     pub voting_ends_at: u64,
     pub execution_delay: u64,
+    /// Total share supply snapshotted at proposal creation. Quorum and pass-threshold
+    /// calculations always use this value so that post-creation minting cannot
+    /// retroactively suppress a proposal that had already reached quorum.
+    pub snapshot_supply: i128,
 }
 
 #[contracttype]
@@ -100,15 +105,14 @@ fn finalize_proposal(env: &Env, proposal: &mut Proposal) -> GovernanceResult<()>
     }
 
     let config = load_config(env)?;
-    let share_client = ShareTokenClient::new(env, &config.share_token);
-    let total_supply = share_client.total_supply();
-    if total_supply <= 0 {
+    let snapshot_supply = proposal.snapshot_supply;
+    if snapshot_supply <= 0 {
         proposal.status = ProposalStatus::Rejected;
         return Ok(());
     }
 
     let total_votes = proposal.votes_for + proposal.votes_against;
-    let quorum = (total_supply * config.quorum_bps as i128) / 10_000i128;
+    let quorum = (snapshot_supply * config.quorum_bps as i128) / 10_000i128;
     if total_votes < quorum {
         proposal.status = ProposalStatus::Rejected;
         return Err(GovernanceError::QuorumNotMet);
@@ -202,6 +206,7 @@ impl Governance {
             .unwrap_or(0);
         let id = count + 1;
         let now = env.ledger().timestamp();
+        let snapshot_supply = ShareTokenClient::new(&env, &config.share_token).total_supply();
         let proposal = Proposal {
             id,
             proposer: proposer.clone(),
@@ -215,6 +220,7 @@ impl Governance {
             created_at: now,
             voting_ends_at: now.saturating_add(config.voting_period_secs),
             execution_delay: config.execution_delay_secs,
+            snapshot_supply,
         };
 
         env.storage()
@@ -310,9 +316,7 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(proposal_id), &proposal);
-        if finalization.is_err() {
-            return finalization;
-        }
+        finalization?;
         if proposal.status != ProposalStatus::Passed {
             return Err(GovernanceError::InvalidProposalState);
         }
