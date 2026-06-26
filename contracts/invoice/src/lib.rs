@@ -37,6 +37,7 @@ const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
 const MIN_UPGRADE_TIMELOCK_SECS: u64 = 3_600; // 1 hour minimum (#338)
+const ADMIN_CHANGE_TIMELOCK_SECS: u64 = 172_800; // 48 hours — #565
 const MAX_INVOICES_PER_DAY: u32 = 10;
 const MAX_DAILY_INVOICE_LIMIT: u32 = 1_000;
 const SECS_PER_DAY: u64 = 86400;
@@ -134,6 +135,10 @@ pub enum InvoiceError {
     InvalidWasmHash = 26,
     // Oracle fallback and verification timeout errors
     VerificationDeadlineNotPassed = 27,
+    // #565: admin key rotation timelock errors
+    AdminChangePending = 28,
+    AdminChangeTimelockNotExpired = 29,
+    NoAdminChangeProposed = 30,
 }
 
 #[contracttype]
@@ -266,6 +271,9 @@ pub enum DataKey {
     CompletedInvoiceTtl,
     // #338: configurable upgrade timelock duration in seconds
     UpgradeTimelockSecs,
+    // #565: admin key rotation timelock
+    PendingAdmin,
+    AdminChangeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -2255,6 +2263,104 @@ impl InvoiceContract {
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
     }
 
+    /// Propose an admin key rotation (#565).
+    /// Stores the pending admin address and the proposal timestamp.
+    /// The change does not take effect until `finalize_admin_change` is called
+    /// after `ADMIN_CHANGE_TIMELOCK_SECS` (48 h) have elapsed.
+    pub fn propose_admin_change(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminChangeScheduledAt, &env.ledger().timestamp());
+        env.events().publish(
+            (EVT, Symbol::new(&env, "admin_chg_proposed")),
+            (admin, new_admin, env.ledger().timestamp() + ADMIN_CHANGE_TIMELOCK_SECS),
+        );
+    }
+
+    /// Finalize a previously proposed admin key rotation (#565).
+    /// Only callable by the current admin after the 48-hour timelock has elapsed.
+    pub fn finalize_admin_change(env: Env, admin: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        let maybe_scheduled: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminChangeScheduledAt);
+        let scheduled_at = match maybe_scheduled {
+            Some(v) => v,
+            None => panic_with_error!(&env, InvoiceError::NoAdminChangeProposed),
+        };
+        let now = env.ledger().timestamp();
+        if now < scheduled_at + ADMIN_CHANGE_TIMELOCK_SECS {
+            panic_with_error!(&env, InvoiceError::AdminChangeTimelockNotExpired);
+        }
+        let maybe_new_admin: Option<Address> =
+            env.storage().instance().get(&DataKey::PendingAdmin);
+        let new_admin = match maybe_new_admin {
+            Some(v) => v,
+            None => panic_with_error!(&env, InvoiceError::NoAdminChangeProposed),
+        };
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::AdminChangeScheduledAt);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "admin_changed")),
+            (admin, new_admin, now),
+        );
+    }
+
+    /// Cancel a pending admin key rotation (#565).
+    /// Only callable by the current admin before the change is finalized.
+    pub fn cancel_admin_change(env: Env, admin: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        if !env.storage().instance().has(&DataKey::PendingAdmin) {
+            panic_with_error!(&env, InvoiceError::NoAdminChangeProposed);
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::AdminChangeScheduledAt);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "admin_chg_cancelled")),
+            admin,
+        );
+    }
+
     pub fn check_default_warning(env: Env, id: u64) -> bool {
         let invoice: Invoice = env
             .storage()
@@ -4053,5 +4159,91 @@ mod test {
         let (client, admin, _pool, _sme) = setup(&env);
         let valid_hash = BytesN::from_array(&env, &[1u8; 32]);
         client.propose_upgrade(&admin, &valid_hash);
+    }
+
+    // ── #565: admin key rotation timelock tests ───────────────────────────────
+
+    #[test]
+    fn test_propose_admin_change_stores_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _pool, _sme) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+    }
+
+    #[test]
+    fn test_finalize_admin_change_before_timelock_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _pool, _sme) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        // Try to finalize immediately — should fail
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::AdminChangeTimelockNotExpired.into()
+        );
+    }
+
+    #[test]
+    fn test_finalize_admin_change_after_timelock_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _pool, _sme) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        // Advance time past the 48-hour timelock
+        env.ledger()
+            .with_mut(|l| l.timestamp += ADMIN_CHANGE_TIMELOCK_SECS + 1);
+        client.finalize_admin_change(&admin);
+        // Verify that the new admin can now perform admin operations
+        let oracle = Address::generate(&env);
+        client.set_oracle(&new_admin, &oracle);
+    }
+
+    #[test]
+    fn test_cancel_admin_change_removes_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _pool, _sme) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        client.cancel_admin_change(&admin);
+        // After cancel, finalize should fail with NoAdminChangeProposed
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::NoAdminChangeProposed.into()
+        );
+    }
+
+    #[test]
+    fn test_finalize_without_proposal_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::NoAdminChangeProposed.into()
+        );
+    }
+
+    #[test]
+    fn test_cancel_without_proposal_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _sme) = setup(&env);
+        let result = client.try_cancel_admin_change(&admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::NoAdminChangeProposed.into()
+        );
     }
 }

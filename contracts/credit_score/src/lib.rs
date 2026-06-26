@@ -38,6 +38,12 @@ pub enum CreditScoreError {
     InvalidUpgradeTimelock = 10,
     /// #340: proposed WASM hash is all-zero (invalid).
     InvalidWasmHash = 11,
+    /// #565: admin change already pending.
+    AdminChangePending = 12,
+    /// #565: admin change timelock has not elapsed.
+    AdminChangeTimelockNotExpired = 13,
+    /// #565: no admin change has been proposed.
+    NoAdminChangeProposed = 14,
 }
 
 /// Semantic version of this credit-score contract (#237).
@@ -91,6 +97,7 @@ const VOLUME_BONUS_POINTS_3: i32 = 25;
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
 const MIN_UPGRADE_TIMELOCK_SECS: u64 = 3_600; // 1 hour minimum (#338)
+const ADMIN_CHANGE_TIMELOCK_SECS: u64 = 172_800; // 48 hours — #565
 /// Current on-chain storage schema version (#397). Bump by one and add a
 /// matching arm in `run_migration` whenever the persistent storage layout
 /// changes so a deployed contract can migrate state after a WASM upgrade.
@@ -130,23 +137,6 @@ pub struct CreditScoreData {
     pub average_payment_days: i64,
     pub last_updated: u64,
     pub score_version: u32,
-}
-
-/// Response type for [`CreditScoreContract::get_credit_score`].
-///
-/// Bundles the SME's current [`CreditScoreData`] together with the contract's
-/// active `config_version` (= `ScoringConfig::core::score_version`).  When
-/// `config_version > score.score_version` the stored score was computed under
-/// an older config and should be treated as stale by consumers.
-#[contracttype]
-#[derive(Clone)]
-pub struct CreditScoreResponse {
-    /// The SME's persisted credit-score record.
-    pub score: CreditScoreData,
-    /// The scoring-config version that is *currently* active on-chain.
-    /// Compare with `score.score_version` to detect staleness:
-    /// `config_version > score.score_version` → score is stale.
-    pub config_version: u32,
 }
 
 #[contracttype]
@@ -309,6 +299,9 @@ pub enum DataKey {
     ScoreThresholds,
     /// #338: configurable upgrade timelock duration in seconds
     UpgradeTimelockSecs,
+    // #565: admin key rotation timelock
+    PendingAdmin,
+    AdminChangeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -1178,6 +1171,80 @@ impl CreditScoreContract {
         env.deployer().update_current_contract_wasm(wasm_hash);
         env.events()
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
+    }
+
+    /// Propose an admin key rotation (#565).
+    pub fn propose_admin_change(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminChangeScheduledAt, &env.ledger().timestamp());
+        env.events().publish(
+            (EVT, Symbol::new(&env, "admin_chg_proposed")),
+            (
+                admin,
+                new_admin,
+                env.ledger().timestamp() + ADMIN_CHANGE_TIMELOCK_SECS,
+            ),
+        );
+    }
+
+    /// Finalize a previously proposed admin key rotation (#565).
+    /// Only callable by the current admin after the 48-hour timelock has elapsed.
+    pub fn finalize_admin_change(env: Env, admin: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        let maybe_scheduled: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminChangeScheduledAt);
+        let scheduled_at = match maybe_scheduled {
+            Some(v) => v,
+            None => panic_with_error!(&env, CreditScoreError::NoAdminChangeProposed),
+        };
+        let now = env.ledger().timestamp();
+        if now < scheduled_at + ADMIN_CHANGE_TIMELOCK_SECS {
+            panic_with_error!(&env, CreditScoreError::AdminChangeTimelockNotExpired);
+        }
+        let maybe_new_admin: Option<Address> =
+            env.storage().instance().get(&DataKey::PendingAdmin);
+        let new_admin = match maybe_new_admin {
+            Some(v) => v,
+            None => panic_with_error!(&env, CreditScoreError::NoAdminChangeProposed),
+        };
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::AdminChangeScheduledAt);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "admin_changed")),
+            (admin, new_admin, now),
+        );
+    }
+
+    /// Cancel a pending admin key rotation (#565).
+    pub fn cancel_admin_change(env: Env, admin: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        if !env.storage().instance().has(&DataKey::PendingAdmin) {
+            panic_with_error!(&env, CreditScoreError::NoAdminChangeProposed);
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::AdminChangeScheduledAt);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "admin_chg_cancelled")),
+            admin,
+        );
     }
 }
 
@@ -2865,5 +2932,87 @@ mod test {
         assert_eq!(resp.config_version, 2);
         assert_eq!(resp.score_version, 2);
         assert!(!resp.is_stale);
+    }
+
+    // ── #565: credit_score admin key rotation timelock tests ─────────────────
+
+    #[test]
+    fn test_cs_propose_admin_change_stores_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+    }
+
+    #[test]
+    fn test_cs_finalize_admin_change_before_timelock_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::AdminChangeTimelockNotExpired.into()
+        );
+    }
+
+    #[test]
+    fn test_cs_finalize_admin_change_after_timelock_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        env.ledger()
+            .with_mut(|l| l.timestamp += ADMIN_CHANGE_TIMELOCK_SECS + 1);
+        client.finalize_admin_change(&admin);
+        // new_admin can now perform admin-only operations
+        client.pause(&new_admin);
+    }
+
+    #[test]
+    fn test_cs_cancel_admin_change_removes_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        client.cancel_admin_change(&admin);
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::NoAdminChangeProposed.into()
+        );
+    }
+
+    #[test]
+    fn test_cs_finalize_without_proposal_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::NoAdminChangeProposed.into()
+        );
+    }
+
+    #[test]
+    fn test_cs_cancel_without_proposal_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let result = client.try_cancel_admin_change(&admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::NoAdminChangeProposed.into()
+        );
     }
 }

@@ -141,6 +141,10 @@ pub enum PoolError {
     InvalidWasmHash = 52,
     // #532: pool token balance insufficient to cover withdrawal
     InsufficientPoolFunds = 53,
+    // #565: admin key rotation timelock errors
+    AdminChangePending = 54,
+    AdminChangeTimelockNotExpired = 55,
+    NoAdminChangeProposed = 56,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -186,6 +190,7 @@ const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
 const MIN_UPGRADE_TIMELOCK_SECS: u64 = 3_600; // 1 hour minimum (#338)
+const ADMIN_CHANGE_TIMELOCK_SECS: u64 = 172_800; // 48 hours — #565
 /// Current on-chain storage schema version (#397). Bump by one and add a
 /// matching arm in `run_migration` whenever the persistent storage layout
 /// changes so a deployed contract can migrate state after a WASM upgrade.
@@ -439,6 +444,9 @@ pub enum DataKey {
     WithdrawalRequest(Address, u64), // (investor, request_id)
     /// #338: configurable upgrade timelock duration in seconds
     UpgradeTimelockSecs,
+    // #565: admin key rotation timelock
+    PendingAdmin,
+    AdminChangeScheduledAt,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -3766,6 +3774,94 @@ impl FundingPool {
         Ok(())
     }
 
+    /// Propose an admin key rotation (#565).
+    pub fn propose_admin_change(
+        env: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminChangeScheduledAt, &env.ledger().timestamp());
+        env.events().publish(
+            (EVT, Symbol::new(&env, "admin_chg_proposed")),
+            (
+                admin,
+                new_admin,
+                env.ledger().timestamp() + ADMIN_CHANGE_TIMELOCK_SECS,
+            ),
+        );
+        Ok(())
+    }
+
+    /// Finalize a previously proposed admin key rotation (#565).
+    /// Only callable by the current admin after the 48-hour timelock has elapsed.
+    pub fn finalize_admin_change(env: Env, admin: Address) -> Result<(), PoolError> {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        let maybe_scheduled: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminChangeScheduledAt);
+        let scheduled_at = match maybe_scheduled {
+            Some(v) => v,
+            None => return Err(PoolError::NoAdminChangeProposed),
+        };
+        let now = env.ledger().timestamp();
+        if now < scheduled_at + ADMIN_CHANGE_TIMELOCK_SECS {
+            return Err(PoolError::AdminChangeTimelockNotExpired);
+        }
+        let maybe_new_admin: Option<Address> =
+            env.storage().instance().get(&DataKey::PendingAdmin);
+        let new_admin = match maybe_new_admin {
+            Some(v) => v,
+            None => return Err(PoolError::NoAdminChangeProposed),
+        };
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.admin = new_admin.clone();
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::AdminChangeScheduledAt);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "admin_changed")),
+            (admin, new_admin, now),
+        );
+        Ok(())
+    }
+
+    /// Cancel a pending admin key rotation (#565).
+    pub fn cancel_admin_change(env: Env, admin: Address) -> Result<(), PoolError> {
+        admin.require_auth();
+        Self::require_not_paused(&env);
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if !env.storage().instance().has(&DataKey::PendingAdmin) {
+            return Err(PoolError::NoAdminChangeProposed);
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::AdminChangeScheduledAt);
+        env.events()
+            .publish((EVT, Symbol::new(&env, "admin_chg_cancelled")), admin);
+        Ok(())
+    }
+
     // ---- Internal utility methods ----
 
     /// ## Issue #321: Reentrancy Guard Implementation
@@ -6965,5 +7061,78 @@ mod test {
         let (client, admin, _usdc_id, _share_token) = setup(&env);
         let valid_hash = BytesN::from_array(&env, &[42u8; 32]);
         client.propose_upgrade(&admin, &valid_hash);
+    }
+
+    // ── #565: pool admin key rotation timelock tests ──────────────────────────
+
+    #[test]
+    fn test_pool_propose_admin_change_stores_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+    }
+
+    #[test]
+    fn test_pool_finalize_admin_change_before_timelock_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(result, Err(Ok(PoolError::AdminChangeTimelockNotExpired)));
+    }
+
+    #[test]
+    fn test_pool_finalize_admin_change_after_timelock_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        env.ledger()
+            .with_mut(|l| l.timestamp += ADMIN_CHANGE_TIMELOCK_SECS + 1);
+        client.finalize_admin_change(&admin);
+        // New admin should now be able to perform admin operations
+        let result = client.try_pause(&admin);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
+        client.pause(&new_admin);
+    }
+
+    #[test]
+    fn test_pool_cancel_admin_change_removes_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let new_admin = Address::generate(&env);
+        client.propose_admin_change(&admin, &new_admin);
+        client.cancel_admin_change(&admin);
+        // After cancel, finalize should fail with NoAdminChangeProposed
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(result, Err(Ok(PoolError::NoAdminChangeProposed)));
+    }
+
+    #[test]
+    fn test_pool_finalize_without_proposal_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let result = client.try_finalize_admin_change(&admin);
+        assert_eq!(result, Err(Ok(PoolError::NoAdminChangeProposed)));
+    }
+
+    #[test]
+    fn test_pool_cancel_without_proposal_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let result = client.try_cancel_admin_change(&admin);
+        assert_eq!(result, Err(Ok(PoolError::NoAdminChangeProposed)));
     }
 }
