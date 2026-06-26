@@ -87,6 +87,10 @@ const VOLUME_BONUS_THRESHOLD_3: i128 = 100_000_000_000;
 const VOLUME_BONUS_POINTS_1: i32 = 5;
 const VOLUME_BONUS_POINTS_2: i32 = 15;
 const VOLUME_BONUS_POINTS_3: i32 = 25;
+/// #568: minimum payment amount for an invoice to count toward milestone
+/// bonuses. Default = $100 USDC at 6 decimals. Blocks micro-invoice cycling
+/// (1-stroop invoices) from farming the +5pt milestone awards at 5/10/20.
+const DEFAULT_MIN_MILESTONE_VOLUME: i128 = 100_000_000;
 
 const LATE_PAYMENT_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
@@ -185,6 +189,10 @@ pub struct ScoreBonusConfig {
     pub vol_bonus_pts1: i32,
     pub vol_bonus_pts2: i32,
     pub vol_bonus_pts3: i32,
+    /// #568: Minimum invoice amount that contributes to milestone counters.
+    /// Invoices below this threshold still update total counts/volume but do
+    /// not increment the milestone counter used for inv_bonus_thr1/2/3.
+    pub min_milestone_volume: i128,
 }
 
 #[contracttype]
@@ -226,6 +234,7 @@ impl ScoringConfig {
                 vol_bonus_pts1: VOLUME_BONUS_POINTS_1,
                 vol_bonus_pts2: VOLUME_BONUS_POINTS_2,
                 vol_bonus_pts3: VOLUME_BONUS_POINTS_3,
+                min_milestone_volume: DEFAULT_MIN_MILESTONE_VOLUME,
             },
         }
     }
@@ -309,6 +318,10 @@ pub enum DataKey {
     ScoreThresholds,
     /// #338: configurable upgrade timelock duration in seconds
     UpgradeTimelockSecs,
+    /// #568: Count of invoices per SME with amount >= min_milestone_volume,
+    /// excluding defaults. Used as the input to milestone bonus thresholds so
+    /// that micro-invoice cycling cannot inflate the score.
+    MilestoneCount(Address),
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -367,6 +380,9 @@ fn calculate_score_with_config(
     defaulted: u32,
     total_volume: i128,
     average_payment_days: i64,
+    // #568: number of paid invoices >= min_milestone_volume. Drives the
+    // 5/10/20-invoice milestone bonuses so micro-invoices don't qualify.
+    milestone_count: u32,
 ) -> u32 {
     if total_invoices == 0 {
         return MIN_SCORE;
@@ -405,13 +421,15 @@ fn calculate_score_with_config(
     score += (paid_late as i32 * config.core.paid_late_pts) as i64;
     score += (defaulted as i32 * config.core.defaulted_pts) as i64;
 
-    if total_invoices >= config.bonuses.inv_bonus_thr1 {
+    // #568: gate milestone bonuses on the milestone_count (only invoices >=
+    // min_milestone_volume) so that micro-invoice cycling cannot farm them.
+    if milestone_count >= config.bonuses.inv_bonus_thr1 {
         score += config.bonuses.inv_bonus_pts as i64;
     }
-    if total_invoices >= config.bonuses.inv_bonus_thr2 {
+    if milestone_count >= config.bonuses.inv_bonus_thr2 {
         score += config.bonuses.inv_bonus_pts as i64;
     }
-    if total_invoices >= config.bonuses.inv_bonus_thr3 {
+    if milestone_count >= config.bonuses.inv_bonus_thr3 {
         score += config.bonuses.inv_bonus_pts as i64;
     }
 
@@ -455,6 +473,9 @@ fn calculate_score(
     average_payment_days: i64,
 ) -> u32 {
     let config = load_scoring_config(env);
+    // Test helper: assume every non-default invoice was milestone-eligible
+    // so historical fuzz cases keep their original semantics.
+    let milestone_count = paid_on_time + paid_late;
     calculate_score_with_config(
         env,
         &config,
@@ -465,6 +486,7 @@ fn calculate_score(
         defaulted,
         total_volume,
         average_payment_days,
+        milestone_count,
     )
 }
 
@@ -631,6 +653,23 @@ impl CreditScoreContract {
 
         credit_data.total_invoices += 1;
         credit_data.total_volume += record.amount;
+
+        // #568: only successful payments above the minimum milestone volume
+        // contribute to milestone counts. Defaults are excluded because they
+        // reflect failure, not economic activity.
+        let mut milestone_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MilestoneCount(sme.clone()))
+            .unwrap_or(0);
+        if record.status != PaymentStatus::Defaulted
+            && record.amount >= scoring_config.bonuses.min_milestone_volume
+        {
+            milestone_count += 1;
+            env.storage()
+                .persistent()
+                .set(&DataKey::MilestoneCount(sme.clone()), &milestone_count);
+        }
         // Only paid (on-time + late) invoices contribute to the average; defaults are excluded.
         // Running sum = previous_average * previous_paid_count + new_days_late
         let days_late = record.days_late;
@@ -651,6 +690,7 @@ impl CreditScoreContract {
             credit_data.defaulted,
             credit_data.total_volume,
             credit_data.average_payment_days,
+            milestone_count,
         );
         credit_data.score_version = scoring_config.core.score_version;
         credit_data.last_updated = env.ledger().timestamp();
