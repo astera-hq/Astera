@@ -7,6 +7,7 @@ use soroban_sdk::{
 };
 
 const EVT: Symbol = symbol_short!("gov");
+const MIN_VOTING_PERIOD_SECS: u64 = 86_400;
 const DEFAULT_VOTING_PERIOD_SECS: u64 = 7 * 86_400;
 const DEFAULT_EXECUTION_DELAY_SECS: u64 = 48 * 3_600;
 const DEFAULT_QUORUM_BPS: u32 = 1_000;
@@ -151,6 +152,9 @@ impl Governance {
         }
         if pass_bps <= 5_000 || pass_bps > 10_000 {
             panic!("invalid threshold");
+        }
+        if voting_period_secs > 0 && voting_period_secs < MIN_VOTING_PERIOD_SECS {
+            panic!("voting period too short");
         }
 
         let config = GovernanceConfig {
