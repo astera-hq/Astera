@@ -23,23 +23,30 @@ export default function PipelineColumn({ title, rows }: Props) {
       </div>
 
       <div className="space-y-3">
-        {rows.map((row) => (
-          <Link
-            key={row.invoice.id}
-            href={`/invoice/${row.invoice.id}`}
-            className="block rounded-xl border border-brand-border bg-brand-dark p-3 transition-colors hover:border-brand-gold/50"
-          >
-            <p className="text-xs text-brand-muted">#{row.invoice.id}</p>
-            <p className="mt-1 line-clamp-1 text-sm font-medium text-white">{row.metadata.name}</p>
-            <p className="mt-1 line-clamp-1 text-xs text-brand-muted">{row.metadata.debtor}</p>
-            <div className="mt-2 flex items-center justify-between gap-2 text-xs">
-              <span className="font-medium text-brand-gold">{formatUSDC(row.metadata.amount)}</span>
-              <span className="text-brand-muted">{formatDate(row.metadata.dueDate)}</span>
-            </div>
-          </Link>
-        ))}
+        {rows.length === 0 ? (
+          <div className="text-brand-muted text-sm text-center py-8">No invoices</div>
+        ) : (
+          rows.map((row) => (
+            <Link
+              key={row.invoice.id}
+              href={`/invoice/${row.invoice.id}`}
+              className="block rounded-xl border border-brand-border bg-brand-dark p-3 transition-colors hover:border-brand-gold/50"
+            >
+              <p className="text-xs text-brand-muted">#{row.invoice.id}</p>
+              <p className="mt-1 line-clamp-1 text-sm font-medium text-white">
+                {row.metadata.name}
+              </p>
+              <p className="mt-1 line-clamp-1 text-xs text-brand-muted">{row.metadata.debtor}</p>
+              <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+                <span className="font-medium text-brand-gold">
+                  {formatUSDC(row.metadata.amount)}
+                </span>
+                <span className="text-brand-muted">{formatDate(row.metadata.dueDate)}</span>
+              </div>
+            </Link>
+          ))
+        )}
       </div>
     </section>
   );
 }
-

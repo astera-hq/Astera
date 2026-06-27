@@ -351,9 +351,9 @@ export function truncateAddress(addr: string): string {
 // ---- Stellar Explorer Deep Links (#228) ----
 
 export type ExplorerEntity = 'account' | 'transaction' | 'contract' | 'ledger';
-export type StellarNetwork = 'testnet' | 'mainnet';
+export type StellarNetwork = 'testnet' | 'mainnet' | 'standalone';
 
-const EXPLORER_BASES: Record<StellarNetwork, string> = {
+const EXPLORER_BASES: Record<Exclude<StellarNetwork, 'standalone'>, string> = {
   testnet: 'https://stellar.expert/explorer/testnet',
   mainnet: 'https://stellar.expert/explorer/public',
 };
@@ -370,7 +370,8 @@ export function explorerUrl(
   id: string,
   network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ??
     'testnet',
-): string {
+): string | null {
+  if (network === 'standalone') return null;
   const base = EXPLORER_BASES[network] ?? EXPLORER_BASES.testnet;
   return `${base}/${type}/${encodeURIComponent(id)}`;
 }

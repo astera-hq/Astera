@@ -28,17 +28,22 @@ interface ExplorerLinkProps {
   className?: string;
 }
 
-export function ExplorerLink({
-  type,
-  id,
-  network,
-  children,
-  className = '',
-}: ExplorerLinkProps) {
+export function ExplorerLink({ type, id, network, children, className = '' }: ExplorerLinkProps) {
   if (!id) return null;
 
   const url = explorerUrl(type, id, network);
   const label = children ?? truncateAddress(id);
+
+  if (url === null) {
+    return (
+      <span
+        title={id}
+        className={`inline-flex items-center gap-1 font-mono text-xs text-blue-400 ${className}`}
+      >
+        {label}
+      </span>
+    );
+  }
 
   return (
     <a

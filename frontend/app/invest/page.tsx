@@ -134,6 +134,12 @@ export default function InvestPage() {
     mode === 'deposit' && tokenDepositCap > 0n && tokenTotals
       ? tokenTotals.totalDeposited >= tokenDepositCap
       : false;
+  const depositExceedsCap =
+    mode === 'deposit' &&
+    tokenDepositCap > 0n &&
+    remainingTokenCapacity !== null &&
+    amount !== '' &&
+    toStroops(parseFloat(amount)) > remainingTokenCapacity;
 
   async function submitTransaction() {
     if (!wallet.address || !amount || !selectedToken) return;
@@ -329,6 +335,37 @@ export default function InvestPage() {
                         })}
                       </p>
                     )}
+                    {mode === 'deposit' && tokenDepositCap > 0n && tokenTotals && (
+                      <div className="mt-3">
+                        <div className="flex justify-between text-xs text-brand-muted mb-1">
+                          <span>Pool capacity</span>
+                          <span>
+                            {formatUSDC(tokenTotals.totalDeposited)} / {formatUSDC(tokenDepositCap)}
+                          </span>
+                        </div>
+                        <div className="h-2 bg-brand-border rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-brand-gold rounded-full transition-all"
+                            style={{
+                              width: `${Math.min(100, Number((tokenTotals.totalDeposited * 10000n) / tokenDepositCap) / 100)}%`,
+                            }}
+                          />
+                        </div>
+                        {amount && remainingTokenCapacity !== null && (
+                          <p
+                            className={`mt-1 text-xs ${
+                              toStroops(parseFloat(amount || '0')) > remainingTokenCapacity
+                                ? 'text-red-400'
+                                : 'text-brand-muted'
+                            }`}
+                          >
+                            {toStroops(parseFloat(amount || '0')) > remainingTokenCapacity
+                              ? `Exceeds remaining capacity of ${formatUSDC(remainingTokenCapacity)}`
+                              : `${formatUSDC(remainingTokenCapacity)} remaining`}
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {txStatus !== 'idle' && (
@@ -366,7 +403,8 @@ export default function InvestPage() {
                       !amount ||
                       !selectedToken ||
                       (mode === 'deposit' && kycRequired && !kycApproved) ||
-                      depositAtCapacity
+                      depositAtCapacity ||
+                      depositExceedsCap
                     }
                     className="w-full py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 capitalize"
                   >
