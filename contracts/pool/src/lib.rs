@@ -485,7 +485,7 @@ fn require_not_paused(env: &Env) {
         .get::<DataKey, bool>(&DataKey::Paused)
         .unwrap_or(false)
     {
-        panic!("contract is paused");
+        panic_with_error!(env, PoolError::ContractPaused);
     }
 }
 
@@ -837,6 +837,7 @@ fn fund_invoice_request(
         .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
     set_funded_invoice_ttl(env, request.invoice_id, false);
 
+    let prev_deployed = tt.total_deployed;
     tt.total_deployed = tt
         .total_deployed
         .checked_add(request.principal)
@@ -856,9 +857,21 @@ fn fund_invoice_request(
             env.storage().instance().set(&token_totals_key, &tt);
             return Err(PoolError::UtilizationLimitExceeded);
         }
-        if utilization > config.utilization_warning_bps {
+        // #653: emit a utilization warning only when this funding *crosses* the
+        // warning threshold — i.e. utilization was below the threshold before
+        // this deployment and is at or above it now. Funding only ever raises
+        // utilization, so this edge-triggered check means the warning is not
+        // re-emitted on subsequent funding calls while already above the
+        // threshold; it fires again only after utilization drops below (via a
+        // repayment or fresh deposit) and crosses once more. Off-chain monitors
+        // get one alert per crossing instead of one per funding call.
+        let prev_utilization =
+            ((prev_deployed as u128 * 10_000u128) / tt.pool_value as u128) as u32;
+        if utilization >= config.utilization_warning_bps
+            && prev_utilization < config.utilization_warning_bps
+        {
             env.events().publish(
-                (EVT, symbol_short!("high_util")),
+                (EVT, symbol_short!("util_warn")),
                 (request.token.clone(), utilization),
             );
         }
@@ -5839,7 +5852,7 @@ mod test {
     // --- Pause mechanism tests ---
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_fund_invoice_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5861,7 +5874,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_repay_invoice_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5886,7 +5899,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_deposit_collateral_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5932,7 +5945,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_deposit_blocked_when_paused() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5945,7 +5958,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_withdraw_blocked_when_paused() {
         let env = Env::default();
         env.mock_all_auths();
@@ -6066,7 +6079,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_deposit_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -6079,7 +6092,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
+    #[should_panic(expected = "Error(Contract, #12)")]
     fn test_withdraw_when_paused_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -6326,6 +6339,68 @@ mod test {
         let attacker = Address::generate(&env);
         let result = client.try_set_max_utilization(&attacker, &5_000u32);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_util_warn_emitted_only_on_threshold_crossing() {
+        // #653: the util_warn event is edge-triggered — emitted once when a
+        // funding call pushes utilization across the warning threshold (default
+        // 80%), and not re-emitted on further funding while utilization stays
+        // above it.
+        use soroban_sdk::testutils::Events;
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (EVT, symbol_short!("util_warn")).into_val(&env);
+        // env.events().all() returns the events from the most recent invocation,
+        // so checking it right after each call tells us whether *that* funding
+        // emitted the warning.
+        let warns_in_last_call = |env: &Env| {
+            env.events()
+                .all()
+                .iter()
+                .filter(|e| e.1 == expected_topics)
+                .count()
+        };
+
+        // Fund 7000 (70%) — below the warning threshold, no event.
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &7_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        assert_eq!(warns_in_last_call(&env), 0);
+
+        // Fund 1000 more → 80%, crossing the threshold — exactly one warning.
+        client.fund_invoice(
+            &admin,
+            &2u64,
+            &1_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        assert_eq!(warns_in_last_call(&env), 1);
+
+        // Fund 500 more → 85%, still above the threshold — no re-emission.
+        client.fund_invoice(
+            &admin,
+            &3u64,
+            &500i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        assert_eq!(warns_in_last_call(&env), 0);
     }
 
     // ---- Issue #411: Share minting uses exchange rate ----

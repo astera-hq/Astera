@@ -501,7 +501,7 @@ fn load_invoice(env: &Env, id: u64) -> Invoice {
     env.storage()
         .persistent()
         .get(&DataKey::Invoice(id))
-        .expect("invoice not found")
+        .unwrap_or_else(|| panic_with_error!(env, InvoiceError::InvoiceNotFound))
 }
 
 fn checked_default_deadline(env: &Env, due_date: u64, grace_period_days: u32) -> u64 {
@@ -2145,11 +2145,7 @@ impl InvoiceContract {
                 days, MAX_GRACE_PERIOD_OVERRIDE_DAYS
             );
         }
-        let mut invoice: Invoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+        let mut invoice: Invoice = load_invoice(&env, id);
         if invoice.status != InvoiceStatus::Funded {
             panic!("grace period override only allowed on Funded invoices");
         }
@@ -3464,6 +3460,24 @@ mod test {
         // Exactly 90 days must be accepted (same cap as set_grace_period)
         client.set_invoice_grace_period(&admin, &1u64, &90u32);
         assert_eq!(client.get_invoice_grace_period(&1u64), 90);
+    }
+
+    #[test]
+    fn test_set_invoice_grace_period_missing_invoice_returns_typed_error() {
+        // #644: a non-existent invoice id must surface the typed
+        // InvoiceError::InvoiceNotFound rather than a raw "invoice not found"
+        // string panic, so clients can match on the error code.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _pool, _owner) = setup_funded_invoice(&env);
+        let result = client.try_set_invoice_grace_period(&admin, &999u64, &14u32);
+        // set_invoice_grace_period panics via panic_with_error!, so the generated
+        // try_ client surfaces the raw soroban Error code rather than the typed
+        // enum — compare against the converted InvoiceError.
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceError::InvoiceNotFound.into()
+        );
     }
 
     #[test]

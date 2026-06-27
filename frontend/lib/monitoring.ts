@@ -163,8 +163,8 @@ class ContractMonitor {
         // schema: (invoice_id, principal, interest, timestamp)
         const [id, principal] = value;
         amount = BigInt(principal);
-      } else if (eventType === 'high_util') {
-        // schema: (token, utilization_bps, timestamp)
+      } else if (eventType === 'util_warn') {
+        // schema: (token, utilization_bps)
         const [token, utilizationBps] = value;
         const pct = Math.round(Number(utilizationBps) / 100);
         await notificationService.send({
