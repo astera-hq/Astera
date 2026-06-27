@@ -145,6 +145,8 @@ pub enum PoolError {
     AdminChangePending = 54,
     AdminChangeTimelockNotExpired = 55,
     NoAdminChangeProposed = 56,
+    // #655: estimate_repayment rejects an as_of_timestamp earlier than now
+    TimestampInPast = 57,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -3398,7 +3400,11 @@ impl FundingPool {
         })
     }
 
-    pub fn estimate_repayment(env: Env, invoice_id: u64) -> Result<i128, PoolError> {
+    pub fn estimate_repayment(
+        env: Env,
+        invoice_id: u64,
+        as_of_timestamp: Option<u64>,
+    ) -> Result<i128, PoolError> {
         bump_instance(&env);
         let config: PoolConfig = env
             .storage()
@@ -3414,8 +3420,19 @@ impl FundingPool {
             return Ok(record.principal);
         }
 
+        // #655: allow callers to simulate a future repayment; reject past timestamps
+        // so this view never reports less interest than is currently owed.
         let now = env.ledger().timestamp();
-        let (_interest, total_due) = calculate_total_due(&record, &config, now)?;
+        let as_of = match as_of_timestamp {
+            Some(ts) => {
+                if ts < now {
+                    return Err(PoolError::TimestampInPast);
+                }
+                ts
+            }
+            None => now,
+        };
+        let (_interest, total_due) = calculate_total_due(&record, &config, as_of)?;
         // Return remaining amount due (total - already repaid)
         let remaining = total_due - record.repaid_amount;
         if remaining < 0 {
@@ -4237,7 +4254,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 100_000);
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         let tt = client.get_token_totals(&usdc_id);
@@ -4274,7 +4291,7 @@ mod test {
         env.ledger().with_mut(|l| l.timestamp += SECS_PER_YEAR);
 
         let expected_interest: i128 = 1_000;
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64, &None);
         assert_eq!(total_due, principal + expected_interest);
 
         client.repay_invoice(&1u64, &sme, &total_due);
@@ -4319,7 +4336,7 @@ mod test {
         let expected_interest = 6_575_342i128;
         let expected_total_due = principal + expected_interest as i128 + expected_fee;
 
-        assert_eq!(client.estimate_repayment(&1u64), expected_total_due);
+        assert_eq!(client.estimate_repayment(&1u64, &None), expected_total_due);
 
         client.repay_invoice(&1u64, &sme, &expected_total_due);
 
@@ -4356,7 +4373,7 @@ mod test {
 
         env.ledger().with_mut(|l| l.timestamp += 90_000);
 
-        assert_eq!(client.estimate_repayment(&1u64), 1_000_228_313);
+        assert_eq!(client.estimate_repayment(&1u64, &None), 1_000_228_313);
     }
 
     #[test]
@@ -4744,7 +4761,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
         // Second repay must return AlreadyFullyRepaid
         let result = client.try_repay_invoice(&1u64, &sme, &amount_due);
@@ -5177,7 +5194,7 @@ mod test {
 
         let sme_balance_before = token::Client::new(&env, &usdc_id).balance(&sme);
 
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         let sme_balance_after = token::Client::new(&env, &usdc_id).balance(&sme);
@@ -5219,7 +5236,7 @@ mod test {
             &usdc_id,
         );
 
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         // Record must still be queryable after settlement (TTL was extended)
@@ -5281,11 +5298,11 @@ mod test {
 
         env.ledger()
             .with_mut(|l| l.timestamp = initial_due_date + (5 * SECS_PER_DAY));
-        let capped_amount = client.estimate_repayment(&1u64);
+        let capped_amount = client.estimate_repayment(&1u64, &None);
 
         let extended_due_date = initial_due_date + (10 * SECS_PER_DAY);
         client.update_invoice_due_date(&invoice_contract, &1u64, &extended_due_date);
-        let extended_amount = client.estimate_repayment(&1u64);
+        let extended_amount = client.estimate_repayment(&1u64, &None);
 
         assert!(extended_amount > capped_amount);
     }
@@ -5360,7 +5377,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         // Trying to seize after repayment must return AlreadyFullyRepaid
@@ -5669,7 +5686,7 @@ mod test {
 
         let mut repayments = Vec::new(&env);
         for invoice_id in 1u64..=3u64 {
-            let amount = client.estimate_repayment(&invoice_id);
+            let amount = client.estimate_repayment(&invoice_id, &None);
             repayments.push_back(RepaymentRequest { invoice_id, amount });
         }
         client.repay_invoices_batch(&sme, &repayments);
@@ -5842,7 +5859,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
         let attacker = Address::generate(&env);
         let result = client.try_cleanup_funded_invoice(&attacker, &1u64);
@@ -5894,7 +5911,7 @@ mod test {
             &usdc_id,
         );
         client.pause(&admin);
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
     }
 
@@ -5938,7 +5955,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
         let fi = client.get_funded_invoice(&1u64).unwrap();
         assert!(fi.repaid_amount >= amount_due);
@@ -6142,7 +6159,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 10_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64, &None);
         let half = total_due / 2;
 
         // First partial payment
@@ -6155,7 +6172,7 @@ mod test {
         assert_eq!(tt.total_deployed, 5_000i128);
 
         // Second payment clears the rest
-        let remaining = client.estimate_repayment(&1u64);
+        let remaining = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &remaining);
 
         let fi2 = client.get_funded_invoice(&1u64).unwrap();
@@ -6188,7 +6205,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64, &None);
 
         // Partial payment — less than total
         client.repay_invoice(&1u64, &sme, &(total_due / 3));
@@ -6222,7 +6239,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64, &None);
 
         // Attempt to pay more than due
         let result = client.try_repay_invoice(&1u64, &sme, &(total_due + 1));
@@ -6251,7 +6268,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &total_due);
 
         // Second full repayment must be rejected
@@ -6430,7 +6447,7 @@ mod test {
         mint(&env, &usdc_id, &sme, 500);
         client.fund_invoice(&admin, &1u64, &500, &sme, &due_date, &usdc_id);
         env.ledger().with_mut(|l| l.timestamp += 1_000_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &total_due);
 
         let tt = client.get_token_totals(&usdc_id);
@@ -6752,7 +6769,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
 
         env.as_contract(&client.address, || {
             env.storage()
@@ -6782,7 +6799,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
 
         client.repay_invoice(&1u64, &sme, &amount_due);
 
@@ -6832,7 +6849,7 @@ mod test {
             &usdc_id,
         );
         env.ledger().with_mut(|l| l.timestamp += 100_000);
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         // claim_yield should succeed — guard acquired and released correctly
@@ -6926,7 +6943,7 @@ mod test {
             &(env.ledger().timestamp() + 86400),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         // cleanup_funded_invoice should succeed — guard acquired and released
