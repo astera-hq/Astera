@@ -22,6 +22,15 @@ async function main() {
     process.exit(1);
   }
 
+  // Validate the key format up front so a malformed key fails fast at startup
+  // instead of producing a cryptic error at the first signing attempt.
+  if (!/^S[A-Z2-7]{55}$/.test(config.oracleSecretKey)) {
+    console.error(
+      'Error: ORACLE_SECRET_KEY is not a valid Stellar secret key (must start with "S" and be 56 characters).'
+    );
+    process.exit(1);
+  }
+
   if (!config.invoiceContractId) {
     console.error('Error: INVOICE_CONTRACT_ID is not set.');
     process.exit(1);
