@@ -40,6 +40,19 @@ function makeMeta(overrides: Partial<InvoiceMetadata> = {}): InvoiceMetadata {
   };
 }
 
+function statusLabelFor(status: string): string {
+  const labels: Record<string, string> = {
+    Pending: 'Pending',
+    Funded: 'Funded',
+    Paid: 'Paid',
+    Defaulted: 'Defaulted',
+    Expired: 'Expired',
+    Disputed: 'Disputed',
+    Cancelled: 'Cancelled',
+  };
+  return labels[status] ?? status;
+}
+
 describe('InvoiceCard', () => {
   it('renders invoice name, debtor, symbol, and ID', () => {
     render(<InvoiceCard id={7} metadata={makeMeta()} />);
@@ -61,17 +74,20 @@ describe('InvoiceCard', () => {
 
   it('uses theme-aware Tailwind status classes for each invoice status', () => {
     const expectedClasses: Record<string, string[]> = {
-      Pending: ['text-yellow-700', 'dark:text-yellow-400'],
+      Pending: ['text-slate-700', 'dark:text-slate-400'],
       Funded: ['text-blue-700', 'dark:text-blue-400'],
       Paid: ['text-green-700', 'dark:text-green-400'],
       Defaulted: ['text-red-700', 'dark:text-red-400'],
+      Expired: ['text-orange-700', 'dark:text-orange-400'],
+      Disputed: ['text-yellow-700', 'dark:text-yellow-400'],
+      Cancelled: ['text-slate-500', 'line-through'],
     };
 
     const { rerender } = render(<InvoiceCard id={1} metadata={makeMeta({ status: 'Pending' })} />);
 
     for (const [status, classes] of Object.entries(expectedClasses)) {
       rerender(<InvoiceCard id={1} metadata={makeMeta({ status: status as InvoiceStatus })} />);
-      expect(screen.getByText(status)).toHaveClass(...classes);
+      expect(screen.getByText(statusLabelFor(status))).toHaveClass(...classes);
     }
   });
 
