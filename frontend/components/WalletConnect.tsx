@@ -1,12 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useStore, getStoredWalletAddress } from '@/lib/store';
 import { getEnvConfig } from '@/lib/env';
 import { getFreighter } from '@/lib/freighter';
 import toast from 'react-hot-toast';
 import { truncateAddress } from '@/lib/stellar';
 import LoadingSpinner from '@/components/LoadingSpinner';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
 import { useTranslations } from 'next-intl';
 
 type WalletStep = 'idle' | 'detecting' | 'requesting-access' | 'fetching-address';
@@ -53,10 +55,12 @@ async function checkNetworkMismatch(): Promise<{
 
 export default function WalletConnect() {
   const t = useTranslations('Notifications.wallet');
+  const router = useRouter();
   const { wallet, setWallet, disconnect, setNetworkMismatch } = useStore();
   const [step, setStep] = useState<WalletStep>('idle');
   const [retryCount, setRetryCount] = useState(0);
   const [inlineError, setInlineError] = useState<string | null>(null);
+  const [disconnectModalOpen, setDisconnectModalOpen] = useState(false);
 
   const loading = step !== 'idle';
   const stepLabels: Record<WalletStep, string> = {
@@ -150,20 +154,39 @@ export default function WalletConnect() {
     connect(0);
   }
 
+  function handleConfirmDisconnect() {
+    setDisconnectModalOpen(false);
+    disconnect();
+    router.push('/');
+  }
+
   if (wallet.connected && wallet.address) {
     return (
-      <div className="flex items-center gap-3">
-        <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-800/50 text-green-400 text-sm">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-400" aria-hidden="true" />
-          <span>{truncateAddress(wallet.address)}</span>
+      <>
+        <div className="flex items-center gap-3">
+          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-800/50 text-green-400 text-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400" aria-hidden="true" />
+            <span>{truncateAddress(wallet.address)}</span>
+          </div>
+          <button
+            onClick={() => setDisconnectModalOpen(true)}
+            className="text-sm text-brand-muted hover:text-white transition-colors"
+          >
+            {t('disconnect')}
+          </button>
         </div>
-        <button
-          onClick={disconnect}
-          className="text-sm text-brand-muted hover:text-white transition-colors"
-        >
-          {t('disconnect')}
-        </button>
-      </div>
+
+        <ConfirmActionModal
+          title="Disconnect wallet?"
+          description="You will need to reconnect and re-authenticate."
+          confirmLabel="Disconnect"
+          cancelLabel="Keep connected"
+          variant="destructive"
+          isOpen={disconnectModalOpen}
+          onConfirm={handleConfirmDisconnect}
+          onCancel={() => setDisconnectModalOpen(false)}
+        />
+      </>
     );
   }
 

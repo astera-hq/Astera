@@ -17,7 +17,16 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
-import { getPoolConfig, getInvoiceCount, getMultipleInvoices } from '@/lib/contracts';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
+import {
+  getPoolConfig,
+  getInvoiceCount,
+  getMultipleInvoices,
+  isProtocolPaused,
+  buildPauseProtocolTx,
+  buildUnpauseProtocolTx,
+  submitTx,
+} from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 
@@ -38,16 +47,24 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 export default function AdminDashboardPage() {
-  const { poolConfig, setPoolConfig } = useStore();
+  const { poolConfig, setPoolConfig, wallet } = useStore();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [protocolPaused, setProtocolPaused] = useState(false);
+  const [pauseModalOpen, setPauseModalOpen] = useState(false);
+  const [pauseSubmitting, setPauseSubmitting] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [config, count] = await Promise.all([getPoolConfig(), getInvoiceCount()]);
+      const [config, count, paused] = await Promise.all([
+        getPoolConfig(),
+        getInvoiceCount(),
+        isProtocolPaused(),
+      ]);
       setPoolConfig(config);
+      setProtocolPaused(paused);
 
       const ids = Array.from({ length: count }, (_, i) => i + 1);
       const batches = await Promise.all(
@@ -63,6 +80,37 @@ export default function AdminDashboardPage() {
     }
   }, [setPoolConfig]);
 
+  async function handlePauseToggleConfirm() {
+    if (!wallet.address) return;
+
+    setPauseModalOpen(false);
+    setPauseSubmitting(true);
+
+    try {
+      const xdr = protocolPaused
+        ? await buildUnpauseProtocolTx(wallet.address)
+        : await buildPauseProtocolTx(wallet.address);
+
+      const freighter = await import('@stellar/freighter-api');
+      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+        networkPassphrase: 'Test SDF Network ; September 2015',
+        address: wallet.address,
+      });
+
+      if (signError) throw new Error(signError.message || 'Signing rejected.');
+
+      await submitTx(signedTxXdr);
+      toast.success(protocolPaused ? 'Protocol unpaused.' : 'Protocol paused.');
+      await loadData();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Failed to update protocol pause state.';
+      toast.error(message);
+      console.error(e);
+    } finally {
+      setPauseSubmitting(false);
+    }
+  }
+
   useEffect(() => {
     void loadData();
     const id = setInterval(() => void loadData(), REFRESH_INTERVAL_MS);
@@ -75,15 +123,10 @@ export default function AdminDashboardPage() {
     const nowSecs = Math.floor(Date.now() / 1000);
     const funded = invoices.filter((i) => i.status !== 'Pending');
     const active = invoices.filter((i) => i.status === 'Funded');
-    const overdue = invoices.filter(
-      (i) => i.status === 'Funded' && i.dueDate < nowSecs,
-    );
+    const overdue = invoices.filter((i) => i.status === 'Funded' && i.dueDate < nowSecs);
     const defaulted = invoices.filter((i) => i.status === 'Defaulted');
-    const defaulted30d = defaulted.filter(
-      (i) => nowSecs - (i.fundedAt ?? 0) <= THIRTY_DAYS_SECS,
-    );
-    const defaultRate =
-      funded.length > 0 ? (defaulted.length / funded.length) * 100 : 0;
+    const defaulted30d = defaulted.filter((i) => nowSecs - (i.fundedAt ?? 0) <= THIRTY_DAYS_SECS);
+    const defaultRate = funded.length > 0 ? (defaulted.length / funded.length) * 100 : 0;
 
     // Deployed = sum of funded active invoices
     const deployed = active.reduce((s, i) => s + BigInt(i.amount ?? 0), 0n);
@@ -96,9 +139,7 @@ export default function AdminDashboardPage() {
     // Investors: addresses with non-zero positions (approximated from invoice owners)
     const allOwners = new Set(invoices.map((i) => i.owner));
     const recentOwners = new Set(
-      invoices
-        .filter((i) => nowSecs - (i.createdAt ?? 0) <= SEVEN_DAYS_SECS)
-        .map((i) => i.owner),
+      invoices.filter((i) => nowSecs - (i.createdAt ?? 0) <= SEVEN_DAYS_SECS).map((i) => i.owner),
     );
 
     return {
@@ -138,7 +179,9 @@ export default function AdminDashboardPage() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
         <div>
           <h1 className="text-3xl font-bold mb-2">Protocol Dashboard</h1>
-          <p className="text-brand-muted text-sm">Real-time overview of the Astera liquidity pool.</p>
+          <p className="text-brand-muted text-sm">
+            Real-time overview of the Astera liquidity pool.
+          </p>
         </div>
         {lastRefreshed && (
           <p className="text-xs text-brand-muted">
@@ -227,7 +270,7 @@ export default function AdminDashboardPage() {
         <h2 className="text-xs font-bold mb-4 text-brand-muted uppercase tracking-widest">
           Quick Actions
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <ActionCard
             href="/admin/kyc"
             label="KYC Approvals"
@@ -254,7 +297,65 @@ export default function AdminDashboardPage() {
             description="View contract events and alerts"
           />
         </div>
+
+        <div
+          data-testid="protocol-pause-control"
+          className={`rounded-2xl border p-5 ${
+            protocolPaused ? 'border-red-500/40 bg-red-500/5' : 'border-brand-border bg-brand-card'
+          }`}
+        >
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="font-semibold text-white">Protocol Pause</h3>
+              <p className="text-sm text-brand-muted mt-1">
+                {protocolPaused
+                  ? 'The protocol is paused. State-changing operations are blocked.'
+                  : 'The protocol is active. Pause to halt all state-changing operations.'}
+              </p>
+              <p
+                data-testid="protocol-pause-status"
+                className={`text-xs font-medium mt-2 ${
+                  protocolPaused ? 'text-red-400' : 'text-green-400'
+                }`}
+              >
+                Status: {protocolPaused ? 'Paused' : 'Active'}
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="protocol-pause-toggle"
+              onClick={() => setPauseModalOpen(true)}
+              disabled={pauseSubmitting || !wallet.address}
+              className={`px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors disabled:opacity-50 ${
+                protocolPaused
+                  ? 'bg-green-600 hover:bg-green-500 text-white'
+                  : 'bg-red-600 hover:bg-red-500 text-white'
+              }`}
+            >
+              {pauseSubmitting
+                ? 'Updating...'
+                : protocolPaused
+                  ? 'Unpause Protocol'
+                  : 'Pause Protocol'}
+            </button>
+          </div>
+        </div>
       </section>
+
+      <ConfirmActionModal
+        title={protocolPaused ? 'Unpause protocol?' : 'Pause protocol?'}
+        description={
+          protocolPaused
+            ? 'This will resume all state-changing protocol operations.'
+            : 'This will halt all state-changing protocol operations until unpaused.'
+        }
+        confirmLabel={protocolPaused ? 'Unpause' : 'Pause'}
+        cancelLabel="Cancel"
+        variant={protocolPaused ? 'default' : 'destructive'}
+        isOpen={pauseModalOpen}
+        onConfirm={() => void handlePauseToggleConfirm()}
+        onCancel={() => setPauseModalOpen(false)}
+      />
     </div>
   );
 }
@@ -296,10 +397,10 @@ function StatCard({
           trend === 'primary'
             ? 'gradient-text'
             : trend === 'danger'
-            ? 'text-red-500'
-            : trend === 'success'
-            ? 'text-green-400'
-            : 'text-white'
+              ? 'text-red-500'
+              : trend === 'success'
+                ? 'text-green-400'
+                : 'text-white'
         }`}
       >
         {value}
