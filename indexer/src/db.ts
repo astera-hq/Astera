@@ -5,42 +5,57 @@
 import Database from 'better-sqlite3';
 import { IndexedEvent } from './parser';
 
+const MIGRATIONS = [
+  // v1: Initial schema
+  () => {
+    return `
+      CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        contract_id TEXT NOT NULL,
+        contract_type TEXT NOT NULL DEFAULT 'unknown',
+        event_type TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        value TEXT,
+        ledger_sequence INTEGER NOT NULL,
+        ledger_close_at TEXT NOT NULL,
+        tx_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_events_contract
+        ON events(contract_id);
+      CREATE INDEX IF NOT EXISTS idx_events_type
+        ON events(event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger
+        ON events(ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type
+        ON events(contract_type);
+    `;
+  },
+];
+
+function runMigrationsFrom(db: Database.Database, fromVersion: number): void {
+  const toVersion = MIGRATIONS.length;
+
+  for (let i = fromVersion; i < toVersion; i++) {
+    const migration = MIGRATIONS[i];
+    db.exec(migration());
+    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(i + 1);
+  }
+}
+
 export function initDb(dbPath: string): Database.Database {
   const db = new Database(dbPath);
 
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS events (
-      id TEXT PRIMARY KEY,
-      contract_id TEXT NOT NULL,
-      contract_type TEXT NOT NULL DEFAULT 'unknown',
-      event_type TEXT NOT NULL,
-      topic TEXT NOT NULL,
-      value TEXT,
-      ledger_sequence INTEGER NOT NULL,
-      ledger_close_at TEXT NOT NULL,
-      tx_hash TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    );
+  db.exec('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)');
 
-    CREATE INDEX IF NOT EXISTS idx_events_contract
-      ON events(contract_id);
-    CREATE INDEX IF NOT EXISTS idx_events_type
-      ON events(event_type);
-    CREATE INDEX IF NOT EXISTS idx_events_ledger
-      ON events(ledger_sequence);
-    CREATE INDEX IF NOT EXISTS idx_events_contract_type
-      ON events(contract_type);
-  `);
+  const versionRow = db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number | null } | undefined;
+  const currentVersion = versionRow?.v ?? 0;
 
-  // #700: migration for pre-existing deployments that lack contract_type.
-  const cols = db.prepare(`PRAGMA table_info(events)`).all() as Array<{ name: string }>;
-  if (!cols.some((c) => c.name === 'contract_type')) {
-    db.exec(`ALTER TABLE events ADD COLUMN contract_type TEXT NOT NULL DEFAULT 'unknown'`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_events_contract_type ON events(contract_type)`);
-  }
+  runMigrationsFrom(db, currentVersion);
 
   return db;
 }
