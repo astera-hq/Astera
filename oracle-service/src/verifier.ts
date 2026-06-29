@@ -1,6 +1,7 @@
 import { Keypair, TransactionBuilder } from '@stellar/stellar-sdk';
 import { AsteraClient } from '../../sdk/src/client'; // Direct import from source for local dev
 import { OracleConfig } from './types';
+import { retryWithBackoff } from './retry';
 
 export class Verifier {
   private client: AsteraClient;
@@ -22,8 +23,11 @@ export class Verifier {
     console.log(`[Verifier] Starting verification for invoice ${invoiceId}...`);
 
     try {
-      // 1. Fetch invoice details
-      const invoice = await this.client.invoice.get(invoiceId);
+      // 1. Fetch invoice details (with retry)
+      const invoice = await retryWithBackoff(
+        () => this.client.invoice.get(invoiceId),
+        `invoice.get(${invoiceId})`,
+      );
       console.log(`[Verifier] Invoice ${invoiceId} data:`, invoice);
 
       // 2. Fetch and verify metadata if exists
@@ -47,20 +51,24 @@ export class Verifier {
       console.log(`[Verifier] Running verification logic for hash: ${invoice.verification_hash}...`);
       await new Promise(resolve => setTimeout(resolve, this.config.autoVerifyDelayMs));
 
-      // 4. Submit verification to contract with approved status
+      // 4. Submit verification to contract with approved status (with retry)
       console.log(`[Verifier] Submitting verification for invoice ${invoiceId}...`);
-      const txHash = await this.client.invoice.verify({
-        signer: async (xdr) => {
-          const tx = TransactionBuilder.fromXDR(xdr, this.config.networkPassphrase);
-          tx.sign(this.oracleKeypair);
-          return tx.toXDR();
-        },
-        oracle: this.oracleKeypair.publicKey(),
-        id: invoiceId,
-        approved: true,
-        reason: 'Auto-verified by Reference Oracle Service',
-        oracleHash: invoice.verification_hash || '',
-      });
+      const txHash = await retryWithBackoff(
+        () =>
+          this.client.invoice.verify({
+            signer: async (xdr) => {
+              const tx = TransactionBuilder.fromXDR(xdr, this.config.networkPassphrase);
+              tx.sign(this.oracleKeypair);
+              return tx.toXDR();
+            },
+            oracle: this.oracleKeypair.publicKey(),
+            id: invoiceId,
+            approved: true,
+            reason: 'Auto-verified by Reference Oracle Service',
+            oracleHash: invoice.verification_hash || '',
+          }),
+        `invoice.verify(${invoiceId})`,
+      );
 
       console.log(`[Verifier] Invoice ${invoiceId} verified successfully. Tx Hash: ${txHash}`);
     } catch (error) {
@@ -87,18 +95,22 @@ export class Verifier {
   private async markDisputedOnChain(invoiceId: bigint, reason: string): Promise<void> {
     try {
       console.log(`[Verifier] Marking invoice ${invoiceId} as disputed: ${reason}`);
-      const txHash = await this.client.invoice.verify({
-        signer: async (xdr) => {
-          const tx = TransactionBuilder.fromXDR(xdr, this.config.networkPassphrase);
-          tx.sign(this.oracleKeypair);
-          return tx.toXDR();
-        },
-        oracle: this.oracleKeypair.publicKey(),
-        id: invoiceId,
-        approved: false,
-        reason,
-        oracleHash: '',
-      });
+      const txHash = await retryWithBackoff(
+        () =>
+          this.client.invoice.verify({
+            signer: async (xdr) => {
+              const tx = TransactionBuilder.fromXDR(xdr, this.config.networkPassphrase);
+              tx.sign(this.oracleKeypair);
+              return tx.toXDR();
+            },
+            oracle: this.oracleKeypair.publicKey(),
+            id: invoiceId,
+            approved: false,
+            reason,
+            oracleHash: '',
+          }),
+        `invoice.verify(dispute:${invoiceId})`,
+      );
       console.log(`[Verifier] Invoice ${invoiceId} marked as disputed. Tx Hash: ${txHash}`);
     } catch (error) {
       console.error(`[Verifier] Failed to mark invoice ${invoiceId} as disputed:`, error);
