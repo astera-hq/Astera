@@ -97,6 +97,7 @@ pub enum InvoiceStatus {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum InvoiceError {
+    AlreadyInitialized = 0,
     Unauthorized = 1,
     InvalidStatusTransition = 2,
     InvoiceNotFound = 3,
@@ -565,7 +566,7 @@ impl InvoiceContract {
         grace_period_days: u32,
     ) {
         if env.storage().instance().has(&DataKey::Initialized) {
-            panic!("already initialized");
+            panic_with_error!(&env, InvoiceError::AlreadyInitialized);
         }
         if max_invoice_amount <= 0 {
             panic!("max invoice amount must be positive");

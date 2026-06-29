@@ -66,6 +66,7 @@ fn parse_pool_version() -> PoolContractVersion {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum PoolError {
+    AlreadyInitialized = 0,
     NotInitialized = 1,
     TokenNotAccepted = 2,
     TokenAlreadyAccepted = 3,
@@ -936,7 +937,7 @@ impl FundingPool {
         invoice_contract: Address,
     ) {
         if env.storage().instance().has(&DataKey::Initialized) {
-            panic!("already initialized");
+            panic_with_error!(&env, PoolError::AlreadyInitialized);
         }
 
         let config = PoolConfig {
