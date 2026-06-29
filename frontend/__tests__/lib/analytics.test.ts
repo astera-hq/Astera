@@ -5,6 +5,13 @@ import {
   getAnalyticsCacheTTL,
   fetchAnalyticsData,
 } from '@/lib/analytics';
+import { monitorService } from '@/lib/monitoring';
+import {
+  getInvoiceCount,
+  getMultipleInvoices,
+  getPoolConfig,
+  getPoolTokenTotals,
+} from '@/lib/contracts';
 
 // Mock the dependencies
 jest.mock('@/lib/monitoring', () => ({
@@ -84,6 +91,11 @@ describe('getAnalyticsCacheTTL', () => {
 });
 
 describe('fetchAnalyticsData', () => {
+  beforeEach(() => {
+    clearAnalyticsCache();
+    jest.clearAllMocks();
+  });
+
   it('returns a data structure even on contract errors', async () => {
     // The mocks are already set up at module level; this test verifies
     // that the function handles errors gracefully
@@ -100,6 +112,11 @@ describe('fetchAnalyticsData', () => {
     const result1 = await fetchAnalyticsData();
     const result2 = await fetchAnalyticsData();
     expect(result1).toBe(result2); // Same reference = cached
+    expect(getInvoiceCount).toHaveBeenCalledTimes(1);
+    expect(getPoolConfig).toHaveBeenCalledTimes(1);
+    expect(getPoolTokenTotals).toHaveBeenCalledTimes(1);
+    expect(getMultipleInvoices).toHaveBeenCalledTimes(1);
+    expect(monitorService.pollEvents).toHaveBeenCalledTimes(1);
   });
 
   it('returns fresh data after cache is cleared', async () => {
@@ -108,5 +125,34 @@ describe('fetchAnalyticsData', () => {
     const result2 = await fetchAnalyticsData();
     // Different references since cache was cleared
     expect(result1).not.toBe(result2);
+    expect(getInvoiceCount).toHaveBeenCalledTimes(2);
+    expect(getPoolConfig).toHaveBeenCalledTimes(2);
+    expect(getPoolTokenTotals).toHaveBeenCalledTimes(2);
+    expect(getMultipleInvoices).toHaveBeenCalledTimes(2);
+    expect(monitorService.pollEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it('refetches data after the TTL expires', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const baseTime = 1_700_000_000_000;
+
+    nowSpy.mockReturnValue(baseTime);
+    const result1 = await fetchAnalyticsData();
+
+    nowSpy.mockReturnValue(baseTime + getAnalyticsCacheTTL() - 1);
+    const result2 = await fetchAnalyticsData();
+
+    nowSpy.mockReturnValue(baseTime + getAnalyticsCacheTTL() + 1);
+    const result3 = await fetchAnalyticsData();
+
+    expect(result1).toBe(result2);
+    expect(result3).not.toBe(result2);
+    expect(getInvoiceCount).toHaveBeenCalledTimes(2);
+    expect(getPoolConfig).toHaveBeenCalledTimes(2);
+    expect(getPoolTokenTotals).toHaveBeenCalledTimes(2);
+    expect(getMultipleInvoices).toHaveBeenCalledTimes(2);
+    expect(monitorService.pollEvents).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockRestore();
   });
 });

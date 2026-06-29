@@ -20,9 +20,9 @@ export const NETWORK =
       ? Networks.STANDALONE
       : Networks.TESTNET;
 export const RPC_ENDPOINTS = [
-  process.env.NEXT_PUBLIC_STELLAR_RPC_URL,
-  process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_1,
-  process.env.NEXT_PUBLIC_STELLAR_RPC_FALLBACK_2,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_FALLBACK_1,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_FALLBACK_2,
   'https://soroban-testnet.stellar.org',
   'https://rpc-testnet.stellar.org',
 ].filter(Boolean) as string[];
@@ -34,6 +34,8 @@ export const INVOICE_CONTRACT_ID = process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID ?
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID ?? '';
 export const CREDIT_SCORE_CONTRACT_ID = process.env.NEXT_PUBLIC_CREDIT_SCORE_CONTRACT_ID ?? '';
 export const GOVERNANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID ?? '';
+// #633: share token whose balance represents a user's governance voting power
+export const SHARE_TOKEN_ID = process.env.NEXT_PUBLIC_SHARE_TOKEN_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
 export const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
 // #111: additional stablecoin support

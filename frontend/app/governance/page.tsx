@@ -1,14 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
-import {
-  GOVERNANCE_CONTRACT_ID,
-  formatDate,
-  truncateAddress,
-} from '@/lib/stellar';
+import { GOVERNANCE_CONTRACT_ID, formatDate, truncateAddress } from '@/lib/stellar';
 import {
   listGovernanceProposals,
   buildCreateProposalTx,
@@ -16,7 +12,13 @@ import {
   buildExecuteProposalTx,
   submitTx,
 } from '@/lib/contracts';
-import type { GovernanceProposal } from '@/lib/types';
+import type { GovernanceProposal, ProposalStatus } from '@/lib/types';
+
+const PROPOSALS_PAGE_SIZE = 10;
+
+type StatusFilter = 'All' | ProposalStatus;
+
+const STATUS_FILTERS: StatusFilter[] = ['All', 'Active', 'Passed', 'Rejected', 'Executed'];
 
 export default function GovernancePage() {
   const { wallet } = useStore();
@@ -30,6 +32,25 @@ export default function GovernancePage() {
   const [targetContract, setTargetContract] = useState('');
   const [functionName, setFunctionName] = useState('');
   const [calldata, setCalldata] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
+  const [visibleCount, setVisibleCount] = useState(PROPOSALS_PAGE_SIZE);
+
+  const sortedProposals = useMemo(() => [...proposals].sort((a, b) => b.id - a.id), [proposals]);
+
+  const filteredProposals = useMemo(
+    () =>
+      statusFilter === 'All'
+        ? sortedProposals
+        : sortedProposals.filter((proposal) => proposal.status === statusFilter),
+    [sortedProposals, statusFilter],
+  );
+
+  const visibleProposals = useMemo(
+    () => filteredProposals.slice(0, visibleCount),
+    [filteredProposals, visibleCount],
+  );
+
+  const hasMoreProposals = visibleCount < filteredProposals.length;
 
   const loadProposals = useCallback(async () => {
     setRefreshing(true);
@@ -53,6 +74,10 @@ export default function GovernancePage() {
     const interval = setInterval(loadProposals, 30_000);
     return () => clearInterval(interval);
   }, [loadProposals]);
+
+  useEffect(() => {
+    setVisibleCount(PROPOSALS_PAGE_SIZE);
+  }, [statusFilter]);
 
   async function submitGovernanceTx(buildTx: () => Promise<string>) {
     if (!wallet.connected || !wallet.address) {
@@ -98,7 +123,10 @@ export default function GovernancePage() {
     setCalldata('');
   }
 
-  const selectedProposal = proposals.find((proposal) => proposal.id === selectedId) ?? null;
+  const selectedProposal =
+    proposals.find((proposal) => proposal.id === selectedId) ??
+    visibleProposals.find((proposal) => proposal.id === selectedId) ??
+    null;
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
@@ -154,7 +182,9 @@ export default function GovernancePage() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <label className="space-y-2">
-                <span className="text-xs uppercase tracking-widest text-brand-muted">Target contract</span>
+                <span className="text-xs uppercase tracking-widest text-brand-muted">
+                  Target contract
+                </span>
                 <input
                   value={targetContract}
                   onChange={(e) => setTargetContract(e.target.value)}
@@ -164,7 +194,9 @@ export default function GovernancePage() {
                 />
               </label>
               <label className="space-y-2">
-                <span className="text-xs uppercase tracking-widest text-brand-muted">Function name</span>
+                <span className="text-xs uppercase tracking-widest text-brand-muted">
+                  Function name
+                </span>
                 <input
                   value={functionName}
                   onChange={(e) => setFunctionName(e.target.value)}
@@ -176,7 +208,9 @@ export default function GovernancePage() {
             </div>
 
             <label className="space-y-2 block">
-              <span className="text-xs uppercase tracking-widest text-brand-muted">Description</span>
+              <span className="text-xs uppercase tracking-widest text-brand-muted">
+                Description
+              </span>
               <input
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
@@ -209,27 +243,54 @@ export default function GovernancePage() {
 
         <div className="grid grid-cols-1 xl:grid-cols-[1.4fr_0.9fr] gap-6">
           <section className="rounded-3xl border border-brand-border bg-brand-card p-6">
-            <div className="flex items-center justify-between gap-4 mb-4">
-              <div>
-                <h2 className="text-xl font-bold text-white">Proposal History</h2>
-                <p className="text-sm text-brand-muted">
-                  {loading ? 'Loading proposals...' : `${proposals.length} proposals loaded`}
-                </p>
+            <div className="flex flex-col gap-4 mb-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-bold text-white">Proposal History</h2>
+                  <p className="text-sm text-brand-muted">
+                    {loading
+                      ? 'Loading proposals...'
+                      : statusFilter === 'All'
+                        ? `${proposals.length} proposals total · showing ${visibleProposals.length}`
+                        : `${filteredProposals.length} ${statusFilter.toLowerCase()} · showing ${visibleProposals.length}`}
+                  </p>
+                </div>
+                {selectedProposal && (
+                  <span className="text-xs uppercase tracking-widest text-brand-gold">
+                    Selected #{selectedProposal.id}
+                  </span>
+                )}
               </div>
-              {selectedProposal && (
-                <span className="text-xs uppercase tracking-widest text-brand-gold">
-                  Selected #{selectedProposal.id}
-                </span>
-              )}
+
+              <div className="flex flex-wrap gap-2">
+                {STATUS_FILTERS.map((filter) => (
+                  <button
+                    key={filter}
+                    type="button"
+                    onClick={() => setStatusFilter(filter)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                      statusFilter === filter
+                        ? 'border-brand-gold/50 bg-brand-gold/10 text-brand-gold'
+                        : 'border-brand-border text-brand-muted hover:text-white hover:border-brand-gold/30'
+                    }`}
+                  >
+                    {filter}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {proposals.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-brand-border p-8 text-center text-sm text-brand-muted">
                 No proposals have been submitted yet.
               </div>
+            ) : filteredProposals.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-brand-border p-8 text-center text-sm text-brand-muted">
+                No {statusFilter.toLowerCase()} proposals match this filter.
+              </div>
             ) : (
               <div className="space-y-3">
-                {proposals.map((proposal) => (
+                {visibleProposals.map((proposal) => (
                   <button
                     key={proposal.id}
                     onClick={() => setSelectedId(proposal.id)}
@@ -240,7 +301,9 @@ export default function GovernancePage() {
                     }`}
                   >
                     <div className="flex items-center justify-between gap-3">
-                      <h3 className="text-white font-semibold">#{proposal.id} {proposal.description}</h3>
+                      <h3 className="text-white font-semibold">
+                        #{proposal.id} {proposal.description}
+                      </h3>
                       <span className="text-[10px] uppercase tracking-widest text-brand-muted">
                         {proposal.status}
                       </span>
@@ -253,6 +316,16 @@ export default function GovernancePage() {
                     </div>
                   </button>
                 ))}
+
+                {hasMoreProposals && (
+                  <button
+                    type="button"
+                    onClick={() => setVisibleCount((count) => count + PROPOSALS_PAGE_SIZE)}
+                    className="w-full rounded-2xl border border-brand-border px-4 py-3 text-sm font-medium text-brand-muted hover:text-white hover:border-brand-gold/40 transition-colors"
+                  >
+                    Load more ({filteredProposals.length - visibleCount} remaining)
+                  </button>
+                )}
               </div>
             )}
           </section>
@@ -327,11 +400,16 @@ export default function GovernancePage() {
               <button
                 onClick={() =>
                   selectedProposal &&
-                  void submitGovernanceTx(() => buildExecuteProposalTx(wallet.address ?? '', selectedProposal.id))
+                  void submitGovernanceTx(() =>
+                    buildExecuteProposalTx(wallet.address ?? '', selectedProposal.id),
+                  )
                 }
                 disabled={
-                  !selectedProposal || !wallet.connected || !GOVERNANCE_CONTRACT_ID || submitting
-                  || selectedProposal?.status !== 'Passed'
+                  !selectedProposal ||
+                  !wallet.connected ||
+                  !GOVERNANCE_CONTRACT_ID ||
+                  submitting ||
+                  selectedProposal?.status !== 'Passed'
                 }
                 className="w-full rounded-xl border border-brand-border px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
               >

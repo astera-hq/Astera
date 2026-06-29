@@ -61,6 +61,7 @@ function validateContractId(id: string, name: string): string {
 
 validateContractId(INVOICE_CONTRACT_ID, 'invoice');
 validateContractId(POOL_CONTRACT_ID, 'pool');
+validateContractId(CREDIT_SCORE_CONTRACT_ID, 'credit_score');
 if (GOVERNANCE_CONTRACT_ID) {
   validateContractId(GOVERNANCE_CONTRACT_ID, 'governance');
 }
@@ -630,6 +631,60 @@ export async function buildMarkDefaultedTx(admin: string, invoiceId: number): Pr
         new Address(POOL_CONTRACT_ID).toScVal(), // Attempting with Pool contract ID
       ),
     )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function isProtocolPaused(): Promise<boolean> {
+  const sim = await simulateTx(
+    INVOICE_CONTRACT_ID,
+    'is_paused',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  return Boolean(scValToNative(result!.retval));
+}
+
+export async function buildPauseProtocolTx(admin: string): Promise<string> {
+  const account = await getRpcAccount(admin);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(contract.call('pause', new Address(admin).toScVal()))
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildUnpauseProtocolTx(admin: string): Promise<string> {
+  const account = await getRpcAccount(admin);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(contract.call('unpause', new Address(admin).toScVal()))
     .setTimeout(30)
     .build();
 

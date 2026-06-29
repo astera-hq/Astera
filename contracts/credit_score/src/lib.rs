@@ -108,6 +108,9 @@ const ADMIN_CHANGE_TIMELOCK_SECS: u64 = 172_800; // 48 hours — #565
 const CURRENT_MIGRATION_VERSION: u32 = 1;
 pub const MAX_PAYMENT_HISTORY: u32 = 100;
 
+/// Max page size for list_all_sme_stats to prevent gas exhaustion.
+const MAX_SME_PAGE_SIZE: u32 = 100;
+
 #[contracttype]
 #[derive(Clone)]
 pub struct PaymentRecord {
@@ -141,6 +144,13 @@ pub struct CreditScoreData {
     pub average_payment_days: i64,
     pub last_updated: u64,
     pub score_version: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct SmeScoreEntry {
+    pub sme: Address,
+    pub score: u32,
 }
 
 #[contracttype]
@@ -315,6 +325,8 @@ pub enum DataKey {
     /// #565: admin key rotation timelock
     PendingAdmin,
     AdminChangeScheduledAt,
+    SmeByIndex(u32),
+    SmeCount,
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -724,7 +736,7 @@ impl CreditScoreContract {
 
     pub fn record_payment(
         env: Env,
-        caller: Address,
+        _caller: Address,
         invoice_id: u64,
         sme: Address,
         amount: i128,
@@ -737,9 +749,7 @@ impl CreditScoreContract {
             .get(&DataKey::PoolContract)
             .expect("not initialized");
 
-        if caller != pool {
-            pool.require_auth();
-        }
+        pool.require_auth();
 
         require_not_paused(&env);
 
@@ -785,7 +795,7 @@ impl CreditScoreContract {
 
     pub fn record_default(
         env: Env,
-        caller: Address,
+        _caller: Address,
         invoice_id: u64,
         sme: Address,
         amount: i128,
@@ -797,9 +807,7 @@ impl CreditScoreContract {
             .get(&DataKey::PoolContract)
             .expect("not initialized");
 
-        if caller != pool {
-            pool.require_auth();
-        }
+        pool.require_auth();
 
         require_not_paused(&env);
 
@@ -847,6 +855,41 @@ impl CreditScoreContract {
             config_version,
             is_stale: data.score_version != config_version,
         }
+    }
+
+    pub fn list_all_sme_stats(env: Env, page: u32, page_size: u32) -> Vec<SmeScoreEntry> {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SmeCount)
+            .unwrap_or(0);
+        let size = if page_size > MAX_SME_PAGE_SIZE {
+            MAX_SME_PAGE_SIZE
+        } else {
+            page_size
+        };
+        let start = page * size;
+        if start >= count {
+            return Vec::new(&env);
+        }
+        let end = (start + size).min(count);
+        let mut entries = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            if let Some(sme) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::SmeByIndex(i))
+            {
+                let data = Self::get_or_create_credit_data(&env, &sme);
+                entries.push_back(SmeScoreEntry {
+                    sme,
+                    score: data.score,
+                });
+            }
+            i += 1;
+        }
+        entries
     }
 
     pub fn get_payment_history(env: Env, sme: Address) -> Vec<PaymentRecord> {
@@ -1105,6 +1148,17 @@ impl CreditScoreContract {
         {
             data
         } else {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::SmeCount)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::SmeCount, &(count + 1));
+            env.storage()
+                .persistent()
+                .set(&DataKey::SmeByIndex(count), &sme.clone());
             let scoring_config = load_scoring_config(env);
             CreditScoreData {
                 sme: sme.clone(),
@@ -1252,8 +1306,7 @@ impl CreditScoreContract {
         if now < scheduled_at + ADMIN_CHANGE_TIMELOCK_SECS {
             panic_with_error!(&env, CreditScoreError::AdminChangeTimelockNotExpired);
         }
-        let maybe_new_admin: Option<Address> =
-            env.storage().instance().get(&DataKey::PendingAdmin);
+        let maybe_new_admin: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         let new_admin = match maybe_new_admin {
             Some(v) => v,
             None => panic_with_error!(&env, CreditScoreError::NoAdminChangeProposed),
@@ -1281,10 +1334,8 @@ impl CreditScoreContract {
         env.storage()
             .instance()
             .remove(&DataKey::AdminChangeScheduledAt);
-        env.events().publish(
-            (EVT, Symbol::new(&env, "admin_chg_cancelled")),
-            admin,
-        );
+        env.events()
+            .publish((EVT, Symbol::new(&env, "admin_chg_cancelled")), admin);
     }
 }
 

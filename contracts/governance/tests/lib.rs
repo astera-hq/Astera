@@ -7,7 +7,7 @@ use soroban_sdk::{
     Address, Env, String,
 };
 
-const VOTING_PERIOD: u64 = 200;
+const VOTING_PERIOD: u64 = 86_400; // 1 day minimum
 const EXEC_DELAY: u64 = 100;
 const QUORUM_BPS: u32 = 1_000; // 10 %
 const PASS_BPS: u32 = 6_000; // 60 %
