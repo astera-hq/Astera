@@ -55,9 +55,9 @@ export function APYCalculator({ className = '' }: { className?: string }) {
   }
 
   return (
-    <div className={`p-6 bg-brand-card border border-brand-border rounded-2xl ${className}`.trim()}>
-      <h2 className="text-lg font-semibold mb-1">Earnings calculator</h2>
-      <p className="text-xs text-brand-muted mb-4">
+    <div className={`p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl ${className}`.trim()}>
+      <h2 className="text-lg font-semibold mb-1 text-[var(--text-primary)]">Earnings calculator</h2>
+      <p className="text-xs text-[var(--muted)] mb-4">
         Model projected returns using the pool&apos;s current rate (
         {hasValidPoolRate ? `${formatApyPercent(yieldBps!)}% APY` : 'rate unavailable'}
         ).
@@ -65,7 +65,7 @@ export function APYCalculator({ className = '' }: { className?: string }) {
 
       <div className="space-y-4">
         <div>
-          <label className="block text-sm text-brand-muted mb-2">Deposit amount (USDC)</label>
+          <label className="block text-sm text-[var(--muted)] mb-2">Deposit amount (USDC)</label>
           <div className="relative">
             <input
               type="number"
@@ -75,16 +75,16 @@ export function APYCalculator({ className = '' }: { className?: string }) {
               value={depositInput}
               onChange={(e) => setDepositInput(e.target.value)}
               disabled={!hasValidPoolRate}
-              className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-lg disabled:opacity-50"
+              className="w-full bg-[var(--bg)] border border-[var(--border)] rounded-xl px-4 py-3 text-[var(--text-primary)] placeholder-[var(--muted)] focus:outline-none focus:border-brand-gold text-lg disabled:opacity-50"
             />
-            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-brand-muted text-sm font-medium">
+            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[var(--muted)] text-sm font-medium">
               USDC
             </span>
           </div>
         </div>
 
         <div>
-          <label className="block text-sm text-brand-muted mb-2">Lock period (days)</label>
+          <label className="block text-sm text-[var(--muted)] mb-2">Lock period (days)</label>
           <input
             type="number"
             min="1"
@@ -92,13 +92,13 @@ export function APYCalculator({ className = '' }: { className?: string }) {
             value={lockDaysInput}
             onChange={(e) => setLockDaysInput(e.target.value)}
             disabled={!hasValidPoolRate}
-            className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-lg disabled:opacity-50"
+            className="w-full bg-[var(--bg)] border border-[var(--border)] rounded-xl px-4 py-3 text-[var(--text-primary)] placeholder-[var(--muted)] focus:outline-none focus:border-brand-gold text-lg disabled:opacity-50"
           />
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-          <div className="p-4 bg-brand-dark border border-brand-border rounded-xl">
-            <p className="text-xs text-brand-muted mb-1">Projected interest</p>
+          <div className="p-4 bg-[var(--bg)] border border-[var(--border)] rounded-xl">
+            <p className="text-xs text-[var(--muted)] mb-1">Projected interest</p>
             <p className="text-xl font-semibold text-brand-gold">
               {!hasValidPoolRate
                 ? '---'
@@ -107,9 +107,9 @@ export function APYCalculator({ className = '' }: { className?: string }) {
                   : formatUSDC(0n)}
             </p>
           </div>
-          <div className="p-4 bg-brand-dark border border-brand-border rounded-xl">
-            <p className="text-xs text-brand-muted mb-1">Total at maturity</p>
-            <p className="text-xl font-semibold text-white">
+          <div className="p-4 bg-[var(--bg)] border border-[var(--border)] rounded-xl">
+            <p className="text-xs text-[var(--muted)] mb-1">Total at maturity</p>
+            <p className="text-xl font-semibold text-[var(--text-primary)]">
               {!hasValidPoolRate
                 ? '---'
                 : depositInput && parseFloat(depositInput) > 0
@@ -121,14 +121,14 @@ export function APYCalculator({ className = '' }: { className?: string }) {
       </div>
 
       {isFallbackRate && (
-        <p className="mt-4 text-xs text-yellow-300">
+        <p className="mt-4 text-xs text-yellow-600 dark:text-yellow-300">
           Failed to load live pool configuration. Using fallback APY of{' '}
           {formatApyPercent(DEFAULT_YIELD_BPS)}%.
         </p>
       )}
 
-      <p className="mt-4 text-xs text-brand-muted leading-relaxed border-t border-brand-border pt-4">
-        <strong className="text-brand-muted">Disclaimer:</strong> This projection uses the
+      <p className="mt-4 text-xs text-[var(--muted)] leading-relaxed border-t border-[var(--border)] pt-4">
+        <strong className="text-[var(--muted)]">Disclaimer:</strong> This projection uses the
         pool&apos;s configured yield rate and assumes continuous linear accrual like on-chain
         invoice interest. Actual returns depend on invoice repayment timing, utilization, and pool
         parameters -- nothing is guaranteed.
