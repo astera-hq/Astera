@@ -122,3 +122,101 @@ jobs:
           name: lighthouse-report
           path: .lighthouseci/
           retention-days: 30
+
+  deploy-smoke-test:
+    name: Deploy Smoke Test
+    runs-on: ubuntu-latest
+    needs: [contracts]
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Soroban CLI
+        run: |
+          cargo install soroban-cli --locked
+      - name: Build contracts
+        run: |
+          cargo build --target wasm32-unknown-unknown --release -p invoice -p pool -p credit_score -p share
+      - name: Deploy invoice contract to testnet
+        id: deploy-invoice
+        run: |
+          CONTRACT_ID=$(soroban contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/invoice.wasm \
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Invoice contract ID: $CONTRACT_ID"
+      - name: Smoke test invoice contract
+        run: |
+          soroban contract invoke \
+            --id ${{ steps.deploy-invoice.outputs.contract_id }} \
+            --fn get_invoice \
+            --arg 999 \
+            --network testnet
+          # Should return InvoiceError::InvoiceNotFound — verify it doesn't crash
+      - name: Deploy pool contract to testnet
+        id: deploy-pool
+        run: |
+          CONTRACT_ID=$(soroban contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/pool.wasm \
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Pool contract ID: $CONTRACT_ID"
+      - name: Smoke test pool contract
+        run: |
+          soroban contract invoke \
+            --id ${{ steps.deploy-pool.outputs.contract_id }} \
+            --fn version \
+            --network testnet
+      - name: Deploy credit_score contract to testnet
+        id: deploy-credit-score
+        run: |
+          CONTRACT_ID=$(soroban contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/credit_score.wasm \
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Credit score contract ID: $CONTRACT_ID"
+      - name: Smoke test credit_score contract
+        run: |
+          soroban contract invoke \
+            --id ${{ steps.deploy-credit-score.outputs.contract_id }} \
+            --fn version \
+            --network testnet
+      - name: Deploy share contract to testnet
+        id: deploy-share
+        run: |
+          CONTRACT_ID=$(soroban contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/share.wasm \
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Share contract ID: $CONTRACT_ID"
+      - name: Smoke test share contract
+        run: |
+          soroban contract invoke \
+            --id ${{ steps.deploy-share.outputs.contract_id }} \
+            --fn total_supply \
+            --network testnet
+      - name: Save contract IDs to file
+        if: always()
+        run: |
+          echo "invoice=${{ steps.deploy-invoice.outputs.contract_id }}" > contract-ids.txt
+          echo "pool=${{ steps.deploy-pool.outputs.contract_id }}" >> contract-ids.txt
+          echo "credit_score=${{ steps.deploy-credit-score.outputs.contract_id }}" >> contract-ids.txt
+          echo "share=${{ steps.deploy-share.outputs.contract_id }}" >> contract-ids.txt
+      - name: Upload contract IDs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-contract-ids
+          path: contract-ids.txt
+          retention-days: 30
