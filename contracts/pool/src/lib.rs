@@ -150,13 +150,6 @@ pub enum PoolError {
     TimestampInPast = 57,
     // #531: funding rejected because the invoice due date has already passed
     InvoiceExpired = 58,
-    // #742: critical admin operations must go through the two-step proposal flow
-    OperationRequiresProposal = 59,
-    ProposalNotFound = 60,
-    ProposalNotReady = 61,
-    ProposalAlreadyExecuted = 62,
-    ProposalAlreadyCancelled = 63,
-    InvalidOperationDelay = 64,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -204,10 +197,6 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
 const MIN_UPGRADE_TIMELOCK_SECS: u64 = 3_600; // 1 hour minimum (#338)
 const ADMIN_CHANGE_TIMELOCK_SECS: u64 = 172_800; // 48 hours — #565
-// #742: two-step confirmation delay for critical admin operations.
-// Default 24 hours, configurable down to MIN_OPERATION_DELAY_SECS.
-const OPERATION_DELAY_SECS: u64 = 86_400; // 24 hours default
-const MIN_OPERATION_DELAY_SECS: u64 = 3_600; // 1 hour minimum
 /// Current on-chain storage schema version (#397). Bump by one and add a
 /// matching arm in `run_migration` whenever the persistent storage layout
 /// changes so a deployed contract can migrate state after a WASM upgrade.
@@ -378,37 +367,6 @@ pub struct CollateralConfig {
     pub collateral_bps: u32,
 }
 
-/// #742: Critical admin operations that must be scheduled through the two-step
-/// proposal flow before they can be executed.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum AdminOperation {
-    /// Remove a token from the accepted token list.
-    RemoveToken(Address),
-    /// Update the collateral configuration (threshold + required ratio).
-    SetCollateralConfig(i128, u32),
-    /// Seize collateral for a defaulted invoice.
-    SeizeCollateral(u64),
-}
-
-/// #742: A scheduled critical operation pending its timelock window.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct Proposal {
-    /// The operation to execute once the delay elapses.
-    pub operation: AdminOperation,
-    /// Earliest ledger timestamp at which execution is allowed.
-    pub execute_after: u64,
-    /// Ledger timestamp when the proposal was created.
-    pub proposed_at: u64,
-    /// Admin that created the proposal.
-    pub proposer: Address,
-    /// Whether the proposal has already been executed.
-    pub executed: bool,
-    /// Whether the proposal was cancelled before execution.
-    pub cancelled: bool,
-}
-
 /// #337: Tri-state KYC status — distinguishes "never set" from "explicitly approved/rejected".
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -495,10 +453,6 @@ pub enum DataKey {
     // #565: admin key rotation timelock
     PendingAdmin,
     AdminChangeScheduledAt,
-    // #742: two-step confirmation for critical admin operations
-    Proposal(u64),
-    NextProposalId,
-    OperationDelaySecs,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -1228,31 +1182,23 @@ impl FundingPool {
     /// - Token has non-zero deposited balance (TokenHasActiveBalances)
     /// - Token has deployed capital (TokenHasDeployedCapital)
     /// - Token has pending withdrawals (TokenHasPendingWithdrawals)
-    ///
-    /// #742: this is a destructive operation and must be scheduled through the
-    /// two-step proposal flow (`propose_operation` → wait → `execute_operation`).
-    /// Calling it directly is rejected with `OperationRequiresProposal`.
-    pub fn remove_token(env: Env, admin: Address, _token: Address) -> Result<(), PoolError> {
+    pub fn remove_token(env: Env, admin: Address, token: Address) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-        Err(PoolError::OperationRequiresProposal)
-    }
 
-    /// #742: Internal execution of `remove_token`, invoked by `execute_operation`
-    /// after the timelock has elapsed. Performs the original safety checks.
-    fn execute_remove_token(env: &Env, admin: &Address, token: &Address) -> PoolResult<()> {
         let tokens: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AcceptedTokens)
             .ok_or(PoolError::NotInitialized)?;
 
-        let mut new_tokens: Vec<Address> = Vec::new(env);
+        let mut new_tokens: Vec<Address> = Vec::new(&env);
         let mut found = false;
         for i in 0..tokens.len() {
             let t = tokens.get(i).ok_or(PoolError::StorageCorrupted)?;
-            if &t == token {
+            if t == token {
                 found = true;
             } else {
                 new_tokens.push_back(t);
@@ -1280,7 +1226,7 @@ impl FundingPool {
             .storage()
             .persistent()
             .get(&queue_key)
-            .unwrap_or(Vec::new(env));
+            .unwrap_or(Vec::new(&env));
         if !queue.is_empty() {
             return Err(PoolError::TokenHasPendingWithdrawals);
         }
@@ -1294,8 +1240,8 @@ impl FundingPool {
 
         let total_shares: i128 = env.invoke_contract(
             &share_token,
-            &Symbol::new(env, "total_supply"),
-            Vec::new(env),
+            &Symbol::new(&env, "total_supply"),
+            Vec::new(&env),
         );
 
         if total_shares > 0 {
@@ -1328,10 +1274,8 @@ impl FundingPool {
         env.storage()
             .instance()
             .set(&DataKey::AcceptedTokens, &new_tokens);
-        env.events().publish(
-            (EVT, symbol_short!("rm_token")),
-            (admin.clone(), token.clone()),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("rm_token")), (admin, token));
         Ok(())
     }
 
@@ -2550,30 +2494,16 @@ impl FundingPool {
     /// Admin sets the collateral configuration.
     /// `threshold` — minimum principal (inclusive) that requires collateral.
     /// `collateral_bps` — required collateral as % of principal in basis points (max 10000 = 100%).
-    ///
-    /// #742: changing collateral parameters is a critical operation and must be
-    /// scheduled through the two-step proposal flow (`propose_operation` → wait →
-    /// `execute_operation`). Calling it directly is rejected with
-    /// `OperationRequiresProposal`.
     pub fn set_collateral_config(
         env: Env,
         admin: Address,
-        _threshold: i128,
-        _collateral_bps: u32,
+        threshold: i128,
+        collateral_bps: u32,
     ) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-        Err(PoolError::OperationRequiresProposal)
-    }
-
-    /// #742: Validate collateral parameters. Shared by `propose_operation`
-    /// (validates before scheduling) and `execute_set_collateral_config`
-    /// (defensive re-check at execution time).
-    fn validate_collateral_config(
-        threshold: i128,
-        collateral_bps: u32,
-    ) -> PoolResult<()> {
         if threshold < 0 {
             return Err(PoolError::InvalidCollateralThreshold);
         }
@@ -2583,18 +2513,6 @@ impl FundingPool {
         if collateral_bps == 0 && threshold > 0 {
             return Err(PoolError::InvalidCollateralBps);
         }
-        Ok(())
-    }
-
-    /// #742: Internal execution of `set_collateral_config`, invoked by
-    /// `execute_operation` after the timelock has elapsed.
-    fn execute_set_collateral_config(
-        env: &Env,
-        admin: &Address,
-        threshold: i128,
-        collateral_bps: u32,
-    ) -> PoolResult<()> {
-        Self::validate_collateral_config(threshold, collateral_bps)?;
         let cfg = CollateralConfig {
             threshold,
             collateral_bps,
@@ -2604,7 +2522,7 @@ impl FundingPool {
             .set(&DataKey::CollateralConfig, &cfg);
         env.events().publish(
             (EVT, symbol_short!("col_cfg")),
-            (admin.clone(), threshold, collateral_bps),
+            (admin, threshold, collateral_bps),
         );
         Ok(())
     }
@@ -2725,31 +2643,13 @@ impl FundingPool {
     /// to partially compensate investors for the loss.
     /// Can only be called after the invoice has been marked as defaulted (repaid == false
     /// and the invoice is past due + grace period).
-    ///
-    /// #742: seizing collateral is a destructive operation and must be scheduled
-    /// through the two-step proposal flow (`propose_operation` → wait →
-    /// `execute_operation`). Calling it directly is rejected with
-    /// `OperationRequiresProposal`.
-    pub fn seize_collateral(
-        env: Env,
-        admin: Address,
-        _invoice_id: u64,
-    ) -> Result<(), PoolError> {
+    pub fn seize_collateral(env: Env, admin: Address, invoice_id: u64) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-        Err(PoolError::OperationRequiresProposal)
-    }
 
-    /// #742: Internal execution of `seize_collateral`, invoked by
-    /// `execute_operation` after the timelock has elapsed. Performs the original
-    /// default-status and settlement checks.
-    fn execute_seize_collateral(
-        env: &Env,
-        admin: &Address,
-        invoice_id: u64,
-    ) -> PoolResult<()> {
-        non_reentrant!(env, {
+        non_reentrant!(&env, {
             let record: FundedInvoice = env
                 .storage()
                 .persistent()
@@ -2771,7 +2671,7 @@ impl FundingPool {
 
             // #386: require the invoice to be explicitly in Defaulted status before seizing.
             // Prevents premature seizure on invoices that are merely overdue but not yet defaulted.
-            let invoice_client = InvoiceContractClient::new(env, &config.invoice_contract);
+            let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
             let is_defaulted = match invoice_client.try_is_invoice_defaulted(&invoice_id) {
                 Ok(Ok(v)) => v,
                 _ => false,
@@ -2819,8 +2719,8 @@ impl FundingPool {
 
             // #386: emit status-triggered seizure event (invoice was Defaulted).
             env.events().publish(
-                (EVT, Symbol::new(env, "col_seiz_default")),
-                (invoice_id, col.depositor, col.amount, admin.clone(), now),
+                (EVT, Symbol::new(&env, "col_seiz_default")),
+                (invoice_id, col.depositor, col.amount, admin, now),
             );
             Ok(())
         })
@@ -4029,7 +3929,6 @@ impl FundingPool {
         Ok(())
     }
 
-<<<<<<< HEAD
     /// Propose an admin key rotation (#565).
     pub fn propose_admin_change(
         env: Env,
@@ -4096,155 +3995,10 @@ impl FundingPool {
         env.events().publish(
             (EVT, Symbol::new(&env, "admin_changed")),
             (admin, new_admin, now),
-=======
-    // ---- #742: two-step confirmation for critical admin operations ----
-
-    /// Returns the configured operation delay in seconds (#742).
-    pub fn get_operation_delay(env: Env) -> u64 {
-        bump_instance(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::OperationDelaySecs)
-            .unwrap_or(OPERATION_DELAY_SECS)
-    }
-
-    /// Admin-configurable delay for critical operations. Must be at least
-    /// `MIN_OPERATION_DELAY_SECS` (1 hour) (#742).
-    pub fn set_operation_delay(env: Env, admin: Address, secs: u64) -> Result<(), PoolError> {
-        admin.require_auth();
-        bump_instance(&env);
-        Self::require_admin(&env, &admin)?;
-        if secs < MIN_OPERATION_DELAY_SECS {
-            return Err(PoolError::InvalidOperationDelay);
-        }
-        let old: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::OperationDelaySecs)
-            .unwrap_or(OPERATION_DELAY_SECS);
-        env.storage()
-            .instance()
-            .set(&DataKey::OperationDelaySecs, &secs);
-        env.events().publish(
-            (EVT, symbol_short!("op_delay")),
-            (admin, old, secs),
         );
         Ok(())
     }
 
-    /// Schedule a critical admin operation. Returns the proposal id (#742).
-    ///
-    /// The operation can be executed by any admin after the mandatory delay
-    /// elapses via `execute_operation(proposal_id)`.
-    pub fn propose_operation(
-        env: Env,
-        admin: Address,
-        operation: AdminOperation,
-    ) -> Result<u64, PoolError> {
-        admin.require_auth();
-        bump_instance(&env);
-        Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin)?;
-
-        // Validate operation parameters up-front so bad proposals fail fast.
-        match &operation {
-            AdminOperation::SetCollateralConfig(threshold, collateral_bps) => {
-                Self::validate_collateral_config(*threshold, *collateral_bps)?
-            }
-            AdminOperation::RemoveToken(_) | AdminOperation::SeizeCollateral(_) => {}
-        }
-
-        let now = env.ledger().timestamp();
-        let delay = env
-            .storage()
-            .instance()
-            .get(&DataKey::OperationDelaySecs)
-            .unwrap_or(OPERATION_DELAY_SECS);
-        let execute_after = now
-            .checked_add(delay)
-            .ok_or(PoolError::AmountOverflow)?;
-
-        let proposal_id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextProposalId)
-            .unwrap_or(1);
-        env.storage()
-            .instance()
-            .set(&DataKey::NextProposalId, &(proposal_id + 1));
-
-        let proposal = Proposal {
-            operation,
-            execute_after,
-            proposed_at: now,
-            proposer: admin.clone(),
-            executed: false,
-            cancelled: false,
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
-
-        env.events().publish(
-            (EVT, symbol_short!("op_prop")),
-            (admin, proposal_id, execute_after),
-        );
-        Ok(proposal_id)
-    }
-
-    /// Execute a previously proposed critical operation after its timelock has
-    /// elapsed (#742). Any admin may execute; the operation must be pending and
-    /// the delay must have expired.
-    pub fn execute_operation(env: Env, admin: Address, proposal_id: u64) -> Result<(), PoolError> {
-        admin.require_auth();
-        bump_instance(&env);
-        Self::require_not_paused(&env);
-        Self::require_admin(&env, &admin)?;
-
-        let mut proposal: Proposal = env
-            .storage()
-            .instance()
-            .get(&DataKey::Proposal(proposal_id))
-            .ok_or(PoolError::ProposalNotFound)?;
-        if proposal.executed {
-            return Err(PoolError::ProposalAlreadyExecuted);
-        }
-        if proposal.cancelled {
-            return Err(PoolError::ProposalAlreadyCancelled);
-        }
-        let now = env.ledger().timestamp();
-        if now < proposal.execute_after {
-            return Err(PoolError::ProposalNotReady);
-        }
-
-        // Mark as executed before dispatch so a re-entrant call cannot replay it.
-        proposal.executed = true;
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
-
-        let op = proposal.operation.clone();
-        match op {
-            AdminOperation::RemoveToken(token) => {
-                Self::execute_remove_token(&env, &admin, &token)?
-            }
-            AdminOperation::SetCollateralConfig(threshold, collateral_bps) => {
-                Self::execute_set_collateral_config(&env, &admin, threshold, collateral_bps)?
-            }
-            AdminOperation::SeizeCollateral(invoice_id) => {
-                Self::execute_seize_collateral(&env, &admin, invoice_id)?
-            }
-        }
-
-        env.events().publish(
-            (EVT, symbol_short!("op_exec")),
-            (admin, proposal_id, now),
->>>>>>> 28c0816 (Implement two-factor admin confirmation for critical pool operations Add mandatory timelock for high-impact operations to prevent instant execution if admin key is compromised. Operations now require a two-step flow: propose then execute after delay. Changes: - Add AdminOperation enum for remove_token, set_collateral_config, seize_collateral - Add Proposal struct to track pending operations - Implement propose_operation with configurable delay (default 24h, min 1h) - Implement execute_operation with timelock enforcement - Implement cancel_operation for emergency proposal cancellation - Add validation for collateral config params at proposal time - Add storage keys for proposals and operation delay config - Add new error codes for proposal lifecycle - Update critical operations to reject direct calls and require proposal flow - Refactor operations into internal execute functions - Add events for propose, execute, and cancel actions)
-        );
-        Ok(())
-    }
-
-<<<<<<< HEAD
     /// Cancel a pending admin key rotation (#565).
     pub fn cancel_admin_change(env: Env, admin: Address) -> Result<(), PoolError> {
         admin.require_auth();
@@ -4263,46 +4017,6 @@ impl FundingPool {
         Ok(())
     }
 
-=======
-    /// Cancel a pending proposal (#742). Admin-only; a proposal that was already
-    /// executed or cancelled is rejected.
-    pub fn cancel_operation(env: Env, admin: Address, proposal_id: u64) -> Result<(), PoolError> {
-        admin.require_auth();
-        bump_instance(&env);
-        Self::require_admin(&env, &admin)?;
-
-        let mut proposal: Proposal = env
-            .storage()
-            .instance()
-            .get(&DataKey::Proposal(proposal_id))
-            .ok_or(PoolError::ProposalNotFound)?;
-        if proposal.executed {
-            return Err(PoolError::ProposalAlreadyExecuted);
-        }
-        if proposal.cancelled {
-            return Err(PoolError::ProposalAlreadyCancelled);
-        }
-        proposal.cancelled = true;
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
-
-        env.events().publish(
-            (EVT, symbol_short!("op_cncl")),
-            (admin, proposal_id, env.ledger().timestamp()),
-        );
-        Ok(())
-    }
-
-    /// Returns a pending proposal by id, if any (#742).
-    pub fn get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
-        bump_instance(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::Proposal(proposal_id))
-    }
-
->>>>>>> 28c0816 (Implement two-factor admin confirmation for critical pool operations Add mandatory timelock for high-impact operations to prevent instant execution if admin key is compromised. Operations now require a two-step flow: propose then execute after delay. Changes: - Add AdminOperation enum for remove_token, set_collateral_config, seize_collateral - Add Proposal struct to track pending operations - Implement propose_operation with configurable delay (default 24h, min 1h) - Implement execute_operation with timelock enforcement - Implement cancel_operation for emergency proposal cancellation - Add validation for collateral config params at proposal time - Add storage keys for proposals and operation delay config - Add new error codes for proposal lifecycle - Update critical operations to reject direct calls and require proposal flow - Refactor operations into internal execute functions - Add events for propose, execute, and cancel actions)
     // ---- Internal utility methods ----
 
     /// ## Issue #321: Reentrancy Guard Implementation
