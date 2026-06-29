@@ -56,6 +56,13 @@ async function pollLoop(db: any) {
   let cursor = getLatestLedger(db);
   console.log(`[Astera Indexer] Starting from ledger: ${cursor || 'latest'}`);
 
+  const BASE_DELAY_MS = 1000;
+  const MAX_DELAY_MS = 60000;
+  const BACKOFF_MULTIPLIER = 2;
+  const ALERT_THRESHOLD = 10;
+
+  let consecutiveFailures = 0;
+
   while (true) {
     try {
       const horizon = new Horizon.Server(HORIZON_URL);
@@ -93,10 +100,30 @@ async function pollLoop(db: any) {
         cursor = lastRecord.paging_token || cursor;
       }
 
+      consecutiveFailures = 0;
+
       await new Promise((resolve) => setTimeout(resolve, POLLING_INTERVAL_MS));
     } catch (error) {
-      console.error('[Astera Indexer] Error polling:', error);
-      await new Promise((resolve) => setTimeout(resolve, POLLING_INTERVAL_MS * 2));
+      consecutiveFailures++;
+
+      const delay = Math.min(
+        BASE_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, consecutiveFailures - 1),
+        MAX_DELAY_MS,
+      );
+
+      console.error(
+        `[Astera Indexer] Error polling Horizon (attempt ${consecutiveFailures}):`,
+        error,
+      );
+      console.log(`[Astera Indexer] Retrying in ${delay}ms...`);
+
+      if (consecutiveFailures >= ALERT_THRESHOLD) {
+        console.error(
+          `[Astera Indexer] ALERT: ${consecutiveFailures} consecutive polling failures. Continuing to retry...`,
+        );
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 }
