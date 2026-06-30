@@ -7855,4 +7855,170 @@ mod test {
         let result = client.try_seize_collateral(&admin, &1u64);
         assert_eq!(result, Err(Ok(PoolError::NotDefaulted)));
     }
+
+    // ── #622: property tests for calculate_interest ──────────────────────────
+    //
+    // These exercise calculate_interest() directly (it's a private fn in this
+    // module) with many pseudo-random inputs instead of a handful of fixed
+    // cases. We avoid pulling in the `proptest`/`quickcheck` crates as a new
+    // dev-dependency and instead use a tiny deterministic PRNG (splitmix64-style
+    // LCG) seeded per test, which keeps failures reproducible without adding
+    // build dependencies. "Valid ranges" below mirror what the contract itself
+    // enforces elsewhere: yield_bps is capped at 5_000 (see `set_yield` /
+    // `propose_yield_change`), and duration is bounded at 10 years, matching
+    // `test_compound_interest_long_period_no_overflow` above — this is the
+    // longest duration already demonstrated not to overflow `fixed_point_pow`'s
+    // unchecked squaring at the maximum yield rate.
+
+    /// Tiny deterministic PRNG (splitmix64) so these property tests are
+    /// reproducible across runs without adding a fuzzing crate dependency.
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn new(seed: u64) -> Self {
+            TestRng(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^ (z >> 31)
+        }
+
+        /// Returns a value in `[lo, hi]` (inclusive).
+        fn range_u64(&mut self, lo: u64, hi: u64) -> u64 {
+            debug_assert!(hi >= lo);
+            let span = hi - lo + 1;
+            lo + (self.next_u64() % span)
+        }
+    }
+
+    const PROP_MAX_PRINCIPAL: u128 = 1_000_000_000_000_000; // 1e15 stroops (~100M tokens at 7 decimals)
+    const PROP_MAX_YIELD_BPS: u64 = 5_000; // matches the contract's hard cap (set_yield / propose_yield_change)
+    const PROP_MAX_ELAPSED_SECS: u64 = SECS_PER_YEAR * 10; // matches test_compound_interest_long_period_no_overflow
+
+    /// Fuzz: for any principal > 0, yield_bps > 0, elapsed_secs > 0,
+    /// compound_interest must be >= simple_interest for the same inputs.
+    #[test]
+    fn test_property_compound_interest_always_gte_simple() {
+        let mut rng = TestRng::new(0x622_0001);
+        for _ in 0..2_000 {
+            let principal = rng.range_u64(1, PROP_MAX_PRINCIPAL as u64) as u128;
+            let yield_bps = rng.range_u64(1, PROP_MAX_YIELD_BPS) as u32;
+            let elapsed_secs = rng.range_u64(1, PROP_MAX_ELAPSED_SECS);
+
+            let simple = calculate_interest(principal, yield_bps, elapsed_secs, false)
+                .expect("simple interest must not overflow within valid ranges");
+            let compound = calculate_interest(principal, yield_bps, elapsed_secs, true)
+                .expect("compound interest must not overflow within valid ranges");
+
+            assert!(
+                compound >= simple,
+                "compound ({}) < simple ({}) for principal={}, yield_bps={}, elapsed_secs={}",
+                compound,
+                simple,
+                principal,
+                yield_bps,
+                elapsed_secs
+            );
+        }
+    }
+
+    /// Fuzz: interest is 0 when elapsed_secs = 0, for both simple and compound modes.
+    #[test]
+    fn test_property_zero_elapsed_secs_yields_zero_interest() {
+        let mut rng = TestRng::new(0x622_0002);
+        for _ in 0..1_000 {
+            let principal = rng.range_u64(1, PROP_MAX_PRINCIPAL as u64) as u128;
+            let yield_bps = rng.range_u64(1, PROP_MAX_YIELD_BPS) as u32;
+
+            let simple = calculate_interest(principal, yield_bps, 0, false)
+                .expect("simple interest at elapsed_secs=0 must not overflow");
+            let compound = calculate_interest(principal, yield_bps, 0, true)
+                .expect("compound interest at elapsed_secs=0 must not overflow");
+
+            assert_eq!(
+                simple, 0,
+                "simple interest must be 0 at elapsed_secs=0 (principal={}, yield_bps={})",
+                principal, yield_bps
+            );
+            assert_eq!(
+                compound, 0,
+                "compound interest must be 0 at elapsed_secs=0 (principal={}, yield_bps={})",
+                principal, yield_bps
+            );
+        }
+    }
+
+    /// Fuzz: no arithmetic overflow panics for edge-case large inputs within
+    /// valid ranges (max principal, max yield_bps, max elapsed_secs, and
+    /// combinations thereof). `calculate_interest` is expected to either
+    /// succeed or return `PoolError::AmountOverflow` gracefully — never panic.
+    #[test]
+    fn test_property_no_overflow_panic_on_edge_case_large_inputs() {
+        let edge_principals: [u128; 5] =
+            [1, 2, PROP_MAX_PRINCIPAL / 2, PROP_MAX_PRINCIPAL - 1, PROP_MAX_PRINCIPAL];
+        let edge_yields: [u32; 4] = [1, 2, (PROP_MAX_YIELD_BPS / 2) as u32, PROP_MAX_YIELD_BPS as u32];
+        let edge_elapsed: [u64; 5] = [
+            1,
+            SECS_PER_DAY,
+            SECS_PER_YEAR,
+            PROP_MAX_ELAPSED_SECS / 2,
+            PROP_MAX_ELAPSED_SECS,
+        ];
+
+        for &principal in edge_principals.iter() {
+            for &yield_bps in edge_yields.iter() {
+                for &elapsed_secs in edge_elapsed.iter() {
+                    for &is_compound in [false, true].iter() {
+                        let result =
+                            calculate_interest(principal, yield_bps, elapsed_secs, is_compound);
+                        assert!(
+                            result.is_ok(),
+                            "calculate_interest unexpectedly errored for \
+                             principal={}, yield_bps={}, elapsed_secs={}, is_compound={}: {:?}",
+                            principal,
+                            yield_bps,
+                            elapsed_secs,
+                            is_compound,
+                            result
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Combined fuzz check mirroring the issue's first acceptance criterion at
+    /// the extreme corners of the valid input space (rather than random
+    /// sampling), to make sure the compound >= simple invariant also holds at
+    /// the boundaries, not just in the interior of the range.
+    #[test]
+    fn test_property_compound_gte_simple_at_input_boundaries() {
+        let principals: [u128; 3] = [1, PROP_MAX_PRINCIPAL / 2, PROP_MAX_PRINCIPAL];
+        let yields: [u32; 3] = [1, (PROP_MAX_YIELD_BPS / 2) as u32, PROP_MAX_YIELD_BPS as u32];
+        let elapsed: [u64; 3] = [1, PROP_MAX_ELAPSED_SECS / 2, PROP_MAX_ELAPSED_SECS];
+
+        for &principal in principals.iter() {
+            for &yield_bps in yields.iter() {
+                for &elapsed_secs in elapsed.iter() {
+                    let simple = calculate_interest(principal, yield_bps, elapsed_secs, false)
+                        .expect("simple interest must not overflow within valid ranges");
+                    let compound = calculate_interest(principal, yield_bps, elapsed_secs, true)
+                        .expect("compound interest must not overflow within valid ranges");
+                    assert!(
+                        compound >= simple,
+                        "compound ({}) < simple ({}) for principal={}, yield_bps={}, elapsed_secs={}",
+                        compound,
+                        simple,
+                        principal,
+                        yield_bps,
+                        elapsed_secs
+                    );
+                }
+            }
+        }
+    }
 }
