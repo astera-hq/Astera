@@ -37,7 +37,7 @@
   },
   "devDependencies": {
     "@lhci/cli": "^0.14.0",
-    "@next/swc-wasm-nodejs": "^16.2.9",
+    "@next/swc-wasm-nodejs": "^16.2.10",
     "@parcel/watcher": "^2.5.6",
     "@playwright/test": "^1.44.0",
     "@swc/jest": "^0.2.39",
