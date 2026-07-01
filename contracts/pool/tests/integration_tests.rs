@@ -519,3 +519,43 @@ fn test_multiple_proposals_independent() {
     let prop2 = client.get_proposal(&proposal_id2).unwrap();
     assert!(prop2.executed);
 }
+
+#[test]
+fn test_full_borrower_lifecycle() {
+    let env = Env::default();
+    
+    let (pool_client, admin, usdc_id) = setup(&env);
+    
+    let borrower = Address::generate(&env);
+    
+    mint(&env, &usdc_id, &pool_client.address, 100_000);
+    
+    mint(&env, &usdc_id, &borrower, 20_000);
+
+    let invoice_amount = 10_000;
+    let due_date = 200_000;
+
+    let invoice_id = 1u64; 
+
+    let collateral_amount = 5_000;
+
+    let borrower_balance_before = token::Client::new(&env, &usdc_id).balance(&borrower);
+    let pool_balance_before = token::Client::new(&env, &usdc_id).balance(&pool_client.address);
+
+    pool_client.fund_invoice(&invoice_id);
+
+    let borrower_balance_after = token::Client::new(&env, &usdc_id).balance(&borrower);
+    assert!(borrower_balance_after > borrower_balance_before);
+    
+    let pool_balance_after = token::Client::new(&env, &usdc_id).balance(&pool_client.address);
+    assert!(pool_balance_after < pool_balance_before);
+
+    env.ledger().with_mut(|l| l.timestamp = due_date - 10_000);
+    
+    let total_due = 10_500; // Monto prestado + comisiones simuladas
+    pool_client.repay_invoice(&borrower, &invoice_id, &total_due);
+
+    let pool_balance_final = token::Client::new(&env, &usdc_id).balance(&pool_client.address);
+    assert!(pool_balance_final > pool_balance_after);
+
+}
