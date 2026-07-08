@@ -12,7 +12,7 @@ resolver = "2"
 
 [workspace.dependencies]
 criterion = "0.5"
-soroban-sdk = { version = "22.0.0" }
+soroban-sdk = { version = "27.0.0" }
 
 [profile.release]
 opt-level = "z"
