@@ -12,7 +12,8 @@ import {
   buildInitCoFundingTx,
   submitTx,
 } from '@/lib/contracts';
-import { formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
+import { formatUSDC, formatDate } from '@/lib/stellar';
+import { TruncatedAddress } from '@/components/TruncatedAddress';
 import type { Invoice } from '@/lib/types';
 
 /** Number of invoices to scan per batch */
@@ -440,7 +441,7 @@ export default function AdminInvoicesPage() {
                       <div className="flex flex-col">
                         <span className="font-medium text-white">{inv.debtor}</span>
                         <span className="text-xs text-brand-muted">
-                          {truncateAddress(inv.owner)}
+                          <TruncatedAddress address={inv.owner} />
                         </span>
                       </div>
                     </td>

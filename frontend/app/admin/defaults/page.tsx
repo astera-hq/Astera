@@ -6,7 +6,8 @@ import { useStore } from '@/lib/store';
 import { TableRowSkeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
 import { getInvoice, getInvoiceCount, buildMarkDefaultedTx, submitTx } from '@/lib/contracts';
-import { formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
+import { formatUSDC, formatDate } from '@/lib/stellar';
+import { TruncatedAddress } from '@/components/TruncatedAddress';
 import type { Invoice } from '@/lib/types';
 
 export default function AdminDefaultsPage() {
@@ -141,7 +142,7 @@ export default function AdminDefaultsPage() {
                         <div className="flex flex-col">
                           <span className="font-semibold text-white">{inv.debtor}</span>
                           <span className="text-xs text-brand-muted">
-                            {truncateAddress(inv.owner)}
+                            <TruncatedAddress address={inv.owner} />
                           </span>
                         </div>
                       </td>

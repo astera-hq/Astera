@@ -1,7 +1,7 @@
 'use client';
 
 import type { TopSme } from '@/lib/analytics';
-import { truncateAddress } from '@/lib/analytics';
+import { TruncatedAddress } from '@/components/TruncatedAddress';
 
 interface TopSmesTableProps {
   data: TopSme[];
@@ -66,7 +66,7 @@ export function TopSmesTable({ data, isLoading }: TopSmesTableProps) {
                 <tr key={sme.address} className="hover:bg-white/5 transition-colors">
                   <td className="px-4 py-3 text-sm text-brand-muted font-mono">{index + 1}</td>
                   <td className="px-4 py-3 text-sm text-white font-mono">
-                    {truncateAddress(sme.address)}
+                    <TruncatedAddress address={sme.address} />
                   </td>
                   <td className="px-4 py-3 text-sm text-white text-right">{sme.invoiceCount}</td>
                   <td className="px-4 py-3 text-sm text-brand-gold text-right font-medium">
