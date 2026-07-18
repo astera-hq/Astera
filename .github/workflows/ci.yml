@@ -64,7 +64,7 @@ jobs:
         run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share
 
       - name: Run cross-contract integration tests
-        run: cargo test --manifest-path contracts/tests/Cargo.toml
+        run: cargo test --manifest-path ../contracts/tests/Cargo.toml
 
   e2e:
     name: E2E Tests
