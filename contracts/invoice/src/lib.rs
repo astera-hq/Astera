@@ -1,6 +1,9 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(test)]
+extern crate std;
+
 // === AUTHORIZED CALLERS ===
 // - Admin: initialize(), admin-only setters
 // - Pool contract: mark_funded(), mark_paid(), mark_defaulted()
@@ -194,15 +197,6 @@ pub struct InvoiceMetadata {
 }
 
 #[contracttype]
-#[derive(Clone, Debug)]
-pub struct DisputeRecord {
-    pub evidence_hash: String,
-    pub filed_at: u64,
-    pub resolved_at: u64,
-    pub outcome: Option<DisputeResolution>,
-}
-
-#[contracttype]
 #[derive(Clone, Default)]
 pub struct StorageStats {
     pub total_invoices: u64,
@@ -292,8 +286,6 @@ pub enum DataKey {
     AdminChangeScheduledAt,
     // #654: enforce oracle verification before invoices may be funded
     RequireOracleVerification,
-    // #539: invoice dispute mechanism
-    Dispute(u64),
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -1588,134 +1580,6 @@ impl InvoiceContract {
             (EVT, symbol_short!("default")),
             (id, invoice.owner.clone(), env.ledger().timestamp()),
         );
-    }
-
-    pub fn raise_dispute(env: Env, id: u64, borrower: Address, evidence_hash: String) {
-        borrower.require_auth();
-        require_not_paused(&env);
-        bump_instance(&env);
-
-        let mut invoice: Invoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
-        if invoice.status != InvoiceStatus::Defaulted {
-            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
-        }
-        if invoice.owner != borrower {
-            panic_with_error!(&env, InvoiceError::Unauthorized);
-        }
-
-        let dispute_window: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DisputeResolutionWindow)
-            .unwrap_or(DEFAULT_DISPUTE_RESOLUTION_WINDOW);
-        let now = env.ledger().timestamp();
-        let default_at = checked_default_deadline(&env, invoice.due_date, resolve_invoice_grace_period_days(&env, &invoice));
-        let dispute_deadline = default_at.saturating_add(dispute_window);
-
-        if now > dispute_deadline {
-            panic_with_error!(&env, InvoiceError::DisputeWindowClosed);
-        }
-
-        if env.storage().persistent().has(&DataKey::Dispute(id)) {
-            panic_with_error!(&env, InvoiceError::HashMismatch);
-        }
-
-        invoice.status = InvoiceStatus::Disputed;
-        let dispute_record = DisputeRecord {
-            evidence_hash,
-            filed_at: now,
-            resolved_at: 0,
-            outcome: None,
-        };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Invoice(id), &invoice);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Dispute(id), &dispute_record);
-
-        env.events().publish(
-            (EVT, symbol_short!("dispute")),
-            (id, borrower, now),
-        );
-    }
-
-    pub fn resolve_dispute(
-        env: Env,
-        id: u64,
-        admin: Address,
-        outcome: DisputeResolution,
-    ) {
-        admin.require_auth();
-        require_not_paused(&env);
-        bump_instance(&env);
-
-        let authorized_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        if admin != authorized_admin {
-            panic_with_error!(&env, InvoiceError::Unauthorized);
-        }
-
-        let mut invoice: Invoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
-        if invoice.status != InvoiceStatus::Disputed {
-            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
-        }
-
-        let mut dispute_record: DisputeRecord = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Dispute(id))
-            .expect("dispute not found");
-
-        if dispute_record.outcome.is_some() {
-            panic_with_error!(&env, InvoiceError::DisputeAlreadyResolved);
-        }
-
-        let now = env.ledger().timestamp();
-        dispute_record.resolved_at = now;
-        dispute_record.outcome = Some(outcome.clone());
-
-        match outcome {
-            DisputeResolution::InFavorOfDebtor => {
-                invoice.status = InvoiceStatus::Active;
-                let grace_period_days = resolve_invoice_grace_period_days(&env, &invoice);
-                let grace_secs = (grace_period_days as u64).saturating_mul(SECS_PER_DAY);
-                invoice.due_date = now.saturating_add(grace_secs);
-            }
-            DisputeResolution::InFavorOfSME => {
-                invoice.status = InvoiceStatus::Defaulted;
-            }
-        }
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Invoice(id), &invoice);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Dispute(id), &dispute_record);
-
-        env.events().publish(
-            (EVT, symbol_short!("resolved")),
-            (id, admin, now),
-        );
-    }
-
-    pub fn get_dispute(env: Env, id: u64) -> Option<DisputeRecord> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Dispute(id))
     }
 
     pub fn cancel_invoice(env: Env, id: u64, caller: Address) {

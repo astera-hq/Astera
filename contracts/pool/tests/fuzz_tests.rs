@@ -145,10 +145,10 @@ proptest! {
         client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
 
         env.ledger().with_mut(|l| l.timestamp += t1_days * 86_400);
-        let repayment_at_t1 = client.estimate_repayment(&1u64);
+        let repayment_at_t1 = client.estimate_repayment(&1u64, &None);
 
         env.ledger().with_mut(|l| l.timestamp += (t2_days - t1_days) * 86_400);
-        let repayment_at_t2 = client.estimate_repayment(&1u64);
+        let repayment_at_t2 = client.estimate_repayment(&1u64, &None);
 
         prop_assert!(
             repayment_at_t2 >= repayment_at_t1,
@@ -213,7 +213,7 @@ proptest! {
         client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
 
         env.ledger().with_mut(|l| l.timestamp += hold_days * 86_400);
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64, &None);
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         let tt = client.get_token_totals(&usdc_id);
@@ -260,7 +260,7 @@ proptest! {
 
         env.ledger().with_mut(|l| l.timestamp += elapsed_days * 86_400);
 
-        let estimated = client.estimate_repayment(&1u64);
+        let estimated = client.estimate_repayment(&1u64, &None);
         prop_assert!(estimated > principal);
         prop_assert!(estimated < principal * 2); // Sanity check
     }
@@ -399,7 +399,7 @@ proptest! {
         // ── Step 3: repay invoice (optional) ─────────────────────────────────
         if do_repay && principal > 0 {
             env.ledger().with_mut(|l| l.timestamp += 15 * 86_400);
-            let amount_due = client.estimate_repayment(&1u64);
+            let amount_due = client.estimate_repayment(&1u64, &None);
             let pool_value_before_repay = client.get_token_totals(&usdc_id).pool_value;
 
             client.repay_invoice(&1u64, &sme, &amount_due);
@@ -497,7 +497,7 @@ mod deterministic_fuzz {
 
             env.ledger().with_mut(|l| l.timestamp += days * 86_400);
 
-            let estimated = client.estimate_repayment(&1u64);
+            let estimated = client.estimate_repayment(&1u64, &None);
             assert!(
                 estimated > principal,
                 "Interest should be positive for principal={}, days={}",
@@ -621,7 +621,7 @@ mod deterministic_fuzz {
             &usdc_id1,
         );
         env1.ledger().with_mut(|l| l.timestamp += days * 86_400);
-        let simple_repayment = client1.estimate_repayment(&1u64);
+        let simple_repayment = client1.estimate_repayment(&1u64, &None);
 
         // Test compound interest
         let env2 = Env::default();
@@ -644,7 +644,7 @@ mod deterministic_fuzz {
             &usdc_id2,
         );
         env2.ledger().with_mut(|l| l.timestamp += days * 86_400);
-        let compound_repayment = client2.estimate_repayment(&1u64);
+        let compound_repayment = client2.estimate_repayment(&1u64, &None);
 
         // Compound should be slightly higher than simple for 1 year
         assert!(compound_repayment >= simple_repayment);

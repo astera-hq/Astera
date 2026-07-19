@@ -28,6 +28,10 @@ mod share {
     soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/share.wasm");
 }
 
+mod insurance {
+    soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/insurance.wasm");
+}
+
 fn metadata_url(env: &Env) -> String {
     String::from_str(env, "https://example.com/meta")
 }
@@ -53,6 +57,22 @@ fn initialize_pool(
 ) {
     pool_client.initialize(admin, token_id, share_id, invoice_id);
     pool_client.set_max_investor_concentration(admin, &10_000u32);
+}
+
+/// #742: critical admin operations (collateral config, token removal, collateral
+/// seizure) require the two-step propose/wait/execute flow. This drives a
+/// proposal through that flow and returns the proposal id.
+fn propose_and_execute(
+    env: &Env,
+    pool_client: &pool::Client<'_>,
+    admin: &Address,
+    operation: pool::AdminOperation,
+) -> u64 {
+    let proposal_id = pool_client.propose_operation(admin, &operation);
+    let delay = pool_client.get_operation_delay();
+    env.ledger().with_mut(|l| l.timestamp += delay + 1);
+    pool_client.execute_operation(admin, &proposal_id);
+    proposal_id
 }
 
 /// Integration test: Complete invoice lifecycle with pool funding and credit scoring
@@ -613,7 +633,12 @@ fn test_collateral_post_and_release() {
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
 
     // Threshold = 1_000 USDC, 20% collateral required
-    pool_client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+    propose_and_execute(
+        &env,
+        &pool_client,
+        &admin,
+        pool::AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
+    );
 
     let principal: i128 = 5_000;
     let required_col = pool_client.required_collateral_for(&principal);
@@ -705,7 +730,12 @@ fn test_collateral_seize_on_default() {
     let grace_period = invoice_client.get_grace_period() as u64;
     let grace_secs = grace_period * 86_400;
 
-    pool_client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+    propose_and_execute(
+        &env,
+        &pool_client,
+        &admin,
+        pool::AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
+    );
 
     let principal: i128 = 5_000;
     let required_col = pool_client.required_collateral_for(&principal);
@@ -738,21 +768,33 @@ fn test_collateral_seize_on_default() {
     let tt_before = pool_client.get_token_totals(&usdc_id);
 
     // Admin seizes collateral
-    pool_client.seize_collateral(&admin, &1u64);
+    propose_and_execute(
+        &env,
+        &pool_client,
+        &admin,
+        pool::AdminOperation::SeizeCollateral(1u64),
+    );
 
     let col = pool_client.get_collateral_deposit(&1u64).unwrap();
     assert!(col.settled);
 
-    // Pool value increased by collateral, deployed reduced by principal
+    // Pool value is written down by the unrecovered shortfall (principal
+    // minus recovered collateral); deployed reduced by the full principal.
     let tt_after = pool_client.get_token_totals(&usdc_id);
-    assert_eq!(tt_after.pool_value, tt_before.pool_value + required_col);
+    assert_eq!(
+        tt_after.pool_value,
+        tt_before.pool_value - principal + required_col
+    );
     assert_eq!(
         tt_after.total_deployed,
         tt_before.total_deployed - principal
     );
 
     // SME cannot seize again (collateral already settled)
-    let result = pool_client.try_seize_collateral(&admin, &1u64);
+    let proposal_id = pool_client.propose_operation(&admin, &pool::AdminOperation::SeizeCollateral(1u64));
+    let delay = pool_client.get_operation_delay();
+    env.ledger().with_mut(|l| l.timestamp += delay + 1);
+    let result = pool_client.try_execute_operation(&admin, &proposal_id);
     assert_eq!(result, Err(Ok(pool_contract_error(14))));
 }
 
@@ -1064,7 +1106,12 @@ fn test_collateral_not_required_below_threshold() {
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
 
     // Threshold = 10_000, principal = 500 → below threshold, no collateral needed
-    pool_client.set_collateral_config(&admin, &10_000i128, &2_000u32);
+    propose_and_execute(
+        &env,
+        &pool_client,
+        &admin,
+        pool::AdminOperation::SetCollateralConfig(10_000i128, 2_000u32),
+    );
 
     let principal: i128 = 500;
     assert_eq!(pool_client.required_collateral_for(&principal), 0);
@@ -1126,7 +1173,12 @@ fn test_collateral_error_double_deposit() {
         &String::from_str(&env, "POOL"),
     );
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
-    pool_client.set_collateral_config(&admin, &1_000i128, &2_000u32);
+    propose_and_execute(
+        &env,
+        &pool_client,
+        &admin,
+        pool::AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
+    );
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &5_000i128);
 
@@ -1482,7 +1534,12 @@ fn test_token_removal_with_zero_balances() {
     let eurc_shares = share::Client::new(&env, &share_eurc_id).balance(&investor);
     pool_client.withdraw(&investor, &eurc_id, &eurc_shares);
 
-    pool_client.remove_token(&admin, &eurc_id);
+    propose_and_execute(
+        &env,
+        &pool_client,
+        &admin,
+        pool::AdminOperation::RemoveToken(eurc_id.clone()),
+    );
 
     let tokens_after = pool_client.accepted_tokens();
     assert!(
@@ -1544,7 +1601,10 @@ fn test_token_removal_blocked_with_active_deposits() {
         .mint(&investor, &10_000_000_000i128);
     pool_client.deposit(&investor, &eurc_id, &100_000_000i128);
 
-    let result = pool_client.try_remove_token(&admin, &eurc_id);
+    let proposal_id = pool_client.propose_operation(&admin, &pool::AdminOperation::RemoveToken(eurc_id.clone()));
+    let delay = pool_client.get_operation_delay();
+    env.ledger().with_mut(|l| l.timestamp += delay + 1);
+    let result = pool_client.try_execute_operation(&admin, &proposal_id);
     assert_eq!(result, Err(Ok(pool_contract_error(27))));
 
     let tokens = pool_client.accepted_tokens();
@@ -2075,3 +2135,186 @@ fn test_multiple_simultaneous_withdrawals_high_deployment() {
     assert!(balance2 > 3_000_000_000i128);
     assert!(balance3 > 4_000_000_000i128);
 }
+
+struct InsuredScenarioResult {
+    investor_final_balance: i128,
+    premium_paid: i128,
+    claims_paid: i128,
+}
+
+/// Runs the identical fund → default → (partial) collateral seizure lifecycle
+/// twice — once with the #866 default-insurance reserve wired up and once
+/// without — and diffs the investor's final balance between the two runs.
+///
+/// #866 acceptance criterion: investors funding an insured invoice end up
+/// strictly better off on default than investors funding an equivalent
+/// uninsured invoice, and the improvement is accounted for exactly by
+/// (claim payout − premium paid) — not an approximation.
+#[test]
+fn test_insurance_reduces_investor_loss_on_default() {
+    fn run_scenario(use_insurance: bool) -> InsuredScenarioResult {
+        let env = test_env();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let admin = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+
+        let invoice_id_addr = env.register_contract_wasm(None, invoice::WASM);
+        let pool_id = env.register_contract_wasm(None, pool::WASM);
+        let share_id = env.register_contract_wasm(None, share::WASM);
+        let usdc_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+
+        let invoice_client = invoice::Client::new(&env, &invoice_id_addr);
+        let pool_client = pool::Client::new(&env, &pool_id);
+        let share_client = share::Client::new(&env, &share_id);
+
+        invoice_client.initialize(
+            &admin,
+            &pool_id,
+            &10_000_000_000i128,
+            &(30u64 * 86_400u64),
+            &7u32,
+        );
+        share_client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Pool Shares"),
+            &String::from_str(&env, "POOL"),
+        );
+        initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
+
+        // 30% collateral required — deliberately partial, so a genuine
+        // shortfall remains after seizure for insurance to (partly) cover.
+        propose_and_execute(
+            &env,
+            &pool_client,
+            &admin,
+            pool::AdminOperation::SetCollateralConfig(1_000i128, 3_000u32),
+        );
+
+        let principal: i128 = 10_000;
+        let required_col = pool_client.required_collateral_for(&principal);
+
+        let mut insurance_client_opt: Option<insurance::Client> = None;
+        if use_insurance {
+            let insurance_id = env.register_contract_wasm(None, insurance::WASM);
+            let insurance_client = insurance::Client::new(&env, &insurance_id);
+            insurance_client.initialize(&admin, &pool_id, &invoice_id_addr);
+
+            let mut tiers = soroban_sdk::Vec::new(&env);
+            tiers.push_back(insurance::RiskTier {
+                min_score: 200,
+                max_score: 850,
+                risk_multiplier_bps: 10_000,
+            });
+            insurance_client.set_premium_config(
+                &admin,
+                &insurance::PremiumConfig {
+                    base_rate_bps: 200,
+                    tenor_bps_per_day: 5,
+                    risk_tiers: tiers,
+                    default_risk_multiplier_bps: 10_000,
+                    min_premium_bps: 10,
+                    max_premium_bps: 2_000,
+                    default_coverage_bps: 8_000,
+                },
+            );
+            // Seed the reserve generously so the claim below is solved solvently.
+            soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+                .mint(&admin, &1_000_000i128);
+            insurance_client.fund_reserve_from_treasury(&admin, &usdc_id, &1_000_000i128);
+
+            pool_client.set_insurance_contract(&admin, &insurance_id);
+            insurance_client_opt = Some(insurance_client);
+        }
+
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+            .mint(&investor, &1_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &required_col);
+        pool_client.deposit(&investor, &usdc_id, &1_000_000i128);
+        pool_client.deposit_collateral(&1u64, &sme, &usdc_id, &required_col);
+
+        let due_date = env.ledger().timestamp() + 30 * 86_400;
+        let inv_id = invoice_client.create_invoice(
+            &sme,
+            &String::from_str(&env, "ACME Corp"),
+            &principal,
+            &due_date,
+            &String::from_str(&env, "Invoice #001"),
+            &String::from_str(&env, "hash123"),
+            &metadata_url(&env),
+        );
+        assert_eq!(inv_id, 1);
+        pool_client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+        invoice_client.mark_funded(&1u64, &pool_id);
+
+        let grace_period = invoice_client.get_grace_period() as u64;
+        env.ledger()
+            .with_mut(|l| l.timestamp = due_date + grace_period * 86_400 + 1);
+        invoice_client.mark_defaulted(&1u64, &pool_id);
+
+        propose_and_execute(
+            &env,
+            &pool_client,
+            &admin,
+            pool::AdminOperation::SeizeCollateral(1u64),
+        );
+
+        // file_claim is permissionless and is not chained automatically off
+        // seizure (Soroban disallows pool being re-entered while it's still
+        // on the call stack executing execute_seize_collateral) — file it as
+        // a separate follow-up call, as a keeper/SME/frontend would.
+        if let Some(ref client) = insurance_client_opt {
+            client.file_claim(&admin, &1u64);
+        }
+
+        let shares = share_client.balance(&investor);
+        pool_client.withdraw(&investor, &usdc_id, &shares);
+        let investor_final_balance =
+            soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor);
+
+        let (premium_paid, claims_paid) = match insurance_client_opt {
+            Some(client) => {
+                let coverage = client.get_coverage_record(&1u64).unwrap();
+                let status = client.get_reserve_status(&usdc_id);
+                (coverage.premium_paid, status.total_claims_paid)
+            }
+            None => (0, 0),
+        };
+
+        InsuredScenarioResult {
+            investor_final_balance,
+            premium_paid,
+            claims_paid,
+        }
+    }
+
+    let uninsured = run_scenario(false);
+    let insured = run_scenario(true);
+
+    assert_eq!(uninsured.claims_paid, 0);
+    assert_eq!(uninsured.premium_paid, 0);
+    assert!(insured.claims_paid > 0, "expected a nonzero claim payout");
+
+    assert!(
+        insured.investor_final_balance > uninsured.investor_final_balance,
+        "insured investors ({}) should end up strictly better off than uninsured investors ({}) on default",
+        insured.investor_final_balance,
+        uninsured.investor_final_balance
+    );
+
+    // The improvement is accounted for exactly: claim payout minus what the
+    // pool spent on the premium (also drawn from the pool's own balance).
+    let expected_delta = insured.claims_paid - insured.premium_paid;
+    let actual_delta = insured.investor_final_balance - uninsured.investor_final_balance;
+    assert_eq!(
+        actual_delta, expected_delta,
+        "investor balance improvement should equal claim payout minus premium paid exactly"
+    );
+}
+

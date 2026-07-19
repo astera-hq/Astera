@@ -4,7 +4,7 @@ use soroban_sdk::{testutils::Address as _, token, Address, Env};
 use pool::{FundingPool, FundingPoolClient, PoolError};
 
 fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
-    token::StellarAssetClient::new(env, &env.register_stellar_asset_contract_v2(admin.clone()))
+    token::StellarAssetClient::new(env, &env.register_stellar_asset_contract_v2(admin.clone()).address())
 }
 
 #[test]

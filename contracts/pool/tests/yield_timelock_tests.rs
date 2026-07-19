@@ -4,7 +4,7 @@ use soroban_sdk::{testutils::{Address as _, Ledger}, token, Address, Env};
 use pool::{FundingPool, FundingPoolClient, PoolError};
 
 fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
-    token::StellarAssetClient::new(env, &env.register_stellar_asset_contract_v2(admin.clone()))
+    token::StellarAssetClient::new(env, &env.register_stellar_asset_contract_v2(admin.clone()).address())
 }
 
 fn setup(env: &Env) -> (FundingPoolClient, Address) {
@@ -35,7 +35,7 @@ fn test_execute_yield_change_rejected_before_timelock() {
     
     // Try to execute immediately (timelock is 48 hours = 172,800 seconds)
     env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 86_400); // +24 hours
-    let result = client.try_execute_yield_change(&admin);
+    let result = client.try_execute_yield_change();
     assert_eq!(result.unwrap_err().unwrap(), PoolError::YieldChangeNotReady.into());
 }
 
@@ -53,7 +53,7 @@ fn test_execute_yield_change_succeeds_at_timelock_boundary() {
     
     // Execute exactly at timelock boundary (48 hours = 172,800 seconds)
     env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 172_800);
-    client.execute_yield_change(&admin);
+    client.execute_yield_change();
     
     // Verify the yield was updated
     let config = client.get_config();
@@ -74,7 +74,7 @@ fn test_execute_yield_change_succeeds_after_timelock_elapsed() {
     
     // Execute well after timelock (72 hours)
     env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 259_200);
-    client.execute_yield_change(&admin);
+    client.execute_yield_change();
     
     // Verify the yield was updated
     let config = client.get_config();
@@ -98,7 +98,7 @@ fn test_cancel_yield_proposal_clears_pending() {
     
     // Try to execute should now fail with YieldProposalNotFound
     env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 172_800);
-    let result = client.try_execute_yield_change(&admin);
+    let result = client.try_execute_yield_change();
     assert_eq!(result.unwrap_err().unwrap(), PoolError::YieldProposalNotFound.into());
 }
 
@@ -122,7 +122,7 @@ fn test_cancel_yield_proposal_allows_new_proposal() {
     
     // Execute the new proposal after timelock
     env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 172_800);
-    client.execute_yield_change(&admin);
+    client.execute_yield_change();
     
     // Verify the second yield was applied
     let config = client.get_config();
@@ -138,6 +138,6 @@ fn test_execute_yield_change_without_proposal_fails() {
     let (client, admin) = setup(&env);
     
     // Try to execute without proposing
-    let result = client.try_execute_yield_change(&admin);
+    let result = client.try_execute_yield_change();
     assert_eq!(result.unwrap_err().unwrap(), PoolError::YieldProposalNotFound.into());
 }
