@@ -40,6 +40,25 @@ impl DummyShare {
     }
 }
 
+#[contract]
+pub struct DummyInvoice;
+
+#[contractimpl]
+impl DummyInvoice {
+    pub fn get_authorized_pool(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "pool"))
+            .expect("not initialized")
+    }
+
+    pub fn set_pool(env: Env, pool: Address) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "pool"), &pool);
+    }
+}
+
 fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address) {
     env.ledger().with_mut(|l| l.timestamp = 100_000);
     let contract_id = env.register(FundingPool, ());
@@ -49,7 +68,8 @@ fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address) {
     let usdc_id = env
         .register_stellar_asset_contract_v2(token_admin)
         .address();
-    let invoice_contract = Address::generate(env);
+    let invoice_contract = env.register(DummyInvoice, ());
+    DummyInvoiceClient::new(env, &invoice_contract).set_pool(&contract_id);
     let share_token = env.register(DummyShare, ());
 
     client.initialize(&admin, &usdc_id, &share_token, &invoice_contract);
@@ -441,10 +461,10 @@ fn test_invalid_collateral_config_rejected_at_proposal_time() {
     env.mock_all_auths();
     let (client, admin, _usdc_id) = setup(&env);
 
-    let result = client.try_propose_operation(
-        &admin,
-        &pool::AdminOperation::SetCollateralConfig(0, 3000),
-    );
+    // A threshold of exactly 0 is a legitimate "collateralize every invoice"
+    // policy, not an error; only a negative threshold is invalid.
+    let result =
+        client.try_propose_operation(&admin, &pool::AdminOperation::SetCollateralConfig(-1, 3000));
     assert_eq!(result, Err(Ok(PoolError::InvalidCollateralThreshold)));
 
     let result = client.try_propose_operation(
@@ -520,3 +540,50 @@ fn test_multiple_proposals_independent() {
     assert!(prop2.executed);
 }
 
+#[test]
+fn test_full_borrower_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (pool_client, admin, usdc_id) = setup(&env);
+
+    let investor = Address::generate(&env);
+    let borrower = Address::generate(&env);
+
+    // Seed the pool with real liquidity via a proper deposit, so
+    // fund_invoice's internal accounting (available_liquidity) sees funds,
+    // not just the raw token balance.
+    mint(&env, &usdc_id, &investor, 100_000);
+    pool_client.deposit(&investor, &usdc_id, &100_000);
+
+    let invoice_amount = 10_000i128;
+    let due_date = env.ledger().timestamp() + 100_000;
+    let invoice_id = 1u64;
+
+    let borrower_balance_before = token::Client::new(&env, &usdc_id).balance(&borrower);
+    let pool_balance_before = token::Client::new(&env, &usdc_id).balance(&pool_client.address);
+
+    pool_client.fund_invoice(
+        &admin,
+        &invoice_id,
+        &invoice_amount,
+        &borrower,
+        &due_date,
+        &usdc_id,
+    );
+
+    let borrower_balance_after = token::Client::new(&env, &usdc_id).balance(&borrower);
+    assert!(borrower_balance_after > borrower_balance_before);
+
+    let pool_balance_after = token::Client::new(&env, &usdc_id).balance(&pool_client.address);
+    assert!(pool_balance_after < pool_balance_before);
+
+    env.ledger().with_mut(|l| l.timestamp += 10_000);
+
+    let total_due = pool_client.estimate_repayment(&invoice_id, &None);
+    mint(&env, &usdc_id, &borrower, total_due);
+    pool_client.repay_invoice(&invoice_id, &borrower, &total_due);
+
+    let pool_balance_final = token::Client::new(&env, &usdc_id).balance(&pool_client.address);
+    assert!(pool_balance_final > pool_balance_after);
+}

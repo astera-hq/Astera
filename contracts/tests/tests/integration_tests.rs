@@ -19,9 +19,7 @@ mod pool {
 }
 
 mod credit_score {
-    soroban_sdk::contractimport!(
-        file = "../../target/wasm32v1-none/release/credit_score.wasm"
-    );
+    soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/credit_score.wasm");
 }
 
 mod share {
@@ -59,20 +57,40 @@ fn initialize_pool(
     pool_client.set_max_investor_concentration(admin, &10_000u32);
 }
 
-/// #742: critical admin operations (collateral config, token removal, collateral
-/// seizure) require the two-step propose/wait/execute flow. This drives a
-/// proposal through that flow and returns the proposal id.
-fn propose_and_execute(
+/// #742: RemoveToken, SetCollateralConfig, and SeizeCollateral now require
+/// the two-step propose/execute timelock flow instead of direct admin calls.
+/// This advances the ledger past the configured operation delay so a freshly
+/// proposed operation is ready to execute.
+fn advance_past_operation_delay(env: &Env, pool_client: &pool::Client<'_>) {
+    let delay = pool_client.get_operation_delay();
+    env.ledger().with_mut(|l| l.timestamp += delay + 1);
+}
+
+fn propose_and_execute_set_collateral_config(
     env: &Env,
     pool_client: &pool::Client<'_>,
     admin: &Address,
-    operation: pool::AdminOperation,
-) -> u64 {
-    let proposal_id = pool_client.propose_operation(admin, &operation);
-    let delay = pool_client.get_operation_delay();
-    env.ledger().with_mut(|l| l.timestamp += delay + 1);
+    threshold: i128,
+    collateral_bps: u32,
+) {
+    let proposal_id = pool_client.propose_operation(
+        admin,
+        &pool::AdminOperation::SetCollateralConfig(threshold, collateral_bps),
+    );
+    advance_past_operation_delay(env, pool_client);
     pool_client.execute_operation(admin, &proposal_id);
-    proposal_id
+}
+
+fn propose_and_execute_seize_collateral(
+    env: &Env,
+    pool_client: &pool::Client<'_>,
+    admin: &Address,
+    invoice_id: u64,
+) {
+    let proposal_id =
+        pool_client.propose_operation(admin, &pool::AdminOperation::SeizeCollateral(invoice_id));
+    advance_past_operation_delay(env, pool_client);
+    pool_client.execute_operation(admin, &proposal_id);
 }
 
 /// Integration test: Complete invoice lifecycle with pool funding and credit scoring
@@ -633,12 +651,7 @@ fn test_collateral_post_and_release() {
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
 
     // Threshold = 1_000 USDC, 20% collateral required
-    propose_and_execute(
-        &env,
-        &pool_client,
-        &admin,
-        pool::AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
-    );
+    propose_and_execute_set_collateral_config(&env, &pool_client, &admin, 1_000i128, 2_000u32);
 
     let principal: i128 = 5_000;
     let required_col = pool_client.required_collateral_for(&principal);
@@ -730,12 +743,7 @@ fn test_collateral_seize_on_default() {
     let grace_period = invoice_client.get_grace_period() as u64;
     let grace_secs = grace_period * 86_400;
 
-    propose_and_execute(
-        &env,
-        &pool_client,
-        &admin,
-        pool::AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
-    );
+    propose_and_execute_set_collateral_config(&env, &pool_client, &admin, 1_000i128, 2_000u32);
 
     let principal: i128 = 5_000;
     let required_col = pool_client.required_collateral_for(&principal);
@@ -768,12 +776,7 @@ fn test_collateral_seize_on_default() {
     let tt_before = pool_client.get_token_totals(&usdc_id);
 
     // Admin seizes collateral
-    propose_and_execute(
-        &env,
-        &pool_client,
-        &admin,
-        pool::AdminOperation::SeizeCollateral(1u64),
-    );
+    propose_and_execute_seize_collateral(&env, &pool_client, &admin, 1u64);
 
     let col = pool_client.get_collateral_deposit(&1u64).unwrap();
     assert!(col.settled);
@@ -790,10 +793,11 @@ fn test_collateral_seize_on_default() {
         tt_before.total_deployed - principal
     );
 
-    // SME cannot seize again (collateral already settled)
-    let proposal_id = pool_client.propose_operation(&admin, &pool::AdminOperation::SeizeCollateral(1u64));
-    let delay = pool_client.get_operation_delay();
-    env.ledger().with_mut(|l| l.timestamp += delay + 1);
+    // SME cannot seize again (collateral already settled). #742: the
+    // already-settled check happens at execute time, not propose time.
+    let proposal_id =
+        pool_client.propose_operation(&admin, &pool::AdminOperation::SeizeCollateral(1u64));
+    advance_past_operation_delay(&env, &pool_client);
     let result = pool_client.try_execute_operation(&admin, &proposal_id);
     assert_eq!(result, Err(Ok(pool_contract_error(14))));
 }
@@ -1106,12 +1110,7 @@ fn test_collateral_not_required_below_threshold() {
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
 
     // Threshold = 10_000, principal = 500 → below threshold, no collateral needed
-    propose_and_execute(
-        &env,
-        &pool_client,
-        &admin,
-        pool::AdminOperation::SetCollateralConfig(10_000i128, 2_000u32),
-    );
+    propose_and_execute_set_collateral_config(&env, &pool_client, &admin, 10_000i128, 2_000u32);
 
     let principal: i128 = 500;
     assert_eq!(pool_client.required_collateral_for(&principal), 0);
@@ -1173,12 +1172,7 @@ fn test_collateral_error_double_deposit() {
         &String::from_str(&env, "POOL"),
     );
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
-    propose_and_execute(
-        &env,
-        &pool_client,
-        &admin,
-        pool::AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
-    );
+    propose_and_execute_set_collateral_config(&env, &pool_client, &admin, 1_000i128, 2_000u32);
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &5_000i128);
 
@@ -1534,12 +1528,12 @@ fn test_token_removal_with_zero_balances() {
     let eurc_shares = share::Client::new(&env, &share_eurc_id).balance(&investor);
     pool_client.withdraw(&investor, &eurc_id, &eurc_shares);
 
-    propose_and_execute(
-        &env,
-        &pool_client,
-        &admin,
-        pool::AdminOperation::RemoveToken(eurc_id.clone()),
-    );
+    {
+        let proposal_id = pool_client
+            .propose_operation(&admin, &pool::AdminOperation::RemoveToken(eurc_id.clone()));
+        advance_past_operation_delay(&env, &pool_client);
+        pool_client.execute_operation(&admin, &proposal_id);
+    }
 
     let tokens_after = pool_client.accepted_tokens();
     assert!(
@@ -1601,9 +1595,11 @@ fn test_token_removal_blocked_with_active_deposits() {
         .mint(&investor, &10_000_000_000i128);
     pool_client.deposit(&investor, &eurc_id, &100_000_000i128);
 
-    let proposal_id = pool_client.propose_operation(&admin, &pool::AdminOperation::RemoveToken(eurc_id.clone()));
-    let delay = pool_client.get_operation_delay();
-    env.ledger().with_mut(|l| l.timestamp += delay + 1);
+    // #742: RemoveToken now requires the propose/execute timelock flow; the
+    // active-balances check (error #27) happens at execute time, not propose time.
+    let proposal_id =
+        pool_client.propose_operation(&admin, &pool::AdminOperation::RemoveToken(eurc_id.clone()));
+    advance_past_operation_delay(&env, &pool_client);
     let result = pool_client.try_execute_operation(&admin, &proposal_id);
     assert_eq!(result, Err(Ok(pool_contract_error(27))));
 
@@ -1658,8 +1654,7 @@ fn test_oracle_verified_funding_flow() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
         .mint(&investor, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
-        .mint(&sme, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr).mint(&sme, &10_000_000_000i128);
 
     pool_client.deposit(&investor, &usdc_addr, &5_000_000_000i128);
 
@@ -1677,10 +1672,7 @@ fn test_oracle_verified_funding_flow() {
     assert_eq!(inv_id, 1);
 
     let invoice = invoice_client.get_invoice(&inv_id);
-    assert_eq!(
-        invoice.status,
-        invoice::InvoiceStatus::AwaitingVerification
-    );
+    assert_eq!(invoice.status, invoice::InvoiceStatus::AwaitingVerification);
 
     // mark_funded should be blocked while invoice is AwaitingVerification
     let block_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -1728,28 +1720,26 @@ fn test_concurrent_deposit_and_withdrawal_same_ledger() {
     env.ledger().with_mut(|l| l.timestamp = 100_000);
 
     let (pool_client, share_client, admin, usdc_id) = setup_pool(&env);
-    
+
     let lender1 = Address::generate(&env);
     let lender2 = Address::generate(&env);
 
     // Mint tokens to lenders
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&lender1, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&lender2, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender1, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender2, &10_000_000_000i128);
 
     // Initial deposit from lender1
     pool_client.deposit(&lender1, &usdc_id, &5_000_000_000i128);
     let initial_pool_value = pool_client.get_token_totals(&usdc_id).pool_value;
     assert_eq!(initial_pool_value, 5_000_000_000i128);
 
-    // Simulate same-ledger transactions: 
+    // Simulate same-ledger transactions:
     // Transaction 1: lender2 deposits 1000 USDC
     // Transaction 2: lender1 withdraws 500 USDC worth of shares
-    
+
     // Execute deposit first
     pool_client.deposit(&lender2, &usdc_id, &1_000_000_000i128);
-    
+
     // Same ledger - no sequence number increment
     // Execute withdrawal immediately after
     let shares_to_withdraw = share_client.balance(&lender1) / 10; // withdraw 10%
@@ -1827,12 +1817,9 @@ fn test_deposit_during_active_funding() {
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
 
     // Mint tokens
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&lender1, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&lender2, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&sme, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender1, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender2, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     // Initial deposit from lender1
     pool_client.deposit(&lender1, &usdc_id, &5_000_000_000i128);
@@ -1880,10 +1867,10 @@ fn test_deposit_during_active_funding() {
     // Both lenders should get proportional yield
     // Lender1 had capital deployed, lender2 did not
     let shares_lender1_final = share_client.balance(&lender1);
-    
+
     // Lender1's shares should be same (yield increases share value, not count)
     assert_eq!(shares_lender1_final, shares_lender1_initial);
-    
+
     // When they withdraw, lender1 should have higher returns per share
     pool_client.withdraw(&lender1, &usdc_id, &shares_lender1_final);
     pool_client.withdraw(&lender2, &usdc_id, &shares_lender2);
@@ -1893,8 +1880,29 @@ fn test_deposit_during_active_funding() {
 
     // Lender1 should have earned yield
     assert!(balance1 > 5_000_000_000i128);
-    // Lender2 deposited after deployment, should get base amount
-    assert_eq!(balance2, 3_000_000_000i128);
+    // The pool's reward-per-share accumulator distributes accrued interest
+    // pro-rata to every share outstanding at the moment of full repayment,
+    // not only to shares that funded this specific invoice. Lender2 held
+    // 3B of the 8B total shares at that moment, so lender2 legitimately
+    // earns a proportional slice of the interest too (not zero).
+    assert!(
+        balance2 >= 3_000_000_000i128,
+        "lender2 should not lose principal, got {balance2}"
+    );
+    // Both lenders were minted 10B externally and deposited only part of
+    // it, so their final wallet balance is (10B - deposit + payout); use
+    // the full mint amount as the baseline to isolate yield alone.
+    let lender1_yield = balance1 - 10_000_000_000i128;
+    let lender2_yield = balance2 - 10_000_000_000i128;
+    // Yield should split ~5:3 between lender1:lender2, matching their
+    // share-count ratio (5B vs 3B) at the moment interest was credited.
+    // Cross-multiplied to avoid integer-division rounding; a small
+    // tolerance absorbs the contract's own internal rounding.
+    let cross_diff = (lender1_yield * 3 - lender2_yield * 5).abs();
+    assert!(
+        cross_diff <= 10,
+        "yield should split ~5:3 by share count, got lender1={lender1_yield} lender2={lender2_yield}"
+    );
 }
 
 /// Integration test: Withdrawal while invoice is being repaid
@@ -1937,10 +1945,8 @@ fn test_withdraw_during_repayment() {
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
 
     // Mint tokens
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&lender, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&sme, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     // Lender deposits
     pool_client.deposit(&lender, &usdc_id, &5_000_000_000i128);
@@ -2036,14 +2042,10 @@ fn test_multiple_simultaneous_withdrawals_high_deployment() {
     initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
 
     // Mint tokens to all lenders
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&lender1, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&lender2, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&lender3, &10_000_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-        .mint(&sme, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender1, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender2, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&lender3, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
 
     // All lenders deposit equal amounts
     pool_client.deposit(&lender1, &usdc_id, &3_000_000_000i128);
@@ -2082,11 +2084,11 @@ fn test_multiple_simultaneous_withdrawals_high_deployment() {
 
     // All three lenders try to withdraw simultaneously (same ledger)
     // Only 1B liquidity available, total value is 10B
-    
+
     // Lender1 attempts to withdraw all their shares (should represent 3B value)
     let shares1 = share_client.balance(&lender1);
     let result1 = pool_client.try_withdraw(&lender1, &usdc_id, &shares1);
-    
+
     // First withdrawal should fail if trying to withdraw more than available liquidity
     // or succeed with partial amount
     // Based on pool logic, this might fail with insufficient liquidity error

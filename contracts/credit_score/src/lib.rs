@@ -799,13 +799,7 @@ impl CreditScoreContract {
     /// so funding events alone cannot override a poor repayment history.
     ///
     /// Idempotent: duplicate calls for the same invoice_id are silently ignored.
-    pub fn record_funding(
-        env: Env,
-        _caller: Address,
-        invoice_id: u64,
-        sme: Address,
-        amount: i128,
-    ) {
+    pub fn record_funding(env: Env, _caller: Address, invoice_id: u64, sme: Address, amount: i128) {
         let pool: Address = env
             .storage()
             .instance()

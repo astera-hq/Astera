@@ -17,7 +17,7 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
-    "@sentry/nextjs": "9.18.0",
+    "@sentry/nextjs": "^10.66.0",
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/js-xdr": "^3.1.2",
     "@stellar/stellar-sdk": "^14.6.1",
