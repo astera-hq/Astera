@@ -2,43 +2,53 @@
 
 use pool::{FundingPool, FundingPoolClient, FundingRequest, PoolError};
 use soroban_sdk::{
-    contract, contractimpl, testutils::Address as _, token, Address, Env, Symbol, Vec,
+    contract, contractimpl, symbol_short, testutils::Address as _, token, Address, Env, Vec,
 };
 
-#[contract]
-pub struct DummyShare;
+mod dummy_share_contract {
+    use super::*;
 
-#[contractimpl]
-impl DummyShare {
-    pub fn total_supply(env: Env) -> i128 {
-        env.storage()
-            .instance()
-            .get(&Symbol::new(&env, "tot"))
-            .unwrap_or(0)
-    }
+    #[contract]
+    pub struct DummyShare;
 
-    pub fn balance(env: Env, id: Address) -> i128 {
-        env.storage().persistent().get(&id).unwrap_or(0)
-    }
+    #[contractimpl]
+    impl DummyShare {
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
 
-    pub fn mint(env: Env, to: Address, amount: i128) {
-        let total = Self::total_supply(env.clone());
-        let balance = Self::balance(env.clone(), to.clone());
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "tot"), &(total + amount));
-        env.storage().persistent().set(&to, &(balance + amount));
-    }
+        pub fn total_supply(env: Env) -> i128 {
+            env.storage()
+                .instance()
+                .get(&symbol_short!("tot"))
+                .unwrap_or(0)
+        }
 
-    pub fn burn(env: Env, from: Address, amount: i128) {
-        let total = Self::total_supply(env.clone());
-        let balance = Self::balance(env.clone(), from.clone());
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "tot"), &(total - amount));
-        env.storage().persistent().set(&from, &(balance - amount));
+        pub fn balance(env: Env, id: Address) -> i128 {
+            env.storage().persistent().get(&id).unwrap_or(0)
+        }
+
+        pub fn mint(env: Env, to: Address, amount: i128) {
+            let total = Self::total_supply(env.clone());
+            let balance = Self::balance(env.clone(), to.clone());
+            env.storage().persistent().set(&to, &(balance + amount));
+            env.storage()
+                .instance()
+                .set(&symbol_short!("tot"), &(total + amount));
+        }
+
+        pub fn burn(env: Env, from: Address, amount: i128) {
+            let total = Self::total_supply(env.clone());
+            let balance = Self::balance(env.clone(), from.clone());
+            env.storage().persistent().set(&from, &(balance - amount));
+            env.storage()
+                .instance()
+                .set(&symbol_short!("tot"), &(total - amount));
+        }
     }
 }
+
+use dummy_share_contract::DummyShare;
 
 fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
     token::StellarAssetClient::new(
@@ -48,7 +58,7 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::StellarAssetC
     )
 }
 
-fn setup(env: &Env) -> (FundingPoolClient, Address, Address) {
+fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address) {
     let admin = Address::generate(env);
     let token_admin = Address::generate(env);
     let token = create_token_contract(env, &token_admin);
@@ -59,10 +69,17 @@ fn setup(env: &Env) -> (FundingPoolClient, Address, Address) {
     let client = FundingPoolClient::new(env, &pool_id);
 
     client.initialize(&admin, &token.address, &share_token, &invoice_contract);
-    // Tests here deposit from a single investor, so disable the default
-    // 20% concentration cap that would otherwise reject a sole depositor.
     client.set_max_investor_concentration(&admin, &10_000u32);
     (client, admin, token.address)
+}
+
+fn seed_liquidity(env: &Env, client: &FundingPoolClient<'_>, token: &Address, amount: i128) {
+    let token_client = token::StellarAssetClient::new(env, token);
+    for _ in 0..5 {
+        let investor = Address::generate(env);
+        token_client.mint(&investor, &amount);
+        client.deposit(&investor, token, &amount);
+    }
 }
 
 #[test]
@@ -105,12 +122,9 @@ fn test_fund_multiple_invoices_accepts_unique_ids() {
 
     let (client, admin, token) = setup(&env);
     let sme = Address::generate(&env);
-    let investor = Address::generate(&env);
 
-    // Deposit funds first
-    let token_client = token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&investor, &10_000_000);
-    client.deposit(&investor, &token, &10_000_000);
+    // Deposit funds first without tripping the per-investor concentration cap.
+    seed_liquidity(&env, &client, &token, 2_000_000);
 
     // Create a batch with unique invoice IDs
     let mut requests: Vec<FundingRequest> = Vec::new(&env);
@@ -180,12 +194,9 @@ fn test_fund_invoices_batch_max_size_succeeds() {
 
     let (client, admin, token) = setup(&env);
     let sme = Address::generate(&env);
-    let investor = Address::generate(&env);
 
-    // Deposit sufficient funds
-    let token_client = token::StellarAssetClient::new(&env, &token);
-    token_client.mint(&investor, &50_000_000);
-    client.deposit(&investor, &token, &50_000_000);
+    // Deposit sufficient funds without tripping the per-investor concentration cap.
+    seed_liquidity(&env, &client, &token, 10_000_000);
 
     // Create a batch exactly at MAX_BATCH_SIZE (20)
     let mut requests: Vec<FundingRequest> = Vec::new(&env);

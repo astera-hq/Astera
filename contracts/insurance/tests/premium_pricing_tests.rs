@@ -78,8 +78,14 @@ fn test_longer_tenor_never_cheaper_fixed_case() {
     let medium = calculate_premium(principal, score, 60, &cfg);
     let long = calculate_premium(principal, score, 180, &cfg);
 
-    assert!(short <= medium, "10-day tenor should not cost more than 60-day");
-    assert!(medium <= long, "60-day tenor should not cost more than 180-day");
+    assert!(
+        short <= medium,
+        "10-day tenor should not cost more than 60-day"
+    );
+    assert!(
+        medium <= long,
+        "60-day tenor should not cost more than 180-day"
+    );
 }
 
 #[test]

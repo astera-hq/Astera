@@ -4,7 +4,7 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contractclient, contracttype, panic_with_error,
+    contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
     symbol_short, token, Address, Env, Symbol, Vec,
 };
 
@@ -18,7 +18,7 @@ use soroban_sdk::{
 //   token's accrued `protocol_revenue` (see contracts/pool/src/lib.rs). This avoids
 //   needing the SME as a co-signer inside `fund_invoice` (which is admin-initiated and
 //   the SME is not part of the auth stack), while still satisfying "risk-based premiums
-///  funded by protocol revenue" from the issue description. `payer` is a parameter (not
+//   funded by protocol revenue" from the issue description. `payer` is a parameter (not
 //   hardcoded) so a future flow could let the SME pay directly by passing its own address
 //   and signing. `due_date` is likewise a caller-supplied parameter rather than looked up
 //   via a callback into pool — see the reentrancy note below.
@@ -283,7 +283,8 @@ pub fn calculate_premium(
     let base = principal.saturating_mul(config.base_rate_bps as u128) / denom;
     let risk_adjusted = base.saturating_mul(risk_multiplier_bps) / denom;
 
-    let tenor_extra_bps = (invoice_tenor_days as u128).saturating_mul(config.tenor_bps_per_day as u128);
+    let tenor_extra_bps =
+        (invoice_tenor_days as u128).saturating_mul(config.tenor_bps_per_day as u128);
     let tenor_bonus = risk_adjusted.saturating_mul(tenor_extra_bps) / denom;
     let raw_premium = risk_adjusted.saturating_add(tenor_bonus);
 
@@ -366,9 +367,10 @@ impl InsuranceReserve {
         if config.default_coverage_bps == 0 || config.default_coverage_bps > BPS_DENOM {
             return Err(InsuranceError::InvalidCoverageBps);
         }
-        env.storage().instance().set(&DataKey::PremiumConfig, &config);
-        env.events()
-            .publish((EVT, symbol_short!("cfg_set")), admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PremiumConfig, &config);
+        env.events().publish((EVT, symbol_short!("cfg_set")), admin);
         Ok(())
     }
 
@@ -393,8 +395,10 @@ impl InsuranceReserve {
         env.storage()
             .instance()
             .set(&DataKey::ReserveFund(token.clone()), &reserve);
-        env.events()
-            .publish((EVT, symbol_short!("mcr_set")), (admin, token, min_ratio_bps));
+        env.events().publish(
+            (EVT, symbol_short!("mcr_set")),
+            (admin, token, min_ratio_bps),
+        );
         Ok(())
     }
 
@@ -527,7 +531,7 @@ impl InsuranceReserve {
             .map_err(|_| InsuranceError::AmountOverflow)?;
 
         let coverage_bps = config.default_coverage_bps;
-        let covered_exposure = (principal as i128)
+        let covered_exposure = principal
             .checked_mul(coverage_bps as i128)
             .and_then(|v| v.checked_div(BPS_DENOM as i128))
             .ok_or(InsuranceError::AmountOverflow)?;
@@ -626,7 +630,10 @@ impl InsuranceReserve {
             .filter(|c| c.settled)
             .map(|c| c.amount)
             .unwrap_or(0);
-        let shortfall = owed.checked_sub(recovered).ok_or(InsuranceError::AmountOverflow)?.max(0);
+        let shortfall = owed
+            .checked_sub(recovered)
+            .ok_or(InsuranceError::AmountOverflow)?
+            .max(0);
         if shortfall <= 0 {
             return Err(InsuranceError::NoShortfall);
         }
@@ -642,7 +649,10 @@ impl InsuranceReserve {
         // shortfall (don't double-pay past collateral recovery), or what the
         // reserve actually holds (insolvency degrades to a partial payout
         // instead of panicking or overdrawing).
-        let payout = nominal_covered.min(shortfall).min(reserve.total_reserves).max(0);
+        let payout = nominal_covered
+            .min(shortfall)
+            .min(reserve.total_reserves)
+            .max(0);
         if payout <= 0 {
             return Err(InsuranceError::NoShortfall);
         }
@@ -693,7 +703,9 @@ impl InsuranceReserve {
     }
 
     pub fn get_coverage_record(env: Env, invoice_id: u64) -> Option<CoverageRecord> {
-        env.storage().instance().get(&DataKey::CoverageRecord(invoice_id))
+        env.storage()
+            .instance()
+            .get(&DataKey::CoverageRecord(invoice_id))
     }
 
     /// Read-only quote — no storage writes, no auth. `tenor_days` is supplied
@@ -713,7 +725,9 @@ impl InsuranceReserve {
             .ok_or(InsuranceError::InvalidPremiumConfig)?;
         let score = Self::resolve_credit_score(&env, &sme);
         let premium = calculate_premium(principal, score, tenor_days, &config);
-        premium.try_into().map_err(|_| InsuranceError::AmountOverflow)
+        premium
+            .try_into()
+            .map_err(|_| InsuranceError::AmountOverflow)
     }
 
     // ---- Internal ----
@@ -721,7 +735,8 @@ impl InsuranceReserve {
     fn resolve_credit_score(env: &Env, sme: &Address) -> u32 {
         const DEFAULT_SCORE_WHEN_UNAVAILABLE: u32 = 300; // conservative: near the bottom of 200-850
 
-        let cs_contract: Option<Address> = env.storage().instance().get(&DataKey::CreditScoreContract);
+        let cs_contract: Option<Address> =
+            env.storage().instance().get(&DataKey::CreditScoreContract);
         match cs_contract {
             Some(addr) => {
                 let client = CreditScoreClient::new(env, &addr);
@@ -745,7 +760,8 @@ impl InsuranceReserve {
         if exposure <= 0 {
             return BPS_DENOM;
         }
-        let ratio = (reserves.max(0) as i128)
+        let ratio = reserves
+            .max(0)
             .saturating_mul(BPS_DENOM as i128)
             .checked_div(exposure);
         match ratio {
@@ -780,7 +796,9 @@ impl InsuranceReserve {
         {
             panic_with_error!(env, InsuranceError::Unauthorized);
         }
-        env.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::ReentrancyGuard, &true);
     }
 
     fn non_reentrant_end(env: &Env) {
@@ -789,4 +807,3 @@ impl InsuranceReserve {
             .set(&DataKey::ReentrancyGuard, &false);
     }
 }
-

@@ -192,14 +192,19 @@ fn test_purchase_coverage_and_reserve_status() {
         token: h.token_id.clone(),
         principal: 10_000,
         funded_at: 0,
-            factoring_fee: 0,
+        factoring_fee: 0,
         due_date: 30 * 86_400,
         repaid_amount: 0,
     });
 
-    let record = h
-        .client
-        .purchase_coverage(&payer, &1u64, &10_000i128, &sme, &(30u64 * 86_400u64),&h.token_id);
+    let record = h.client.purchase_coverage(
+        &payer,
+        &1u64,
+        &10_000i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
     assert_eq!(record.invoice_id, 1);
     assert!(record.premium_paid > 0);
     assert_eq!(record.coverage_bps, 8_000);
@@ -224,15 +229,26 @@ fn test_purchase_coverage_rejects_double_coverage() {
         token: h.token_id.clone(),
         principal: 10_000,
         funded_at: 0,
-            factoring_fee: 0,
+        factoring_fee: 0,
         due_date: 30 * 86_400,
         repaid_amount: 0,
     });
-    h.client
-        .purchase_coverage(&payer, &1u64, &10_000i128, &sme, &(30u64 * 86_400u64),&h.token_id);
-    let result = h
-        .client
-        .try_purchase_coverage(&payer, &1u64, &10_000i128, &sme, &(30u64 * 86_400u64),&h.token_id);
+    h.client.purchase_coverage(
+        &payer,
+        &1u64,
+        &10_000i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
+    let result = h.client.try_purchase_coverage(
+        &payer,
+        &1u64,
+        &10_000i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
     assert_eq!(result, Err(Ok(InsuranceError::AlreadyCovered)));
 }
 
@@ -243,7 +259,8 @@ fn test_coverage_ratio_floor_blocks_new_purchases() {
     let h = setup(&env);
     // A thin reserve with a high floor: the very first purchase already
     // pushes projected exposure far above what the (zero) reserve can back.
-    h.client.set_min_coverage_ratio(&h.admin, &h.token_id, &5_000u32);
+    h.client
+        .set_min_coverage_ratio(&h.admin, &h.token_id, &5_000u32);
 
     let sme = Address::generate(&env);
     let payer = h.pool_id.clone();
@@ -254,14 +271,19 @@ fn test_coverage_ratio_floor_blocks_new_purchases() {
         token: h.token_id.clone(),
         principal: 10_000_000,
         funded_at: 0,
-            factoring_fee: 0,
+        factoring_fee: 0,
         due_date: 30 * 86_400,
         repaid_amount: 0,
     });
 
-    let result =
-        h.client
-            .try_purchase_coverage(&payer, &1u64, &10_000_000i128, &sme, &(30u64 * 86_400u64),&h.token_id);
+    let result = h.client.try_purchase_coverage(
+        &payer,
+        &1u64,
+        &10_000_000i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
     assert_eq!(result, Err(Ok(InsuranceError::CoverageRatioFloorBreached)));
 }
 
@@ -270,7 +292,8 @@ fn test_coverage_ratio_floor_allows_purchase_once_reserve_seeded() {
     let env = Env::default();
     env.mock_all_auths();
     let h = setup(&env);
-    h.client.set_min_coverage_ratio(&h.admin, &h.token_id, &5_000u32);
+    h.client
+        .set_min_coverage_ratio(&h.admin, &h.token_id, &5_000u32);
 
     // Seed the reserve generously first so the floor isn't breached.
     mint(&env, &h.token_id, &h.admin, 10_000_000);
@@ -286,14 +309,19 @@ fn test_coverage_ratio_floor_allows_purchase_once_reserve_seeded() {
         token: h.token_id.clone(),
         principal: 10_000,
         funded_at: 0,
-            factoring_fee: 0,
+        factoring_fee: 0,
         due_date: 30 * 86_400,
         repaid_amount: 0,
     });
 
-    let record = h
-        .client
-        .purchase_coverage(&payer, &1u64, &10_000i128, &sme, &(30u64 * 86_400u64),&h.token_id);
+    let record = h.client.purchase_coverage(
+        &payer,
+        &1u64,
+        &10_000i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
     assert!(record.premium_paid > 0);
 }
 
@@ -307,12 +335,18 @@ fn cover_and_default(env: &Env, h: &Harness, invoice_id: u64, principal: i128) -
         token: h.token_id.clone(),
         principal,
         funded_at: 0,
-            factoring_fee: 0,
+        factoring_fee: 0,
         due_date: 30 * 86_400,
         repaid_amount: 0,
     });
-    h.client
-        .purchase_coverage(&payer, &invoice_id, &principal, &sme, &(30u64 * 86_400u64),&h.token_id);
+    h.client.purchase_coverage(
+        &payer,
+        &invoice_id,
+        &principal,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
     h.invoice_client.set_defaulted(&invoice_id, &true);
     sme
 }
@@ -403,12 +437,18 @@ fn test_file_claim_rejects_before_default() {
         token: h.token_id.clone(),
         principal,
         funded_at: 0,
-            factoring_fee: 0,
+        factoring_fee: 0,
         due_date: 30 * 86_400,
         repaid_amount: 0,
     });
-    h.client
-        .purchase_coverage(&payer, &1u64, &principal, &sme, &(30u64 * 86_400u64),&h.token_id);
+    h.client.purchase_coverage(
+        &payer,
+        &1u64,
+        &principal,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
     // Never marked defaulted.
 
     let caller = Address::generate(&env);
@@ -440,16 +480,17 @@ fn test_file_claim_accounts_for_collateral_recovery() {
     // Collateral already recovered 6_000 of the 10_000 owed — shortfall is
     // 4_000, below the nominal 8_000 covered amount, so the claim should pay
     // only 4_000 (insurance covers the gap after collateral, not double-pay).
-    h.pool_client.set_collateral_deposit(&CollateralDepositView {
-        invoice_id: 1,
-        depositor: Address::generate(&env),
-        token: h.token_id.clone(),
-        amount: 6_000,
-        settled: true,
-        posted_at: 0,
-        released_at: 0,
-        seized_at: 0,
-    });
+    h.pool_client
+        .set_collateral_deposit(&CollateralDepositView {
+            invoice_id: 1,
+            depositor: Address::generate(&env),
+            token: h.token_id.clone(),
+            amount: 6_000,
+            settled: true,
+            posted_at: 0,
+            released_at: 0,
+            seized_at: 0,
+        });
 
     let caller = Address::generate(&env);
     let payout = h.client.file_claim(&caller, &1u64);
@@ -467,16 +508,17 @@ fn test_file_claim_no_shortfall_after_full_collateral_recovery() {
     h.client
         .fund_reserve_from_treasury(&h.admin, &h.token_id, &100_000i128);
 
-    h.pool_client.set_collateral_deposit(&CollateralDepositView {
-        invoice_id: 1,
-        depositor: Address::generate(&env),
-        token: h.token_id.clone(),
-        amount: 10_000,
-        settled: true,
-        posted_at: 0,
-        released_at: 0,
-        seized_at: 0,
-    });
+    h.pool_client
+        .set_collateral_deposit(&CollateralDepositView {
+            invoice_id: 1,
+            depositor: Address::generate(&env),
+            token: h.token_id.clone(),
+            amount: 10_000,
+            settled: true,
+            posted_at: 0,
+            released_at: 0,
+            seized_at: 0,
+        });
 
     let caller = Address::generate(&env);
     let result = h.client.try_file_claim(&caller, &1u64);
@@ -493,9 +535,14 @@ fn test_pause_blocks_purchase_coverage() {
     let sme = Address::generate(&env);
     let payer = h.pool_id.clone();
     mint(&env, &h.token_id, &payer, 1_000_000);
-    let result = h
-        .client
-        .try_purchase_coverage(&payer, &1u64, &10_000i128, &sme, &(30u64 * 86_400u64),&h.token_id);
+    let result = h.client.try_purchase_coverage(
+        &payer,
+        &1u64,
+        &10_000i128,
+        &sme,
+        &(30u64 * 86_400u64),
+        &h.token_id,
+    );
     assert_eq!(result, Err(Ok(InsuranceError::ContractPaused)));
 }
 

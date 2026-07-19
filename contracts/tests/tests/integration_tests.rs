@@ -66,6 +66,17 @@ fn advance_past_operation_delay(env: &Env, pool_client: &pool::Client<'_>) {
     env.ledger().with_mut(|l| l.timestamp += delay + 1);
 }
 
+fn propose_and_execute(
+    env: &Env,
+    pool_client: &pool::Client<'_>,
+    admin: &Address,
+    operation: pool::AdminOperation,
+) {
+    let proposal_id = pool_client.propose_operation(admin, &operation);
+    advance_past_operation_delay(env, pool_client);
+    pool_client.execute_operation(admin, &proposal_id);
+}
+
 fn propose_and_execute_set_collateral_config(
     env: &Env,
     pool_client: &pool::Client<'_>,
@@ -1719,7 +1730,7 @@ fn test_concurrent_deposit_and_withdrawal_same_ledger() {
     env.mock_all_auths_allowing_non_root_auth();
     env.ledger().with_mut(|l| l.timestamp = 100_000);
 
-    let (pool_client, share_client, admin, usdc_id) = setup_pool(&env);
+    let (pool_client, share_client, _admin, usdc_id) = setup_pool(&env);
 
     let lender1 = Address::generate(&env);
     let lender2 = Address::generate(&env);
@@ -1864,8 +1875,8 @@ fn test_deposit_during_active_funding() {
     pool_client.repay_invoice(&inv_id, &sme, &amount_due);
     invoice_client.mark_paid(&inv_id, &pool_id);
 
-    // Both lenders should get proportional yield
-    // Lender1 had capital deployed, lender2 did not
+    // Both lenders hold fungible pool shares before repayment, so both receive
+    // pro-rata upside from the repayment yield.
     let shares_lender1_final = share_client.balance(&lender1);
 
     // Lender1's shares should be same (yield increases share value, not count)
@@ -2235,8 +2246,7 @@ fn test_insurance_reduces_investor_loss_on_default() {
             insurance_client_opt = Some(insurance_client);
         }
 
-        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-            .mint(&investor, &1_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &required_col);
         pool_client.deposit(&investor, &usdc_id, &1_000_000i128);
         pool_client.deposit_collateral(&1u64, &sme, &usdc_id, &required_col);
@@ -2319,4 +2329,3 @@ fn test_insurance_reduces_investor_loss_on_default() {
         "investor balance improvement should equal claim payout minus premium paid exactly"
     );
 }
-

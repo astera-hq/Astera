@@ -694,6 +694,38 @@ fn u128_to_i128(value: u128) -> PoolResult<i128> {
     Ok(value as i128)
 }
 
+fn update_investor_available(
+    env: &Env,
+    investor: &Address,
+    token: &Address,
+    delta: i128,
+) -> PoolResult<()> {
+    let pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+    let mut position: InvestorPosition =
+        env.storage()
+            .persistent()
+            .get(&pos_key)
+            .unwrap_or(InvestorPosition {
+                deposited: 0,
+                available: 0,
+                deployed: 0,
+                earned: 0,
+                deposit_count: 0,
+            });
+
+    if delta >= 0 {
+        position.available = position
+            .available
+            .checked_add(delta)
+            .ok_or(PoolError::AmountOverflow)?;
+    } else {
+        position.available = position.available.saturating_sub(-delta);
+    }
+
+    env.storage().persistent().set(&pos_key, &position);
+    Ok(())
+}
+
 fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> PoolResult<i128> {
     let numerator = (principal as u128)
         .checked_mul(factoring_fee_bps as u128)
@@ -1549,10 +1581,10 @@ impl FundingPool {
 
         // #233: update investor position — track in USDC terms to match pool_value
         investor_position.deposited += usdc_received;
-        // #217: `available` tracks shares not yet withdrawn or reserved by a
-        // queued withdrawal request, in share-token units (matches what
-        // request_withdrawal compares it against).
-        investor_position.available += shares_to_mint;
+        investor_position.available = investor_position
+            .available
+            .checked_add(shares_to_mint)
+            .ok_or(PoolError::AmountOverflow)?;
         investor_position.deposit_count += 1;
         env.storage()
             .persistent()
@@ -1676,17 +1708,7 @@ impl FundingPool {
         burn_args.push_back(investor.clone().into_val(&env));
         burn_args.push_back(shares.into_val(&env));
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "burn"), burn_args);
-
-        // #217: keep `available` in sync with actual burned shares.
-        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        if let Some(mut position) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, InvestorPosition>(&investor_pos_key)
-        {
-            position.available = position.available.saturating_sub(shares);
-            env.storage().persistent().set(&investor_pos_key, &position);
-        }
+        update_investor_available(&env, &investor, &token, -shares)?;
 
         // Update USDC-denominated pool value SECOND - effects
         tt.pool_value -= usdc_amount;
@@ -1750,7 +1772,7 @@ impl FundingPool {
         }
 
         let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        let mut position: InvestorPosition = env
+        let position: InvestorPosition = env
             .storage()
             .persistent()
             .get(&investor_pos_key)
@@ -1764,10 +1786,6 @@ impl FundingPool {
         if shares > position.available {
             return Err(PoolError::WithdrawalExceedsLimit);
         }
-        // #217: reserve these shares immediately so they can't be double-spent
-        // by another request_withdrawal/withdraw call before this one settles.
-        position.available -= shares;
-        env.storage().persistent().set(&investor_pos_key, &position);
 
         Self::non_reentrant_start(&env);
 
@@ -1822,6 +1840,7 @@ impl FundingPool {
             )?;
         } else {
             // Insufficient liquidity - queue the request
+            update_investor_available(&env, &investor, &token, -shares)?;
             request_id = Self::generate_request_id(&env, &token);
             let request = WithdrawalRequest {
                 investor: investor.clone(),
@@ -1867,11 +1886,11 @@ impl FundingPool {
 
             let mut new_queue = Vec::new(&env);
             let mut request_id = 0u64;
-            let mut cancelled_shares = 0i128;
+            let mut request_shares = 0i128;
             for req in queue.iter() {
                 if req.investor == investor {
                     request_id = req.request_id;
-                    cancelled_shares = req.shares;
+                    request_shares = req.shares;
                 } else {
                     new_queue.push_back(req);
                 }
@@ -1883,17 +1902,7 @@ impl FundingPool {
 
             let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
             env.storage().persistent().remove(&request_key);
-
-            // #217: release the shares this request had reserved.
-            let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-            if let Some(mut position) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, InvestorPosition>(&investor_pos_key)
-            {
-                position.available += cancelled_shares;
-                env.storage().persistent().set(&investor_pos_key, &position);
-            }
+            update_investor_available(&env, &investor, &token, request_shares)?;
 
             env.events().publish(
                 (EVT, symbol_short!("wd_cncl")),
@@ -1997,6 +2006,7 @@ impl FundingPool {
         share_token: Address,
     ) -> Result<(), PoolError> {
         Self::burn_withdrawal_shares(env, &share_token, investor.clone(), shares);
+        update_investor_available(env, &investor, &token, -shares)?;
 
         tt.pool_value -= amount;
         let token_totals_key = DataKey::TokenTotals(token.clone());
@@ -3310,10 +3320,8 @@ impl FundingPool {
             .checked_add(amount)
             .ok_or(PoolError::AmountOverflow)?;
         env.storage().instance().set(&token_totals_key, &tt);
-        env.events().publish(
-            (EVT, symbol_short!("ins_pay")),
-            (invoice_id, token, amount),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("ins_pay")), (invoice_id, token, amount));
         Ok(())
     }
 
@@ -7702,22 +7710,9 @@ mod test {
         mint(&env, &usdc_id, &sme, 20_000);
         client.deposit(&alice, &usdc_id, &10_000);
         client.deposit(&bob, &usdc_id, &10_000);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
-        client.fund_invoice(
-            &admin,
-            &2u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
+        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
+        client.fund_invoice(&admin, &1u64, &10_000, &sme, &due_date, &usdc_id);
+        client.fund_invoice(&admin, &2u64, &10_000, &sme, &due_date, &usdc_id);
 
         client.request_withdrawal(&alice, &usdc_id, &10_000);
         client.request_withdrawal(&bob, &usdc_id, &10_000);
@@ -8035,7 +8030,10 @@ mod test {
         // (principal minus recovered collateral), and total deployed
         // decreased by the full principal.
         let tt_after = client.get_token_totals(&usdc_id);
-        assert_eq!(tt_after.pool_value, tt_before.pool_value + required);
+        assert_eq!(
+            tt_after.pool_value,
+            tt_before.pool_value - principal + required
+        );
         assert_eq!(
             tt_after.total_deployed,
             tt_before.total_deployed - principal
