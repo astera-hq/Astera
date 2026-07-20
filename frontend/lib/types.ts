@@ -160,3 +160,41 @@ export interface CollateralDeposit {
   amount: bigint;
   settled: boolean;
 }
+
+// #861: N-of-M staked oracle consensus network
+export type RoundStatus = 'Open' | 'ConsensusApproved' | 'ConsensusRejected' | 'Expired';
+
+export interface OracleInfo {
+  address: StellarAddress;
+  stakeAmount: bigint;
+  stakeToken: string;
+  isActive: boolean;
+  totalVerifications: number;
+  totalSlashes: number;
+  registeredAt: number;
+  deregisterRequestedAt: number | null;
+}
+
+export interface VerificationRound {
+  invoiceId: number;
+  requiredVotes: number;
+  totalRegisteredOracles: number;
+  weightFor: bigint;
+  weightAgainst: bigint;
+  totalStakeSnapshot: bigint;
+  quorumBps: number;
+  status: RoundStatus;
+  openedAt: number;
+  deadline: number;
+  oracleHash: string;
+}
+
+export interface OracleRegistryConfig {
+  minStake: bigint;
+  stakeToken: string;
+  requiredVotes: number;
+  quorumBps: number;
+  roundDurationSecs: number;
+  deregisterCooldownSecs: number;
+  treasury: string | null;
+}

@@ -26,6 +26,10 @@ mod share {
     soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/share.wasm");
 }
 
+mod oracle_registry {
+    soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/oracle_registry.wasm");
+}
+
 fn metadata_url(env: &Env) -> String {
     String::from_str(env, "https://example.com/meta")
 }
@@ -2128,4 +2132,253 @@ fn test_multiple_simultaneous_withdrawals_high_deployment() {
     assert!(balance1 > 3_000_000_000i128);
     assert!(balance2 > 3_000_000_000i128);
     assert!(balance3 > 4_000_000_000i128);
+}
+
+/// #861: N-of-M staked oracle consensus network — end-to-end test with the
+/// real compiled `oracle_registry.wasm` and `invoice.wasm` artifacts (not
+/// in-process stubs). Five oracles register with equal stake; the registry's
+/// quorum is configured to 6000 bps (60%) so that exactly 3 of 5 approving
+/// votes (60% of equal-weighted stake) crosses the threshold — matching the
+/// "consensus approves at exactly quorum" acceptance criterion. Once quorum
+/// is reached the registry calls back into `consensus_verify`, and the pool
+/// funds the now-`Verified` invoice exactly as it would after a legacy
+/// single-oracle `verify_invoice` call.
+#[test]
+fn test_oracle_consensus_quorum_approves_and_pool_funds_invoice() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let registry_id = env.register_contract_wasm(None, oracle_registry::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    let share_client = share::Client::new(&env, &share_id);
+    let registry_client = oracle_registry::Client::new(&env, &registry_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+    credit_client.initialize(&admin, &invoice_id, &pool_id);
+
+    // A placeholder legacy `Oracle` address is still required so that newly
+    // created invoices enter `AwaitingVerification` (that gate is keyed off
+    // whether *any* oracle is configured, independent of the consensus flag).
+    invoice_client.set_oracle(&admin, &Address::generate(&env));
+    registry_client.initialize(&admin, &usdc_id, &1_000i128);
+    registry_client.set_invoice_contract(&admin, &invoice_id);
+    // 6000 bps (60%) quorum so 3-of-5 equally-staked oracles lands exactly on
+    // the threshold, per the "approves at exactly quorum" scenario.
+    registry_client.set_registry_config(&admin, &1_000i128, &3u32, &6_000u32, &(3 * 86_400u64), &(7 * 86_400u64));
+    invoice_client.set_oracle_registry(&admin, &registry_id);
+    invoice_client.set_consensus_required(&admin, &true);
+
+    let mut oracles = Vec::new();
+    for _ in 0..5 {
+        let op = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&op, &1_000i128);
+        registry_client.register_oracle(&op, &1_000i128);
+        oracles.push(op);
+    }
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::AwaitingVerification
+    );
+
+    // The legacy path is locked out while consensus verification is required.
+    let legacy_attempt = invoice_client.try_verify_invoice(
+        &inv_id,
+        &oracles[0],
+        &true,
+        &String::from_str(&env, ""),
+        &String::from_str(&env, "hash123"),
+    );
+    assert!(legacy_attempt.is_err());
+
+    registry_client.open_verification_round(&admin, &inv_id, &String::from_str(&env, "hash123"));
+
+    // 2 reject first (40% weight — below the 3000/5000 threshold on its own).
+    registry_client.submit_vote(&oracles[0], &inv_id, &false, &String::from_str(&env, "e"));
+    registry_client.submit_vote(&oracles[1], &inv_id, &false, &String::from_str(&env, "e"));
+    assert_eq!(
+        registry_client.get_verification_round(&inv_id).unwrap().status,
+        oracle_registry::RoundStatus::Open
+    );
+
+    // 3 approve — cumulative weight hits exactly 3000, the quorum threshold.
+    registry_client.submit_vote(&oracles[2], &inv_id, &true, &String::from_str(&env, "e"));
+    registry_client.submit_vote(&oracles[3], &inv_id, &true, &String::from_str(&env, "e"));
+    registry_client.submit_vote(&oracles[4], &inv_id, &true, &String::from_str(&env, "e"));
+
+    let round = registry_client.get_verification_round(&inv_id).unwrap();
+    assert_eq!(round.status, oracle_registry::RoundStatus::ConsensusApproved);
+    assert_eq!(round.weight_for, 3_000i128);
+    assert_eq!(round.weight_against, 2_000i128);
+
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(invoice.status, invoice::InvoiceStatus::Verified);
+    assert!(invoice.oracle_verified);
+
+    // The pool funds the now-Verified invoice exactly like the legacy flow.
+    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
+    invoice_client.mark_funded(&inv_id, &pool_id);
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Funded
+    );
+}
+
+/// #861: the escape hatch — if oracle participation never reaches quorum
+/// before the round's deadline, the round expires and an admin fallback
+/// (`admin_resolve_round`) resolves it so the invoice is never permanently
+/// bricked by an unresponsive oracle set.
+#[test]
+fn test_oracle_consensus_round_expires_then_admin_fallback_resolves() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let registry_id = env.register_contract_wasm(None, oracle_registry::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let share_client = share::Client::new(&env, &share_id);
+    let registry_client = oracle_registry::Client::new(&env, &registry_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+
+    invoice_client.set_oracle(&admin, &Address::generate(&env));
+    registry_client.initialize(&admin, &usdc_id, &1_000i128);
+    registry_client.set_invoice_contract(&admin, &invoice_id);
+    invoice_client.set_oracle_registry(&admin, &registry_id);
+    invoice_client.set_consensus_required(&admin, &true);
+
+    let mut oracles = Vec::new();
+    for _ in 0..5 {
+        let op = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&op, &1_000i128);
+        registry_client.register_oracle(&op, &1_000i128);
+        oracles.push(op);
+    }
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+
+    registry_client.open_verification_round(&admin, &inv_id, &String::from_str(&env, "hash123"));
+
+    // Only a single oracle ever votes — well short of the default 6600 bps
+    // quorum out of 5000 total stake.
+    registry_client.submit_vote(&oracles[0], &inv_id, &true, &String::from_str(&env, "e"));
+    assert_eq!(
+        registry_client.get_verification_round(&inv_id).unwrap().status,
+        oracle_registry::RoundStatus::Open
+    );
+
+    // Advance past the default 3-day round deadline.
+    env.ledger().with_mut(|l| l.timestamp += 3 * 86_400 + 1);
+    registry_client.expire_round(&inv_id);
+    assert_eq!(
+        registry_client.get_verification_round(&inv_id).unwrap().status,
+        oracle_registry::RoundStatus::Expired
+    );
+
+    // The invoice is still stuck in AwaitingVerification until the admin
+    // fallback resolves it — it must never be permanently bricked.
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::AwaitingVerification
+    );
+
+    registry_client.admin_resolve_round(
+        &admin,
+        &inv_id,
+        &true,
+        &String::from_str(&env, "manual review: oracle participation too low"),
+    );
+
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(invoice.status, invoice::InvoiceStatus::Verified);
+
+    // Fully unblocked: the pool can now fund it like any other verified invoice.
+    pool_client.fund_invoice(&admin, &inv_id, &2_000_000_000i128, &sme, &due_date, &usdc_id);
+    invoice_client.mark_funded(&inv_id, &pool_id);
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Funded
+    );
 }

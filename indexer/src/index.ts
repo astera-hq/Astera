@@ -19,9 +19,14 @@ const INVOICE_POOL_CONTRACT_IDS = (process.env.CONTRACT_IDS || '')
   .split(',')
   .filter(Boolean);
 const CREDIT_SCORE_CONTRACT_ID = (process.env.CREDIT_SCORE_CONTRACT_ID || '').trim();
+// #861: also watch the oracle_registry contract, if deployed, so
+// VerificationRound / vote / slash events are queryable off-chain.
+const ORACLE_REGISTRY_CONTRACT_ID = (process.env.ORACLE_REGISTRY_CONTRACT_ID || '').trim();
 const CONTRACT_IDS = Array.from(
   new Set(
-    [...INVOICE_POOL_CONTRACT_IDS, CREDIT_SCORE_CONTRACT_ID].filter(Boolean),
+    [...INVOICE_POOL_CONTRACT_IDS, CREDIT_SCORE_CONTRACT_ID, ORACLE_REGISTRY_CONTRACT_ID].filter(
+      Boolean,
+    ),
   ),
 );
 const POLLING_INTERVAL_MS = parseInt(process.env.POLLING_INTERVAL_MS || '5000', 10);
@@ -34,6 +39,9 @@ async function main() {
   console.log(`[Astera Indexer] Contracts: ${CONTRACT_IDS.join(', ') || '(none)'}`);
   if (CREDIT_SCORE_CONTRACT_ID) {
     console.log(`[Astera Indexer] Credit-score contract: ${CREDIT_SCORE_CONTRACT_ID}`);
+  }
+  if (ORACLE_REGISTRY_CONTRACT_ID) {
+    console.log(`[Astera Indexer] Oracle-registry contract: ${ORACLE_REGISTRY_CONTRACT_ID}`);
   }
   console.log(`[Astera Indexer] DB: ${DB_PATH}`);
 

@@ -121,6 +121,10 @@ services:
       - INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-}
       - AUTO_VERIFY_DELAY_MS=30000
       - HEALTH_PORT=8080
+      # #861: unset by default (legacy single-oracle mode). Set to run this
+      # node as one voter in the N-of-M staked oracle consensus network —
+      # see oracle-service/README.md for running multiple nodes locally.
+      - ORACLE_REGISTRY_CONTRACT_ID=${ORACLE_REGISTRY_CONTRACT_ID:-}
     depends_on:
       stellar:
         condition: service_healthy

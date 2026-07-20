@@ -44,6 +44,32 @@ function buildPoolConfig(adminAddress: string) {
   };
 }
 
+// #861: N-of-M staked oracle consensus network
+function buildOracleRegistryConfig(): Record<string, unknown> {
+  return {
+    min_stake: '1000000',
+    stake_token: INVOICE_CONTRACT_ID,
+    required_votes: 3,
+    quorum_bps: 6600,
+    round_duration_secs: 259200,
+    deregister_cooldown_secs: 604800,
+    treasury: null,
+  };
+}
+
+function buildOracleInfo(address: string): Record<string, unknown> {
+  return {
+    address,
+    stake_amount: '5000000',
+    stake_token: INVOICE_CONTRACT_ID,
+    is_active: true,
+    total_verifications: 12,
+    total_slashes: 0,
+    registered_at: Math.floor(Date.now() / 1000) - 86400,
+    deregister_requested_at: null,
+  };
+}
+
 function mockReturnValue(method: string | null, adminAddress: string): xdr.ScVal {
   switch (method) {
     case 'get_config':
@@ -54,6 +80,14 @@ function mockReturnValue(method: string | null, adminAddress: string): xdr.ScVal
       return nativeToScVal([]);
     case 'is_paused':
       return nativeToScVal(false);
+    case 'get_registry_config':
+      return nativeToScVal(buildOracleRegistryConfig());
+    case 'list_active_oracles':
+      return nativeToScVal([adminAddress, INVOICE_CONTRACT_ID]);
+    case 'get_oracle_info':
+      return nativeToScVal(buildOracleInfo(adminAddress));
+    case 'get_verification_round':
+      return nativeToScVal(null);
     default:
       return nativeToScVal(null);
   }

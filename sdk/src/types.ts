@@ -77,6 +77,36 @@ export interface AsteraConfig {
   invoiceContractId: string;
   poolContractId: string;
   creditScoreContractId?: string;
+  // #861: N-of-M staked oracle consensus network
+  oracleRegistryContractId?: string;
+}
+
+// #861: N-of-M staked oracle consensus network
+export type RoundStatus = 'Open' | 'ConsensusApproved' | 'ConsensusRejected' | 'Expired';
+
+export interface OracleInfo {
+  address: string;
+  stakeAmount: bigint;
+  stakeToken: string;
+  isActive: boolean;
+  totalVerifications: number;
+  totalSlashes: number;
+  registeredAt: number;
+  deregisterRequestedAt?: number;
+}
+
+export interface VerificationRound {
+  invoiceId: bigint;
+  requiredVotes: number;
+  totalRegisteredOracles: number;
+  weightFor: bigint;
+  weightAgainst: bigint;
+  totalStakeSnapshot: bigint;
+  quorumBps: number;
+  status: RoundStatus;
+  openedAt: number;
+  deadline: number;
+  oracleHash: string;
 }
 
 export interface TransactionProgress {

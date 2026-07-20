@@ -31,9 +31,9 @@ jobs:
       # files, so these must exist before ANY `cargo test` invocation that
       # touches the full workspace — including the unqualified one below.
       - name: Build contracts for integration tests
-        run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share
+        run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry
       - run: cargo test
-      - run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests
+      - run: cargo test -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
       - run: cargo test -p integration-tests --test integration_tests
       - name: Check WASM size
         run: |
@@ -67,7 +67,7 @@ jobs:
           workspaces: .
 
       - name: Build contracts
-        run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share
+        run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry
 
       - name: Run cross-contract integration tests
         run: cargo test --manifest-path ../contracts/tests/Cargo.toml
