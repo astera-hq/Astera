@@ -702,6 +702,12 @@ function DashboardContent() {
                     })}
                 />
               )}
+              <Link
+                href="/dashboard/credit"
+                className="block text-center text-sm text-brand-gold hover:text-brand-amber transition-colors"
+              >
+                View Full Credit Profile →
+              </Link>
             </div>
           </div>
         )}

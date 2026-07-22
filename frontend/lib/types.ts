@@ -217,3 +217,44 @@ export interface OracleRegistryConfig {
   deregisterCooldownSecs: number;
   treasury: string | null;
 }
+
+// #868: credit_score v2 — external attestations + dispute mechanism
+export type AttestorType = 'BusinessRegistry' | 'CreditBureau' | 'ExternalProtocol' | 'Manual';
+export type AttestationStatus = 'Active' | 'Disputed' | 'Revoked' | 'Expired';
+
+export interface AttestorInfo {
+  address: StellarAddress;
+  attestorType: AttestorType;
+  isActive: boolean;
+  weightBps: number;
+  registeredAt: number;
+}
+
+export interface Attestation {
+  id: number;
+  sme: StellarAddress;
+  attestor: StellarAddress;
+  attestationType: AttestorType;
+  scoreContribution: number;
+  evidenceHash: string;
+  submittedAt: number;
+  expiresAt: number;
+  status: AttestationStatus;
+}
+
+/** Full `get_credit_score` response, including the #868 internal/external blend. */
+export interface FullCreditScore {
+  sme: StellarAddress;
+  score: number;
+  totalInvoices: number;
+  paidOnTime: number;
+  paidLate: number;
+  defaulted: number;
+  totalVolume: bigint;
+  averagePaymentDays: number;
+  lastUpdated: number;
+  scoreVersion: number;
+  configVersion: number;
+  isStale: boolean;
+  blendedScore: number;
+}

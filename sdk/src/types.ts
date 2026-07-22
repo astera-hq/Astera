@@ -133,3 +133,44 @@ export interface TransactionProgress {
   hash: string;
   error?: string;
 }
+
+// #868: credit_score v2 — external attestations + dispute mechanism
+export type AttestorType = 'BusinessRegistry' | 'CreditBureau' | 'ExternalProtocol' | 'Manual';
+export type AttestationStatus = 'Active' | 'Disputed' | 'Revoked' | 'Expired';
+
+export interface AttestorInfo {
+  address: string;
+  attestorType: AttestorType;
+  isActive: boolean;
+  weightBps: number;
+  registeredAt: number;
+}
+
+export interface Attestation {
+  id: bigint;
+  sme: string;
+  attestor: string;
+  attestationType: AttestorType;
+  scoreContribution: number;
+  evidenceHash: string;
+  submittedAt: number;
+  expiresAt: number;
+  status: AttestationStatus;
+}
+
+export interface CreditScoreResponse {
+  sme: string;
+  score: number;
+  totalInvoices: number;
+  paidOnTime: number;
+  paidLate: number;
+  defaulted: number;
+  totalVolume: bigint;
+  averagePaymentDays: number;
+  lastUpdated: number;
+  scoreVersion: number;
+  configVersion: number;
+  isStale: boolean;
+  /** Internal score blended with the SME's active external attestations. */
+  blendedScore: number;
+}

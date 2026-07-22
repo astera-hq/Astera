@@ -157,6 +157,10 @@ export function startApiServer(db: Database.Database, port: number): void {
     'cf_fin',
   ]);
 
+  // #868: credit_score attestation lifecycle events, keyed by attestation id
+  // (the first tuple element of each of these three event types).
+  const ATTESTATION_LIFECYCLE_EVENT_TYPES = new Set(['att_sub', 'att_disp', 'att_res']);
+
   app.get('/co-funding/rounds', (_req, res) => {
     try {
       const events = getEvents(db, { contractType: 'pool', limit: 2000, offset: 0 });
@@ -322,6 +326,89 @@ export function startApiServer(db: Database.Database, port: number): void {
           txHash: evt.txHash,
         })),
       });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // #868: reconstruct an SME's attestation history from the credit_score
+  // contract's indexed att_sub/att_disp/att_res events. `att_sub` carries
+  // (id, sme, attestor, score_contribution); `att_disp`/`att_res` only carry
+  // the attestation id, so we first find every id submitted for this SME via
+  // att_sub, then replay the matching lifecycle events in ledger order to
+  // derive each attestation's current status. Time-based expiry isn't
+  // eventful and is therefore not reflected here — callers who need the
+  // authoritative status should also check the contract's `get_attestation`.
+  app.get('/credit-score/:sme/attestations', (req, res) => {
+    try {
+      const { sme } = req.params;
+      if (!sme) {
+        return res.status(400).json({ error: 'sme path param is required' });
+      }
+      const smeLower = sme.toLowerCase();
+
+      const events = getEvents(db, { contractType: 'credit_score', limit: 5000, offset: 0 });
+
+      const attestationIds = new Set<string>();
+      for (const evt of events) {
+        if (evt.eventType !== 'att_sub') continue;
+        const value = evt.value;
+        const smeAddr = Array.isArray(value) ? value[1] : undefined;
+        if (typeof smeAddr === 'string' && smeAddr.toLowerCase() === smeLower) {
+          attestationIds.add(String(value[0]));
+        }
+      }
+
+      const lifecycleEvents = events
+        .filter((evt) => {
+          if (!ATTESTATION_LIFECYCLE_EVENT_TYPES.has(evt.eventType)) return false;
+          const id = Array.isArray(evt.value) ? String(evt.value[0]) : null;
+          return id !== null && attestationIds.has(id);
+        })
+        .sort((a, b) => a.ledgerSequence - b.ledgerSequence);
+
+      const attestations = Array.from(attestationIds).map((id) => {
+        const idEvents = lifecycleEvents.filter(
+          (evt) => Array.isArray(evt.value) && String(evt.value[0]) === id,
+        );
+        let status = 'Active';
+        let attestor: string | null = null;
+        let scoreContribution: number | null = null;
+        for (const evt of idEvents) {
+          const value = evt.value as any[];
+          switch (evt.eventType) {
+            case 'att_sub':
+              attestor = typeof value[2] === 'string' ? value[2] : null;
+              scoreContribution = value[3] !== undefined ? Number(value[3]) : null;
+              status = 'Active';
+              break;
+            case 'att_disp':
+              status = 'Disputed';
+              break;
+            case 'att_res':
+              status = value[1] ? 'Active' : 'Revoked';
+              break;
+            default:
+              break;
+          }
+        }
+        return {
+          id,
+          sme,
+          attestor,
+          scoreContribution,
+          status,
+          events: idEvents.map((evt) => ({
+            eventType: evt.eventType,
+            value: evt.value,
+            ledgerSequence: evt.ledgerSequence,
+            ledgerCloseAt: evt.ledgerCloseAt,
+            txHash: evt.txHash,
+          })),
+        };
+      });
+
+      return res.json({ sme, attestations });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
