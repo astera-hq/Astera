@@ -1,0 +1,26 @@
+[package]
+name = "oracle_registry"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+proptest = "1.4"
+
+[[test]]
+name = "registration_tests"
+path = "tests/registration_tests.rs"
+
+[[test]]
+name = "consensus_tests"
+path = "tests/consensus_tests.rs"
+
+[[test]]
+name = "fuzz_tests"
+path = "tests/fuzz_tests.rs"

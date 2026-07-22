@@ -7,7 +7,7 @@
  * route credit_score events (#700) separately from invoice/pool events so
  * the REST API can filter by contract type.
  */
-export type ContractType = 'invoice' | 'pool' | 'credit_score' | 'unknown';
+export type ContractType = 'invoice' | 'pool' | 'credit_score' | 'oracle_registry' | 'unknown';
 
 export interface IndexedEvent {
   id: string;
@@ -25,6 +25,26 @@ export interface IndexedEvent {
 const CREDIT_SCORE_CONTRACT_ID = (process.env.CREDIT_SCORE_CONTRACT_ID || '').trim();
 const INVOICE_CONTRACT_ID = (process.env.INVOICE_CONTRACT_ID || '').trim();
 const POOL_CONTRACT_ID = (process.env.POOL_CONTRACT_ID || '').trim();
+// #861: N-of-M staked oracle consensus network
+const ORACLE_REGISTRY_CONTRACT_ID = (process.env.ORACLE_REGISTRY_CONTRACT_ID || '').trim();
+
+// #861: oracle_registry contract emits these event subtypes under the
+// "ORACLE" topic (see `EVT` in contracts/oracle_registry/src/lib.rs).
+const ORACLE_REGISTRY_EVENT_TYPES = new Set([
+  'registrd',
+  'dreg_req',
+  'dreg_done',
+  'slashed',
+  'rnd_open',
+  'voted',
+  'consensus',
+  'rnd_exp',
+  'fallback',
+  'inv_set',
+  'cfg_upd',
+  'paused',
+  'unpaused',
+]);
 
 // #700: credit_score contract emits these event subtypes under the "CREDIT" topic
 const CREDIT_SCORE_EVENT_TYPES = new Set([
@@ -46,9 +66,16 @@ function classifyContract(contractId: string, contractType: string, eventType: s
   if (POOL_CONTRACT_ID && contractId === POOL_CONTRACT_ID) {
     return 'pool';
   }
-  // Fallback: infer from topic. credit_score events publish under "CREDIT".
+  if (ORACLE_REGISTRY_CONTRACT_ID && contractId === ORACLE_REGISTRY_CONTRACT_ID) {
+    return 'oracle_registry';
+  }
+  // Fallback: infer from topic. credit_score events publish under "CREDIT",
+  // oracle_registry events publish under "ORACLE" (#861).
   if (contractType === 'CREDIT' || CREDIT_SCORE_EVENT_TYPES.has(eventType)) {
     return 'credit_score';
+  }
+  if (contractType === 'ORACLE' || ORACLE_REGISTRY_EVENT_TYPES.has(eventType)) {
+    return 'oracle_registry';
   }
   if (contractType === 'invoice') return 'invoice';
   if (contractType === 'pool') return 'pool';

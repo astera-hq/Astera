@@ -26,6 +26,17 @@ export const Errors = {
   25: { message: 'InvalidUpgradeTimelock' },
   26: { message: 'InvalidWasmHash' },
   27: { message: 'VerificationDeadlineNotPassed' },
+  28: { message: 'AdminChangePending' },
+  29: { message: 'AdminChangeTimelockNotExpired' },
+  30: { message: 'NoAdminChangeProposed' },
+  31: { message: 'ContractPaused' },
+  32: { message: 'DisputeWindowClosed' },
+  33: { message: 'DisputeNotFound' },
+  34: { message: 'DisputeAlreadyResolved' },
+  // #861: N-of-M staked oracle consensus network
+  35: { message: 'ConsensusVerificationRequired' },
+  36: { message: 'OracleRegistryNotConfigured' },
+  37: { message: 'UnauthorizedRegistry' },
 } as const;
 
 export type InvoiceErrorCode = keyof typeof Errors;

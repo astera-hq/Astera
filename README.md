@@ -14,9 +14,10 @@ Every paid invoice builds an on-chain credit history.
 
 ```
 contracts/
-  invoice/   — RWA invoice token contract (Soroban/Rust)
-  pool/      — Liquidity pool + yield distribution (Soroban/Rust)
-frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
+  invoice/         — RWA invoice token contract (Soroban/Rust)
+  pool/            — Liquidity pool + yield distribution (Soroban/Rust)
+  oracle_registry/ — N-of-M staked oracle consensus network (Soroban/Rust)
+frontend/          — Next.js 14 app (Freighter wallet, Stellar SDK)
 ```
 
 ## Contracts
@@ -37,6 +38,22 @@ frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
 - `commit_to_invoice` — Investors commit **available balance in that invoice’s token** until the principal target is met
 - `repay_invoice` — SME repays principal + simple interest (8% APY default) **in the same token the invoice was funded with**
 - `withdraw` — Investor withdraws available (undeployed) balance **in the chosen token**
+
+### Oracle Registry Contract
+
+N-of-M staked oracle consensus network for invoice verification (opt-in — the invoice
+contract's original 1-of-2 primary/secondary oracle flow keeps working unmodified
+unless an admin sets `require_consensus_verification`).
+
+- `register_oracle` / `deregister_oracle` — stake-backed oracle registration, with a
+  configurable cooldown before stake is returned
+- `open_verification_round` — anyone can open a `VerificationRound` for an invoice
+  awaiting verification
+- `submit_vote` — stake-weighted vote; once approving or rejecting weight crosses the
+  quorum threshold, the registry calls back into the invoice contract's `consensus_verify`
+- `expire_round` / `admin_resolve_round` — a round that never reaches quorum expires
+  rather than blocking the invoice forever, and an admin fallback resolves it
+- `slash_oracle` — admin/governance penalty for a proven-bad verdict
 
 ---
 

@@ -145,6 +145,10 @@ pub enum InvoiceError {
     DisputeWindowClosed = 32,
     DisputeNotFound = 33,
     DisputeAlreadyResolved = 34,
+    // #861: N-of-M staked oracle consensus network
+    ConsensusVerificationRequired = 35,
+    OracleRegistryNotConfigured = 36,
+    UnauthorizedRegistry = 37,
 }
 
 #[contracttype]
@@ -295,6 +299,9 @@ pub enum DataKey {
     RequireOracleVerification,
     // #539: invoice dispute mechanism
     Dispute(u64),
+    // #861: N-of-M staked oracle consensus network
+    OracleRegistry,
+    RequireConsensusVerification,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
@@ -414,6 +421,52 @@ fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
     env.storage()
         .persistent()
         .extend_ttl(&DataKey::Invoice(id), ttl, ttl);
+}
+
+/// #861: shared status-transition logic for both the legacy 1-of-2
+/// `verify_invoice` path and the new stake-weighted `consensus_verify` path
+/// — the two entrypoints differ only in who's authorized to call them and
+/// what address is checked, not in what a verdict does to the invoice.
+fn apply_verification_outcome(
+    env: &Env,
+    id: u64,
+    approved: bool,
+    reason: String,
+    oracle_hash: String,
+) -> Result<(), InvoiceError> {
+    let mut invoice: Invoice = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Invoice(id))
+        .expect("invoice not found");
+    if invoice.status != InvoiceStatus::AwaitingVerification {
+        panic!("invoice is not awaiting verification");
+    }
+    if invoice.verification_hash != oracle_hash {
+        return Err(InvoiceError::HashMismatch);
+    }
+    if approved {
+        invoice.status = InvoiceStatus::Verified;
+        invoice.oracle_verified = true;
+    } else {
+        invoice.status = InvoiceStatus::Disputed;
+        invoice.dispute_reason = reason;
+        invoice.disputed_at = env.ledger().timestamp();
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::Invoice(id), &invoice);
+    set_invoice_ttl(env, id, false);
+    if approved {
+        env.events()
+            .publish((EVT, symbol_short!("verified")), (id, oracle_hash));
+    } else {
+        env.events().publish(
+            (EVT, symbol_short!("disputed")),
+            (id, env.ledger().timestamp()),
+        );
+    }
+    Ok(())
 }
 
 fn get_max_outstanding_per_sme(env: &Env) -> i128 {
@@ -900,6 +953,71 @@ impl InvoiceContract {
         );
     }
 
+    /// #861: registers the `oracle_registry` contract address allowed to call
+    /// `consensus_verify`. Admin-only; does not by itself change how
+    /// `verify_invoice` behaves — see `set_consensus_required`.
+    pub fn set_oracle_registry(env: Env, admin: Address, registry: Address) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        let old_registry: Option<Address> = env.storage().instance().get(&DataKey::OracleRegistry);
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleRegistry, &registry);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "registry_upd")),
+            (admin, old_registry, registry),
+        );
+    }
+
+    pub fn get_oracle_registry(env: Env) -> Option<Address> {
+        bump_instance(&env);
+        env.storage().instance().get(&DataKey::OracleRegistry)
+    }
+
+    /// #861: when `true`, `verify_invoice` (the legacy 1-of-2 oracle path)
+    /// rejects direct calls and every invoice must instead go through the
+    /// registered `oracle_registry`'s stake-weighted consensus flow, which
+    /// calls back into `consensus_verify`. Defaults to `false` so existing
+    /// deployments and the pre-#861 single-oracle flow keep working
+    /// unmodified until an admin opts in.
+    pub fn set_consensus_required(env: Env, admin: Address, required: bool) {
+        admin.require_auth();
+        require_not_paused(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, InvoiceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RequireConsensusVerification, &required);
+        bump_instance(&env);
+        env.events().publish(
+            (EVT, Symbol::new(&env, "consensus_req_upd")),
+            (admin, required),
+        );
+    }
+
+    pub fn require_consensus_verification(env: Env) -> bool {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::RequireConsensusVerification)
+            .unwrap_or(false)
+    }
+
     pub fn get_metadata_image_uri(env: Env) -> String {
         env.storage()
             .persistent()
@@ -1289,6 +1407,17 @@ impl InvoiceContract {
         oracle.require_auth();
         require_not_paused(&env);
         bump_instance(&env);
+        // #861: once an admin has opted into consensus verification, the
+        // legacy 1-of-2 path is rejected outright — every invoice must go
+        // through the registered oracle registry's stake-weighted quorum.
+        let require_consensus: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequireConsensusVerification)
+            .unwrap_or(false);
+        if require_consensus {
+            return Err(InvoiceError::ConsensusVerificationRequired);
+        }
         let stored_oracle: Address = env
             .storage()
             .instance()
@@ -1303,39 +1432,37 @@ impl InvoiceContract {
         if !is_authorized {
             panic!("unauthorized oracle");
         }
-        let mut invoice: Invoice = env
+        apply_verification_outcome(&env, id, approved, reason, oracle_hash)
+    }
+
+    /// #861: counterpart to `verify_invoice` for the N-of-M staked oracle
+    /// consensus network. Auth-gated to the single registered
+    /// `oracle_registry` contract address (mirrors the existing
+    /// pool-auth pattern used by `mark_funded`/`mark_paid`/`mark_defaulted`):
+    /// the registry calls this itself once stake-weighted votes cross quorum,
+    /// so `registry.require_auth()` is satisfied by the registry being the
+    /// direct caller in the same cross-contract invocation, not by a
+    /// separately-signed transaction.
+    pub fn consensus_verify(
+        env: Env,
+        id: u64,
+        registry: Address,
+        approved: bool,
+        reason: String,
+        oracle_hash: String,
+    ) -> Result<(), InvoiceError> {
+        registry.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let stored_registry: Address = env
             .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
-        if invoice.status != InvoiceStatus::AwaitingVerification {
-            panic!("invoice is not awaiting verification");
+            .instance()
+            .get(&DataKey::OracleRegistry)
+            .ok_or(InvoiceError::OracleRegistryNotConfigured)?;
+        if registry != stored_registry {
+            return Err(InvoiceError::UnauthorizedRegistry);
         }
-        if invoice.verification_hash != oracle_hash {
-            return Err(InvoiceError::HashMismatch);
-        }
-        if approved {
-            invoice.status = InvoiceStatus::Verified;
-            invoice.oracle_verified = true;
-        } else {
-            invoice.status = InvoiceStatus::Disputed;
-            invoice.dispute_reason = reason;
-            invoice.disputed_at = env.ledger().timestamp();
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Invoice(id), &invoice);
-        set_invoice_ttl(&env, id, false);
-        if approved {
-            env.events()
-                .publish((EVT, symbol_short!("verified")), (id, oracle_hash));
-        } else {
-            env.events().publish(
-                (EVT, symbol_short!("disputed")),
-                (id, env.ledger().timestamp()),
-            );
-        }
-        Ok(())
+        apply_verification_outcome(&env, id, approved, reason, oracle_hash)
     }
 
     pub fn resolve_dispute(env: Env, id: u64, caller: Address, resolution: DisputeResolution) {
