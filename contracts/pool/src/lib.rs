@@ -149,6 +149,8 @@ pub enum PoolError {
     CoFundingRoundNotFilled = 75,
     CoFundingTooManyParticipants = 76,
     InvalidCoFundingParams = 77,
+    // #865: global withdrawal-queue depth cap reached for this token
+    WithdrawalQueueFull = 78,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -185,6 +187,22 @@ const DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS: u32 = 30;
 // finalization/repayment distribution (which iterates participants) stays
 // bounded, matching the existing MAX_BATCH_SIZE convention used elsewhere.
 const MAX_CO_FUNDING_PARTICIPANTS: u32 = 20;
+// #865: global cap on outstanding withdrawal-queue entries per token (0 = unlimited).
+// Bounds the O(n) queue scan/rewrite cost in request_withdrawal/cancel_withdrawal_request/
+// process_withdrawal_queue. Each investor can already only hold one queued request at a
+// time (request_withdrawal rejects a second with AlreadyQueuedForWithdrawal), so this is
+// effectively a cap on the number of distinct investors queued at once.
+const DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH: u32 = 500;
+// #865: fixed-size ring buffer capacity for the trailing deposit-inflow rate used by
+// estimate_withdrawal_wait/get_liquidity_forecast, mirroring the credit_score contract's
+// PaymentHistory rolling-window pattern.
+const MAX_INFLOW_HISTORY: u32 = 50;
+// #865: clamp bounds for the predictive wait estimate so a sparse/empty inflow history
+// or a huge queue never produces a nonsensical (zero or unbounded) estimate.
+const MIN_WAIT_ESTIMATE_SECS: u64 = 3_600; // 1 hour
+const MAX_WAIT_ESTIMATE_SECS: u64 = 31_536_000; // 365 days
+                                                // #865: liquidity forecast is capped to this many days to bound loop iteration/gas cost.
+const MAX_FORECAST_HORIZON_DAYS: u32 = 365;
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
@@ -597,6 +615,16 @@ pub enum DataKey {
     /// granularity but would silently under-refund an investor by up to
     /// ~1bp of the round if refunds were computed from bps alone.
     CoFundCommitted(u64, Address),
+    // #865: per-token index of every invoice_id ever funded, so liquidity forecasting and
+    // wait estimation can enumerate open invoices without assuming caller-supplied
+    // invoice_ids are a dense sequential range (they are not — see fund_invoice_request).
+    TokenInvoiceIds(Address),
+    // #865: deposit-inflow ring buffer (token -> current length / start index), mirroring
+    // the credit_score contract's PaymentHistory pattern. Instance storage: small, hot.
+    InflowHistoryLen(Address),
+    InflowHistoryStart(Address),
+    // #865: individual ring-buffer slot: (token, slot_index) -> InflowEvent.
+    InflowRecord(Address, u32),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -3856,6 +3884,50 @@ impl FundingPool {
         env.events()
             .publish((EVT, symbol_short!("set_wdage")), (admin, days));
         Ok(())
+    }
+
+    /// #865: set the global cap on outstanding withdrawal-queue entries per token
+    /// (0 = unlimited). Bounds queue-scan/rewrite cost as queue depth grows.
+    pub fn set_max_withdrawal_queue_depth(
+        env: Env,
+        admin: Address,
+        depth: u32,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut config = get_config_cached(&env)?;
+        config.max_withdrawal_queue_depth = depth;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_wdcap")), (admin, depth));
+        Ok(())
+    }
+
+    /// #865: permissionless entrypoint to drain the withdrawal queue against currently
+    /// available liquidity. Previously the queue only drained opportunistically from a
+    /// full invoice repayment (and now also from `deposit`); this lets anyone (a keeper,
+    /// an investor themselves, a cron job) trigger a drain attempt at any time without
+    /// waiting on either of those events.
+    pub fn drain_withdrawal_queue(
+        env: Env,
+        caller: Address,
+        token: Address,
+    ) -> Result<(), PoolError> {
+        caller.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::assert_accepted_token(&env, &token)?;
+
+        non_reentrant!(&env, {
+            let tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&DataKey::TokenTotals(token.clone()))
+                .unwrap_or_default();
+            let liquid = available_liquidity(&tt)?;
+            Self::process_withdrawal_queue(&env, token, liquid)
+        })
     }
 
     // ---- #860: multi-investor co-funding rounds ----
