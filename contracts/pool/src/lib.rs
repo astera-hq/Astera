@@ -159,6 +159,19 @@ pub enum PoolError {
     InvalidOperationDelay = 64,
     // #567: token removal blocked while a funded invoice still references this token
     TokenHasActiveCofundingCommitments = 65,
+    // #860: multi-investor co-funding rounds
+    CoFundingRoundNotFound = 66,
+    CoFundingRoundAlreadyExists = 67,
+    CoFundingRoundNotOpen = 68,
+    CoFundingRoundAlreadyFinalized = 69,
+    CoFundingDeadlinePassed = 70,
+    CoFundingDeadlineNotPassed = 71,
+    CoFundingBelowMinimum = 72,
+    CoFundingInvestorCapExceeded = 73,
+    CoFundingNoCommitment = 74,
+    CoFundingRoundNotFilled = 75,
+    CoFundingTooManyParticipants = 76,
+    InvalidCoFundingParams = 77,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -191,6 +204,10 @@ const DEFAULT_MAX_SINGLE_INVESTOR_BPS: u32 = 2_000;
 const DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS: u32 = 10_000;
 const DEFAULT_WITHDRAWAL_COOLDOWN_SECS: u64 = 0;
 const DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS: u32 = 30;
+// #860: co-funding rounds — cap on distinct investors per round so
+// finalization/repayment distribution (which iterates participants) stays
+// bounded, matching the existing MAX_BATCH_SIZE convention used elsewhere.
+const MAX_CO_FUNDING_PARTICIPANTS: u32 = 20;
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
@@ -341,6 +358,50 @@ pub struct FundedInvoice {
     pub due_date: u64,
     /// Total amount repaid so far (supports partial repayments)
     pub repaid_amount: i128,
+    /// #860: set when this invoice was funded through a multi-investor
+    /// co-funding round rather than a single admin-driven `fund_invoice`
+    /// call. When set, `repay_invoice_request` distributes principal +
+    /// interest directly to that round's `CoFundShare` holders instead of
+    /// the pool-wide `reward_per_share` accumulator.
+    pub co_funding_round_id: Option<u64>,
+}
+
+// #860: multi-investor co-funding rounds — every co-funder ranks pari passu
+// and owns a proportional bps slice of one invoice's principal, interest,
+// and collateral claim. This is distinct from (and a prerequisite for) any
+// future tranching/waterfall work.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CoFundingStatus {
+    Open,
+    Filled,
+    Cancelled,
+    Expired,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct CoFundingRound {
+    pub invoice_id: u64,
+    pub token: Address,
+    /// SME and due_date are captured at `open_co_funding` time (same
+    /// admin-supplied-and-trusted pattern `fund_invoice` already uses) so
+    /// `finalize_co_funding` — callable by anyone — has what it needs to
+    /// build the `FundedInvoice` record without extra params.
+    pub sme: Address,
+    pub due_date: u64,
+    pub target_principal: i128,
+    pub committed_principal: i128,
+    pub funding_deadline: u64,
+    pub status: CoFundingStatus,
+    pub min_commitment: i128,
+    /// Cap on any single investor's share of `target_principal`, in bps.
+    /// 0 = disabled (no per-investor cap).
+    pub max_investor_bps: u32,
+    /// Distinct investors who have committed to this round, in commitment
+    /// order. Bounded by `MAX_CO_FUNDING_PARTICIPANTS` so finalization and
+    /// repayment distribution (which iterate this list) stay gas-bounded.
+    pub participants: Vec<Address>,
 }
 
 #[contracttype]
@@ -351,6 +412,22 @@ pub struct FundingRequest {
     pub sme: Address,
     pub due_date: u64,
     pub token: Address,
+}
+
+/// #860: bundles `open_co_funding`'s params (matches `FundingRequest`'s
+/// existing role of keeping multi-field contract entrypoints under clippy's
+/// too-many-arguments threshold).
+#[contracttype]
+#[derive(Clone)]
+pub struct OpenCoFundingRequest {
+    pub invoice_id: u64,
+    pub token: Address,
+    pub target_principal: i128,
+    pub sme: Address,
+    pub due_date: u64,
+    pub funding_deadline: u64,
+    pub min_commitment: i128,
+    pub max_investor_bps: u32,
 }
 
 #[contracttype]
@@ -501,6 +578,18 @@ pub enum DataKey {
     Proposal(u64),
     NextProposalId,
     OperationDelaySecs,
+    // #860: multi-investor co-funding rounds, keyed by invoice_id (one round
+    // per invoice). CoFundingRoundIds is an append-only registry so
+    // `list_co_funding_rounds` doesn't need to scan the whole invoice ID space.
+    CoFundingRound(u64),
+    CoFundingRoundIds,
+    /// #860: exact raw-token cumulative commitment per (invoice_id,
+    /// investor) — the source of truth for refunds. `CoFundShare`'s bps is
+    /// derived from this and rounds to the nearest 1/10_000 of
+    /// target_principal, which is fine for post-fill transfer/repayment
+    /// granularity but would silently under-refund an investor by up to
+    /// ~1bp of the round if refunds were computed from bps alone.
+    CoFundCommitted(u64, Address),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -822,6 +911,142 @@ fn calculate_reward_delta(total_interest: i128, total_shares: i128) -> PoolResul
         .ok_or(PoolError::AmountOverflow)
 }
 
+/// #860: mints fresh LP shares worth `amount` (raw token units) to
+/// `investor` at the current share price and updates their
+/// `InvestorPosition` — the same mechanism `deposit()` uses, reused here to
+/// credit co-funding refunds and repayment distributions without an actual
+/// token transfer (the tokens are already sitting in the contract's balance,
+/// having never left it since the original `commit_to_invoice` call).
+///
+/// Takes `tt` by mutable reference rather than loading/persisting
+/// `TokenTotals` itself: callers that invoke this in a loop (distributing a
+/// repayment or an expired round's refunds across multiple participants)
+/// need all mutations folded into one in-memory value before a single
+/// write-back — an independent read/write per call here would let a stale
+/// outer copy clobber earlier iterations' updates.
+fn credit_investor_value(
+    env: &Env,
+    token: &Address,
+    investor: &Address,
+    amount: i128,
+    tt: &mut PoolTokenTotals,
+) -> PoolResult<()> {
+    if amount <= 0 {
+        return Ok(());
+    }
+    let share_token_key = DataKey::ShareToken(token.clone());
+    let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+
+    let share_token: Address = env
+        .storage()
+        .instance()
+        .get(&share_token_key)
+        .ok_or(PoolError::ShareTokenNotConfigured)?;
+
+    let rate_bps: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ExchangeRate(token.clone()))
+        .unwrap_or(10_000u32);
+    let usdc_equiv = amount
+        .checked_mul(rate_bps as i128)
+        .ok_or(PoolError::AmountOverflow)?
+        .checked_div(10_000i128)
+        .ok_or(PoolError::AmountOverflow)?;
+
+    let total_shares: i128 = env.invoke_contract(
+        &share_token,
+        &Symbol::new(env, "total_supply"),
+        Vec::new(env),
+    );
+    let shares_to_mint = if total_shares == 0 || tt.pool_value == 0 {
+        usdc_equiv
+    } else {
+        usdc_equiv
+            .checked_mul(total_shares)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(tt.pool_value)
+            .ok_or(PoolError::AmountOverflow)?
+    };
+
+    tt.pool_value = tt
+        .pool_value
+        .checked_add(usdc_equiv)
+        .ok_or(PoolError::AmountOverflow)?;
+
+    let mut mint_args = Vec::new(env);
+    mint_args.push_back(investor.clone().into_val(env));
+    mint_args.push_back(shares_to_mint.into_val(env));
+    let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "mint"), mint_args);
+
+    let mut position: InvestorPosition = env
+        .storage()
+        .persistent()
+        .get(&investor_pos_key)
+        .unwrap_or(InvestorPosition {
+            deposited: 0,
+            available: 0,
+            deployed: 0,
+            earned: 0,
+            deposit_count: 0,
+        });
+    position.deposited = position
+        .deposited
+        .checked_add(usdc_equiv)
+        .ok_or(PoolError::AmountOverflow)?;
+    position.available = position
+        .available
+        .checked_add(shares_to_mint)
+        .ok_or(PoolError::AmountOverflow)?;
+    env.storage().persistent().set(&investor_pos_key, &position);
+
+    Ok(())
+}
+
+/// #860: refunds a single investor's co-funding commitment in full (100% of
+/// their committed principal, in raw token terms — see `credit_investor_value`),
+/// then clears their `CoFundShare` entry for this round. Returns the
+/// refunded raw token amount (0 if the investor held no share).
+fn refund_co_funding_investor(
+    env: &Env,
+    round: &CoFundingRound,
+    investor: &Address,
+    tt: &mut PoolTokenTotals,
+) -> PoolResult<i128> {
+    // #860: refund from the EXACT cumulative committed amount, not from bps
+    // (bps truncates to 1/10_000 of target_principal — reconstructing the
+    // amount from it would silently under-refund an investor by up to ~1bp
+    // of the round every time, since bps can't represent an arbitrary
+    // fraction exactly).
+    let committed_key = DataKey::CoFundCommitted(round.invoice_id, investor.clone());
+    let committed_amount: i128 = env.storage().persistent().get(&committed_key).unwrap_or(0);
+    if committed_amount == 0 {
+        return Ok(0);
+    }
+
+    credit_investor_value(env, &round.token, investor, committed_amount, tt)?;
+    env.storage()
+        .persistent()
+        .remove(&DataKey::CoFundShare(round.invoice_id, investor.clone()));
+    env.storage().persistent().remove(&committed_key);
+    Ok(committed_amount)
+}
+
+/// #860: removes `investor` from `round.participants` in place (used by
+/// `withdraw_co_funding_commitment`; the bulk refund-everyone path in
+/// `finalize_co_funding` clears the whole list at once instead).
+fn remove_participant(env: &Env, round: &mut CoFundingRound, investor: &Address) {
+    let mut updated = Vec::new(env);
+    for i in 0..round.participants.len() {
+        if let Some(addr) = round.participants.get(i) {
+            if &addr != investor {
+                updated.push_back(addr);
+            }
+        }
+    }
+    round.participants = updated;
+}
+
 fn fund_invoice_request(
     env: &Env,
     config: &PoolConfig,
@@ -890,6 +1115,7 @@ fn fund_invoice_request(
         factoring_fee,
         due_date: request.due_date,
         repaid_amount: 0i128,
+        co_funding_round_id: None,
     };
 
     // Persist invoice record and update totals/stats.
@@ -2457,7 +2683,70 @@ impl FundingPool {
                 .get(&DataKey::StorageStats)
                 .unwrap_or_default();
 
-            if fully_repaid {
+            if let Some(round_id) = record.co_funding_round_id {
+                // #860: co-funded invoices bypass the pool-wide
+                // reward_per_share accumulator and total_deployed entirely —
+                // that capital was never counted there (see
+                // commit_to_invoice/finalize_co_funding). Every stroop paid
+                // in THIS call is distributed immediately, pro-rata by
+                // CoFundShare bps, directly to the round's participants —
+                // so partial repayments accrue incrementally rather than
+                // waiting for full repayment (#860 req #6).
+                let round: CoFundingRound = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::CoFundingRound(round_id))
+                    .ok_or(PoolError::CoFundingRoundNotFound)?;
+                let participants = round.participants.clone();
+                let mut distributed: i128 = 0;
+                for i in 0..participants.len() {
+                    let holder = participants.get(i).ok_or(PoolError::StorageCorrupted)?;
+                    let bps: u32 = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::CoFundShare(round_id, holder.clone()))
+                        .unwrap_or(0);
+                    if bps == 0 {
+                        continue;
+                    }
+                    let holder_amount = amount
+                        .checked_mul(bps as i128)
+                        .ok_or(PoolError::AmountOverflow)?
+                        .checked_div(BPS_DENOM as i128)
+                        .ok_or(PoolError::AmountOverflow)?;
+                    if holder_amount > 0 {
+                        credit_investor_value(env, &record.token, &holder, holder_amount, &mut tt)?;
+                        distributed = distributed
+                            .checked_add(holder_amount)
+                            .ok_or(PoolError::AmountOverflow)?;
+                    }
+                }
+                // Floor-division dust (bps not summing to exactly 100% of
+                // `amount`) becomes protocol revenue rather than vanishing —
+                // consistent with this contract's existing
+                // rounds-in-favor-of-protocol convention (e.g.
+                // calculate_factoring_fee's ceiling division).
+                let dust = amount
+                    .checked_sub(distributed)
+                    .ok_or(PoolError::AmountOverflow)?;
+                if dust > 0 {
+                    tt.protocol_revenue = tt
+                        .protocol_revenue
+                        .checked_add(dust)
+                        .ok_or(PoolError::AmountOverflow)?;
+                    tt.pool_value = tt
+                        .pool_value
+                        .checked_add(dust)
+                        .ok_or(PoolError::AmountOverflow)?;
+                }
+                tt.total_paid_out = tt
+                    .total_paid_out
+                    .checked_add(amount)
+                    .ok_or(PoolError::AmountOverflow)?;
+                if fully_repaid {
+                    stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+                }
+            } else if fully_repaid {
                 tt.total_deployed = tt
                     .total_deployed
                     .checked_sub(record.principal)
@@ -3355,7 +3644,553 @@ impl FundingPool {
         Ok(())
     }
 
-    // ---- #247: co-fund share transfer (secondary market) ----
+    // ---- #860: multi-investor co-funding rounds ----
+
+    /// Admin opens an invoice for multi-investor co-funding. `sme`/`due_date`
+    /// are captured here (same trusted-admin-input pattern as `fund_invoice`)
+    /// so `finalize_co_funding` — callable by anyone — doesn't need them
+    /// re-supplied. One round per invoice; rejects if a round already exists
+    /// or the invoice has already been funded via the lump-sum path.
+    pub fn open_co_funding(
+        env: Env,
+        admin: Address,
+        request: OpenCoFundingRequest,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        Self::assert_accepted_token(&env, &request.token)?;
+
+        if request.target_principal <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        if request.min_commitment < 0 || request.min_commitment > request.target_principal {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        if request.max_investor_bps > BPS_DENOM {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        let now = env.ledger().timestamp();
+        if request.funding_deadline <= now {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        if request.due_date <= now {
+            return Err(PoolError::InvoiceExpired);
+        }
+
+        let round_key = DataKey::CoFundingRound(request.invoice_id);
+        if env.storage().persistent().has(&round_key) {
+            return Err(PoolError::CoFundingRoundAlreadyExists);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::FundedInvoice(request.invoice_id))
+        {
+            return Err(PoolError::StorageCorrupted);
+        }
+
+        let round = CoFundingRound {
+            invoice_id: request.invoice_id,
+            token: request.token.clone(),
+            sme: request.sme,
+            due_date: request.due_date,
+            target_principal: request.target_principal,
+            committed_principal: 0,
+            funding_deadline: request.funding_deadline,
+            status: CoFundingStatus::Open,
+            min_commitment: request.min_commitment,
+            max_investor_bps: request.max_investor_bps,
+            participants: Vec::new(&env),
+        };
+        env.storage().persistent().set(&round_key, &round);
+        env.storage().persistent().extend_ttl(
+            &round_key,
+            INSTANCE_LIFETIME_THRESHOLD,
+            ACTIVE_INVOICE_TTL,
+        );
+
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoFundingRoundIds)
+            .unwrap_or(Vec::new(&env));
+        ids.push_back(request.invoice_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::CoFundingRoundIds, &ids);
+
+        env.events().publish(
+            (EVT, symbol_short!("cf_open")),
+            (
+                request.invoice_id,
+                request.token,
+                request.target_principal,
+                request.funding_deadline,
+            ),
+        );
+        Ok(())
+    }
+
+    /// Investor commits `amount` (raw token units) of their own liquid pool
+    /// position toward an open co-funding round. Burns the equivalent LP
+    /// shares from the investor (same conversion `deposit`/`withdraw` use)
+    /// so the capital leaves the general liquid pool without an external
+    /// transfer — it stays custodied by the contract, escrowed for this
+    /// round, until `finalize_co_funding` pays it to the SME or a refund path
+    /// mints it back. If `amount` would overshoot the round's remaining
+    /// target, it is clamped down rather than rejected (#860 req #3) — only
+    /// the clamped amount is ever deducted from the investor.
+    pub fn commit_to_invoice(
+        env: Env,
+        investor: Address,
+        invoice_id: u64,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        investor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        non_reentrant!(&env, {
+            let round_key = DataKey::CoFundingRound(invoice_id);
+            let mut round: CoFundingRound = env
+                .storage()
+                .persistent()
+                .get(&round_key)
+                .ok_or(PoolError::CoFundingRoundNotFound)?;
+
+            if round.status != CoFundingStatus::Open {
+                return Err(PoolError::CoFundingRoundNotOpen);
+            }
+            let now = env.ledger().timestamp();
+            if now >= round.funding_deadline {
+                return Err(PoolError::CoFundingDeadlinePassed);
+            }
+            let remaining = round
+                .target_principal
+                .checked_sub(round.committed_principal)
+                .ok_or(PoolError::AmountOverflow)?;
+            if remaining <= 0 {
+                return Err(PoolError::CoFundingRoundNotOpen);
+            }
+            let commit_amount = if amount > remaining {
+                remaining
+            } else {
+                amount
+            };
+
+            let token = round.token.clone();
+            let share_token_key = DataKey::ShareToken(token.clone());
+            let token_totals_key = DataKey::TokenTotals(token.clone());
+            let share_token: Address = env
+                .storage()
+                .instance()
+                .get(&share_token_key)
+                .ok_or(PoolError::ShareTokenNotConfigured)?;
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+
+            let rate_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ExchangeRate(token.clone()))
+                .unwrap_or(10_000u32);
+            let usdc_equiv = commit_amount
+                .checked_mul(rate_bps as i128)
+                .ok_or(PoolError::AmountOverflow)?
+                .checked_div(10_000i128)
+                .ok_or(PoolError::AmountOverflow)?;
+
+            let total_shares: i128 = env.invoke_contract(
+                &share_token,
+                &Symbol::new(&env, "total_supply"),
+                Vec::new(&env),
+            );
+            if total_shares == 0 || tt.pool_value == 0 {
+                return Err(PoolError::InsufficientLiquidity);
+            }
+            let shares_to_burn = usdc_equiv
+                .checked_mul(total_shares)
+                .ok_or(PoolError::AmountOverflow)?
+                .checked_div(tt.pool_value)
+                .ok_or(PoolError::AmountOverflow)?;
+            if shares_to_burn <= 0 {
+                return Err(PoolError::InvalidAmount);
+            }
+
+            let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+            let mut position: InvestorPosition = env
+                .storage()
+                .persistent()
+                .get(&investor_pos_key)
+                .unwrap_or(InvestorPosition {
+                    deposited: 0,
+                    available: 0,
+                    deployed: 0,
+                    earned: 0,
+                    deposit_count: 0,
+                });
+            if position.available < shares_to_burn {
+                return Err(PoolError::InvalidAmount);
+            }
+
+            let cofund_key = DataKey::CoFundShare(invoice_id, investor.clone());
+            let existing_bps: u32 = env.storage().persistent().get(&cofund_key).unwrap_or(0);
+            // #860: track cumulative committed amount exactly (not derived
+            // from bps, which truncates to 1/10_000 of target_principal) so
+            // a later refund can return 100% of what was actually put in.
+            let committed_key = DataKey::CoFundCommitted(invoice_id, investor.clone());
+            let existing_committed: i128 =
+                env.storage().persistent().get(&committed_key).unwrap_or(0);
+            let new_investor_committed = existing_committed
+                .checked_add(commit_amount)
+                .ok_or(PoolError::AmountOverflow)?;
+            if round.max_investor_bps > 0 {
+                let cap_amount = round
+                    .target_principal
+                    .checked_mul(round.max_investor_bps as i128)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .checked_div(BPS_DENOM as i128)
+                    .ok_or(PoolError::AmountOverflow)?;
+                if new_investor_committed > cap_amount {
+                    return Err(PoolError::CoFundingInvestorCapExceeded);
+                }
+            }
+
+            // Burn shares — the token amount stays in the contract's own
+            // balance (never transferred), earmarked for this round.
+            let mut burn_args = Vec::new(&env);
+            burn_args.push_back(investor.clone().into_val(&env));
+            burn_args.push_back(shares_to_burn.into_val(&env));
+            let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "burn"), burn_args);
+
+            position.available = position
+                .available
+                .checked_sub(shares_to_burn)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().persistent().set(&investor_pos_key, &position);
+
+            tt.pool_value = tt
+                .pool_value
+                .checked_sub(usdc_equiv)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().instance().set(&token_totals_key, &tt);
+
+            // Recompute bps from scratch off the cumulative committed amount
+            // (rather than incrementally adding bps) to avoid rounding drift
+            // across multiple partial commits from the same investor.
+            let new_bps = (new_investor_committed as u64 * BPS_DENOM as u64
+                / round.target_principal as u64) as u32;
+            if existing_bps == 0 {
+                if round.participants.len() >= MAX_CO_FUNDING_PARTICIPANTS {
+                    return Err(PoolError::CoFundingTooManyParticipants);
+                }
+                round.participants.push_back(investor.clone());
+            }
+            env.storage().persistent().set(&cofund_key, &new_bps);
+            env.storage()
+                .persistent()
+                .set(&committed_key, &new_investor_committed);
+
+            round.committed_principal = round
+                .committed_principal
+                .checked_add(commit_amount)
+                .ok_or(PoolError::AmountOverflow)?;
+            let committed_principal = round.committed_principal;
+            env.storage().persistent().set(&round_key, &round);
+
+            env.events().publish(
+                (EVT, symbol_short!("cf_commit")),
+                (invoice_id, investor, commit_amount, committed_principal),
+            );
+            Ok(())
+        })
+    }
+
+    /// Investor withdraws their own not-yet-finalized commitment, returning
+    /// 100% of their committed principal to their available balance. Only
+    /// allowed while the round is still `Open` (before `finalize_co_funding`
+    /// succeeds or expires it).
+    pub fn withdraw_co_funding_commitment(
+        env: Env,
+        investor: Address,
+        invoice_id: u64,
+    ) -> Result<(), PoolError> {
+        investor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        non_reentrant!(&env, {
+            let round_key = DataKey::CoFundingRound(invoice_id);
+            let mut round: CoFundingRound = env
+                .storage()
+                .persistent()
+                .get(&round_key)
+                .ok_or(PoolError::CoFundingRoundNotFound)?;
+            if round.status != CoFundingStatus::Open {
+                return Err(PoolError::CoFundingRoundNotOpen);
+            }
+
+            let token_totals_key = DataKey::TokenTotals(round.token.clone());
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+            let refunded = refund_co_funding_investor(&env, &round, &investor, &mut tt)?;
+            if refunded == 0 {
+                return Err(PoolError::CoFundingNoCommitment);
+            }
+            env.storage().instance().set(&token_totals_key, &tt);
+
+            round.committed_principal = round.committed_principal.saturating_sub(refunded);
+            remove_participant(&env, &mut round, &investor);
+            env.storage().persistent().set(&round_key, &round);
+
+            env.events().publish(
+                (EVT, symbol_short!("cf_wthdw")),
+                (invoice_id, investor, refunded),
+            );
+            Ok(())
+        })
+    }
+
+    /// Admin cancels a co-funding round that has not received any
+    /// commitments yet. (Once investors have committed capital, the only
+    /// ways out are individual `withdraw_co_funding_commitment` calls or
+    /// `finalize_co_funding`'s deadline-expiry refund path — cancellation
+    /// deliberately does not need to handle refunds.)
+    pub fn cancel_co_funding_round(
+        env: Env,
+        admin: Address,
+        invoice_id: u64,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+
+        let round_key = DataKey::CoFundingRound(invoice_id);
+        let mut round: CoFundingRound = env
+            .storage()
+            .persistent()
+            .get(&round_key)
+            .ok_or(PoolError::CoFundingRoundNotFound)?;
+        if round.status != CoFundingStatus::Open {
+            return Err(PoolError::CoFundingRoundNotOpen);
+        }
+        if round.committed_principal != 0 {
+            return Err(PoolError::InvalidCoFundingParams);
+        }
+        round.status = CoFundingStatus::Cancelled;
+        env.storage().persistent().set(&round_key, &round);
+        env.events()
+            .publish((EVT, symbol_short!("cf_cncl")), invoice_id);
+        Ok(())
+    }
+
+    /// Finalizes a co-funding round. Callable by anyone (permissionless,
+    /// matching #860's spec) once either the target has been fully
+    /// committed, or the deadline has passed with at least `min_commitment`
+    /// raised. On success: creates the `FundedInvoice` record and pays the
+    /// SME. On deadline-expiry-below-minimum: refunds every participant in
+    /// full and marks the round `Expired`. Safe to call more than once — a
+    /// round that is no longer `Open` returns an error rather than
+    /// re-executing either branch, so it can never double-pay the SME or
+    /// double-refund investors.
+    pub fn finalize_co_funding(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+    ) -> Result<(), PoolError> {
+        caller.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        non_reentrant!(&env, {
+            let round_key = DataKey::CoFundingRound(invoice_id);
+            let mut round: CoFundingRound = env
+                .storage()
+                .persistent()
+                .get(&round_key)
+                .ok_or(PoolError::CoFundingRoundNotFound)?;
+            if round.status != CoFundingStatus::Open {
+                return Err(PoolError::CoFundingRoundAlreadyFinalized);
+            }
+
+            let now = env.ledger().timestamp();
+            let deadline_passed = now >= round.funding_deadline;
+            let target_met = round.committed_principal >= round.target_principal;
+
+            if !target_met && !deadline_passed {
+                return Err(PoolError::CoFundingRoundNotOpen);
+            }
+
+            // NOTE: both arms below end with `Ok(())`/`Err(...)` as a tail
+            // expression rather than an explicit `return` — an explicit
+            // `return` inside a `non_reentrant!` block exits the whole
+            // function directly, skipping the macro's `non_reentrant_end`
+            // cleanup and leaving the guard permanently stuck (a real bug
+            // caught by this crate's own co-funding integration test: a
+            // stuck guard makes every subsequent call, including unrelated
+            // ones like `withdraw`, panic with "reentrant call").
+            if !target_met && round.committed_principal < round.min_commitment {
+                // Deadline passed, under minimum — refund everyone, no SME payout.
+                let token_totals_key = DataKey::TokenTotals(round.token.clone());
+                let mut tt: PoolTokenTotals = env
+                    .storage()
+                    .instance()
+                    .get(&token_totals_key)
+                    .unwrap_or_default();
+                let participants = round.participants.clone();
+                let mut total_refunded: i128 = 0;
+                for i in 0..participants.len() {
+                    let investor = participants.get(i).ok_or(PoolError::StorageCorrupted)?;
+                    total_refunded += refund_co_funding_investor(&env, &round, &investor, &mut tt)?;
+                }
+                env.storage().instance().set(&token_totals_key, &tt);
+                round.committed_principal = 0;
+                round.participants = Vec::new(&env);
+                round.status = CoFundingStatus::Expired;
+                env.storage().persistent().set(&round_key, &round);
+
+                env.events()
+                    .publish((EVT, symbol_short!("cf_exp")), (invoice_id, total_refunded));
+                Ok(())
+            } else {
+                // Success: fund the SME. Deliberately does NOT touch
+                // tt.total_deployed/pool_value the way fund_invoice_request
+                // does for admin-driven lump-sum funding — this capital
+                // already left pool_value (and was never counted in
+                // total_deployed) when each investor's commitment burned
+                // their shares in commit_to_invoice.
+                if env
+                    .storage()
+                    .persistent()
+                    .has(&DataKey::FundedInvoice(invoice_id))
+                {
+                    return Err(PoolError::StorageCorrupted);
+                }
+
+                let mut stats: PoolStorageStats = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::StorageStats)
+                    .unwrap_or_default();
+                let funded = FundedInvoice {
+                    invoice_id,
+                    sme: round.sme.clone(),
+                    token: round.token.clone(),
+                    principal: round.committed_principal,
+                    funded_at: now,
+                    factoring_fee: 0,
+                    due_date: round.due_date,
+                    repaid_amount: 0,
+                    co_funding_round_id: Some(invoice_id),
+                };
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::FundedInvoice(invoice_id), &funded);
+                set_funded_invoice_ttl(&env, invoice_id, false);
+
+                stats.total_funded_invoices = stats
+                    .total_funded_invoices
+                    .checked_add(1)
+                    .ok_or(PoolError::AmountOverflow)?;
+                stats.active_funded_invoices = stats
+                    .active_funded_invoices
+                    .checked_add(1)
+                    .ok_or(PoolError::AmountOverflow)?;
+                env.storage().instance().set(&DataKey::StorageStats, &stats);
+
+                round.status = CoFundingStatus::Filled;
+                env.storage().persistent().set(&round_key, &round);
+
+                let token_client = token::Client::new(&env, &round.token);
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &round.sme,
+                    &round.committed_principal,
+                );
+
+                env.events().publish(
+                    (EVT, symbol_short!("funded")),
+                    (
+                        invoice_id,
+                        round.sme.clone(),
+                        round.committed_principal,
+                        round.token.clone(),
+                        now,
+                    ),
+                );
+                env.events().publish(
+                    (EVT, symbol_short!("cf_fin")),
+                    (invoice_id, round.committed_principal),
+                );
+
+                if let Some(cs_contract) = get_credit_score_contract(&env) {
+                    let cs_client = CreditScoreClient::new(&env, &cs_contract);
+                    let _ = cs_client.try_record_funding(
+                        &env.current_contract_address(),
+                        &invoice_id,
+                        &round.sme,
+                        &round.committed_principal,
+                    );
+                }
+
+                Ok(())
+            }
+        })
+    }
+
+    /// Returns every invoice_id a co-funding round has ever been opened for.
+    pub fn list_co_funding_rounds(env: Env) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CoFundingRoundIds)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    pub fn get_co_funding_round(env: Env, invoice_id: u64) -> Option<CoFundingRound> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CoFundingRound(invoice_id))
+    }
+
+    /// Returns `(invoice_id, bps)` for every round `investor` currently holds
+    /// a co-fund share in, scanning the round registry. Bounded by however
+    /// many rounds have ever been opened — fine for the admin/investor
+    /// dashboard use case this serves; callers with very large histories
+    /// should paginate via repeated calls filtering client-side.
+    pub fn get_investor_co_fund_positions(env: Env, investor: Address) -> Vec<(u64, u32)> {
+        let ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoFundingRoundIds)
+            .unwrap_or(Vec::new(&env));
+        let mut out = Vec::new(&env);
+        for i in 0..ids.len() {
+            let Some(invoice_id) = ids.get(i) else {
+                continue;
+            };
+            let bps: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CoFundShare(invoice_id, investor.clone()))
+                .unwrap_or(0);
+            if bps > 0 {
+                out.push_back((invoice_id, bps));
+            }
+        }
+        out
+    }
 
     /// Returns the co-fund share (in bps, 0-10_000) that `investor` holds in `invoice_id`.
     pub fn get_co_fund_share(env: Env, invoice_id: u64, investor: Address) -> u32 {
@@ -3400,6 +4235,20 @@ impl FundingPool {
                 return Err(PoolError::AlreadyFullyRepaid);
             }
 
+            // #860: co-fund shares are only tradeable once the round they
+            // came from is Filled — no trading unfunded/still-committing
+            // positions.
+            if let Some(round_id) = record.co_funding_round_id {
+                let round: CoFundingRound = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::CoFundingRound(round_id))
+                    .ok_or(PoolError::CoFundingRoundNotFound)?;
+                if round.status != CoFundingStatus::Filled {
+                    return Err(PoolError::CoFundingRoundNotFilled);
+                }
+            }
+
             // KYC check on recipient if pool requires it (#337: tri-state)
             let kyc_required: bool = env
                 .storage()
@@ -3441,6 +4290,31 @@ impl FundingPool {
                 env.storage().persistent().set(&from_key, &new_from_share);
             }
             env.storage().persistent().set(&to_key, &new_to_share);
+
+            // #860: keep the round's participant list in sync so repayment
+            // distribution (which iterates `round.participants`) still finds
+            // and pays out the new holder, and so a fully-divested `from`
+            // doesn't keep occupying a MAX_CO_FUNDING_PARTICIPANTS slot.
+            if let Some(round_id) = record.co_funding_round_id {
+                if let Some(mut round) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, CoFundingRound>(&DataKey::CoFundingRound(round_id))
+                {
+                    if new_from_share == 0 {
+                        remove_participant(&env, &mut round, &from);
+                    }
+                    if to_share == 0 {
+                        if round.participants.len() >= MAX_CO_FUNDING_PARTICIPANTS {
+                            return Err(PoolError::CoFundingTooManyParticipants);
+                        }
+                        round.participants.push_back(to.clone());
+                    }
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::CoFundingRound(round_id), &round);
+                }
+            }
 
             env.events().publish(
                 (EVT, symbol_short!("shr_xfer")),
@@ -6212,6 +7086,7 @@ mod test {
             factoring_fee: 0,
             due_date: u64::MAX,
             repaid_amount: 0,
+            co_funding_round_id: None,
         };
         let config = PoolConfig {
             invoice_contract: Address::generate(&env),

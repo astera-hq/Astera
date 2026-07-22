@@ -14,7 +14,54 @@ import type {
   PoolTokenTotals,
   FundedInvoice,
   TransactionProgress,
+  CoFundingRound,
 } from './types';
+
+// #860: `open_co_funding` takes a single OpenCoFundingRequest struct rather
+// than individual scalar params. Soroban encodes named-field #[contracttype]
+// structs as an ScMap keyed by field-name Symbols in alphabetical order —
+// NOT declaration order — so the entries below are deliberately sorted
+// (due_date, funding_deadline, invoice_id, max_investor_bps, min_commitment,
+// sme, target_principal, token).
+function openCoFundingRequestToScVal(params: {
+  invoiceId: bigint | number;
+  token: string;
+  targetPrincipal: bigint;
+  sme: string;
+  dueDate: number;
+  fundingDeadline: number;
+  minCommitment: bigint;
+  maxInvestorBps: number;
+}): xdr.ScVal {
+  const entry = (key: string, val: xdr.ScVal) =>
+    new xdr.ScMapEntry({ key: nativeToScVal(key, { type: 'symbol' }), val });
+  return xdr.ScVal.scvMap([
+    entry('due_date', nativeToScVal(params.dueDate, { type: 'u64' })),
+    entry('funding_deadline', nativeToScVal(params.fundingDeadline, { type: 'u64' })),
+    entry('invoice_id', nativeToScVal(params.invoiceId, { type: 'u64' })),
+    entry('max_investor_bps', nativeToScVal(params.maxInvestorBps, { type: 'u32' })),
+    entry('min_commitment', nativeToScVal(params.minCommitment, { type: 'i128' })),
+    entry('sme', new Address(params.sme).toScVal()),
+    entry('target_principal', nativeToScVal(params.targetPrincipal, { type: 'i128' })),
+    entry('token', new Address(params.token).toScVal()),
+  ]);
+}
+
+function coFundingRoundFromScVal(raw: Record<string, unknown>): CoFundingRound {
+  return {
+    invoiceId: BigInt(String(raw.invoice_id)),
+    token: raw.token as string,
+    sme: raw.sme as string,
+    dueDate: Number(raw.due_date),
+    targetPrincipal: BigInt(String(raw.target_principal)),
+    committedPrincipal: BigInt(String(raw.committed_principal)),
+    fundingDeadline: Number(raw.funding_deadline),
+    status: raw.status as CoFundingRound['status'],
+    minCommitment: BigInt(String(raw.min_commitment)),
+    maxInvestorBps: Number(raw.max_investor_bps),
+    participants: (raw.participants as string[]) ?? [],
+  };
+}
 
 export class AsteraClient {
   private server: StellarRpc.Server;
@@ -279,6 +326,262 @@ export class AsteraClient {
       const signedXdr = await params.signer(prepared.toXDR());
       const result = await this.submitTx(signedXdr, params.onProgress);
       return result.hash;
+    },
+
+    // ---- #860: multi-investor co-funding rounds ----
+
+    openCoFunding: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      invoiceId: bigint | number;
+      token: string;
+      targetPrincipal: bigint;
+      sme: string;
+      dueDate: number;
+      fundingDeadline: number;
+      minCommitment: bigint;
+      maxInvestorBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.admin);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'open_co_funding',
+            new Address(params.admin).toScVal(),
+            openCoFundingRequestToScVal(params),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    commitToInvoice: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      invoiceId: bigint | number;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.investor);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'commit_to_invoice',
+            new Address(params.investor).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+            nativeToScVal(params.amount, { type: 'i128' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    finalizeCoFunding: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      invoiceId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'finalize_co_funding',
+            new Address(params.caller).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    withdrawCommitment: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      invoiceId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.investor);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'withdraw_co_funding_commitment',
+            new Address(params.investor).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    transferCoFundShare: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      from: string;
+      invoiceId: bigint | number;
+      token: string;
+      to: string;
+      bps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.from);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'transfer_co_fund_share',
+            new Address(params.from).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+            new Address(params.token).toScVal(),
+            new Address(params.to).toScVal(),
+            nativeToScVal(params.bps, { type: 'u32' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    getCoFundingRound: async (invoiceId: bigint | number): Promise<CoFundingRound | null> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_co_funding_round',
+        [nativeToScVal(invoiceId, { type: 'u64' })],
+        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+      return coFundingRoundFromScVal(raw as Record<string, unknown>);
+    },
+
+    listCoFundingRounds: async (): Promise<bigint[]> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'list_co_funding_rounds',
+        [],
+        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as unknown[];
+      return (raw ?? []).map((id) => BigInt(String(id)));
+    },
+
+    getInvestorCoFundPositions: async (
+      investor: string,
+    ): Promise<Array<{ invoiceId: bigint; bps: number }>> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_investor_co_fund_positions',
+        [new Address(investor).toScVal()],
+        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as [bigint | string, number][];
+      return (raw ?? []).map(([invoiceId, bps]) => ({
+        invoiceId: BigInt(String(invoiceId)),
+        bps,
+      }));
+    },
+
+    getCoFundShare: async (invoiceId: bigint | number, investor: string): Promise<number> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_co_fund_share',
+        [nativeToScVal(invoiceId, { type: 'u64' }), new Address(investor).toScVal()],
+        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+      );
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      return Number(scValToNative(sim.result!.retval));
     },
   };
 

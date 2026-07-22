@@ -3,7 +3,7 @@
  */
 
 import express from 'express';
-import { Database } from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import { getEvents } from './db';
 
 export function startApiServer(db: Database.Database, port: number): void {
@@ -143,6 +143,126 @@ export function startApiServer(db: Database.Database, port: number): void {
     }
   });
 
+  // #860: multi-investor co-funding rounds. All co-funding events publish
+  // under the same "POOL" topic as every other pool event, so — unlike the
+  // oracle registry, which is a separate contract — no dedicated
+  // contractType classification is needed; we just filter the pool event
+  // stream by event_type and reconstruct round state from it.
+  const COFUNDING_EVENT_TYPES = new Set([
+    'cf_open',
+    'cf_commit',
+    'cf_wthdw',
+    'cf_cncl',
+    'cf_exp',
+    'cf_fin',
+  ]);
+
+  app.get('/co-funding/rounds', (_req, res) => {
+    try {
+      const events = getEvents(db, { contractType: 'pool', limit: 2000, offset: 0 });
+      const invoiceIds = new Set<string>();
+      for (const evt of events) {
+        if (evt.eventType !== 'cf_open') continue;
+        const id = extractCoFundingInvoiceId(evt.value);
+        if (id !== null) invoiceIds.add(id);
+      }
+      return res.json({ invoiceIds: Array.from(invoiceIds) });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/co-funding/rounds/:invoiceId', (req, res) => {
+    try {
+      const { invoiceId } = req.params;
+      if (!invoiceId) {
+        return res.status(400).json({ error: 'invoiceId path param is required' });
+      }
+
+      const events = getEvents(db, { contractType: 'pool', limit: 2000, offset: 0 });
+      const matches = events
+        .filter(
+          (evt) =>
+            COFUNDING_EVENT_TYPES.has(evt.eventType) &&
+            extractCoFundingInvoiceId(evt.value) === invoiceId,
+        )
+        .sort((a, b) => a.ledgerSequence - b.ledgerSequence);
+
+      if (matches.length === 0) {
+        return res.status(404).json({ error: `No co-funding round found for invoice ${invoiceId}` });
+      }
+
+      let status = 'Unknown';
+      for (const evt of matches) {
+        switch (evt.eventType) {
+          case 'cf_open':
+            status = 'Open';
+            break;
+          case 'cf_fin':
+            status = 'Filled';
+            break;
+          case 'cf_exp':
+            status = 'Expired';
+            break;
+          case 'cf_cncl':
+            status = 'Cancelled';
+            break;
+          default:
+            break;
+        }
+      }
+
+      return res.json({
+        invoiceId,
+        status,
+        events: matches.map((evt) => ({
+          eventType: evt.eventType,
+          value: evt.value,
+          ledgerSequence: evt.ledgerSequence,
+          ledgerCloseAt: evt.ledgerCloseAt,
+          txHash: evt.txHash,
+        })),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Every co-funding round this investor has ever committed to, derived
+  // from cf_commit events (the second tuple element is always the investor
+  // address for that event — see contracts/pool/src/lib.rs's cf_commit
+  // publish call).
+  app.get('/co-funding/investor/:address', (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!address) {
+        return res.status(400).json({ error: 'address path param is required' });
+      }
+      const addressLower = address.toLowerCase();
+
+      const events = getEvents(db, {
+        contractType: 'pool',
+        eventType: 'cf_commit',
+        limit: 2000,
+        offset: 0,
+      });
+
+      const invoiceIds = new Set<string>();
+      for (const evt of events) {
+        const value = evt.value;
+        const investor = Array.isArray(value) ? value[1] : undefined;
+        if (typeof investor === 'string' && investor.toLowerCase() === addressLower) {
+          const id = extractCoFundingInvoiceId(value);
+          if (id !== null) invoiceIds.add(id);
+        }
+      }
+
+      return res.json({ address, invoiceIds: Array.from(invoiceIds) });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Get latest ledger
   app.get('/ledger/latest', (_req, res) => {
     try {
@@ -160,4 +280,17 @@ export function startApiServer(db: Database.Database, port: number): void {
   app.listen(port, () => {
     console.log(`[Astera Indexer API] Server running on port ${port}`);
   });
+}
+
+// #860: every co-funding event's value carries the invoice_id as its first
+// tuple element, except `cf_cncl` which publishes the bare invoice_id (not
+// wrapped in a tuple) — handle both shapes rather than assuming one.
+// Returned as a string since invoice IDs may exceed Number precision once
+// serialized through JSON.
+function extractCoFundingInvoiceId(value: any): string | null {
+  if (value === null || value === undefined) return null;
+  const candidate = Array.isArray(value) ? value[0] : value;
+  if (candidate === null || candidate === undefined) return null;
+  if (typeof candidate === 'object') return null;
+  return String(candidate);
 }
