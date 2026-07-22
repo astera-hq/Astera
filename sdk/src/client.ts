@@ -14,7 +14,11 @@ import type {
   PoolTokenTotals,
   FundedInvoice,
   TransactionProgress,
+  OracleInfo,
+  VerificationRound,
 } from './types';
+
+const SIMULATION_SOURCE_ACCOUNT = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
 
 export class AsteraClient {
   private server: StellarRpc.Server;
@@ -35,7 +39,7 @@ export class AsteraClient {
         this.config.invoiceContractId,
         'get_invoice',
         [nativeToScVal(id, { type: 'u64' })],
-        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+        SIMULATION_SOURCE_ACCOUNT,
       );
 
       if (StellarRpc.Api.isSimulationError(sim)) {
@@ -51,7 +55,7 @@ export class AsteraClient {
         this.config.invoiceContractId,
         'get_metadata',
         [nativeToScVal(id, { type: 'u64' })],
-        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+        SIMULATION_SOURCE_ACCOUNT,
       );
 
       if (StellarRpc.Api.isSimulationError(sim)) {
@@ -166,7 +170,7 @@ export class AsteraClient {
         this.config.poolContractId,
         'get_config',
         [],
-        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+        SIMULATION_SOURCE_ACCOUNT,
       );
 
       if (StellarRpc.Api.isSimulationError(sim)) {
@@ -190,7 +194,7 @@ export class AsteraClient {
         this.config.poolContractId,
         'get_position',
         [new Address(investor).toScVal(), new Address(token).toScVal()],
-        'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+        SIMULATION_SOURCE_ACCOUNT,
       );
 
       if (StellarRpc.Api.isSimulationError(sim)) {
@@ -281,6 +285,194 @@ export class AsteraClient {
       return result.hash;
     },
   };
+
+  // ---- Oracle Registry Contract (#861) ----
+
+  public readonly oracleRegistry = {
+    openRound: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      invoiceId: bigint | number;
+      oracleHash: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireOracleRegistryContractId();
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'open_verification_round',
+            new Address(params.caller).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+            nativeToScVal(params.oracleHash, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    register: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      operator: string;
+      stakeAmount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireOracleRegistryContractId();
+      const account = await this.server.getAccount(params.operator);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'register_oracle',
+            new Address(params.operator).toScVal(),
+            nativeToScVal(params.stakeAmount, { type: 'i128' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    vote: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      oracle: string;
+      invoiceId: bigint | number;
+      approved: boolean;
+      evidenceHash: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const contractId = this.requireOracleRegistryContractId();
+      const account = await this.server.getAccount(params.oracle);
+      const contract = new Contract(contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'submit_vote',
+            new Address(params.oracle).toScVal(),
+            nativeToScVal(params.invoiceId, { type: 'u64' }),
+            nativeToScVal(params.approved, { type: 'bool' }),
+            nativeToScVal(params.evidenceHash, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    getRound: async (invoiceId: bigint | number): Promise<VerificationRound | null> => {
+      const contractId = this.requireOracleRegistryContractId();
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        contractId,
+        'get_verification_round',
+        [nativeToScVal(invoiceId, { type: 'u64' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+
+      const r = raw as Record<string, unknown>;
+      return {
+        invoiceId: BigInt(String(r.invoice_id)),
+        requiredVotes: Number(r.required_votes),
+        totalRegisteredOracles: Number(r.total_registered_oracles),
+        weightFor: BigInt(String(r.weight_for)),
+        weightAgainst: BigInt(String(r.weight_against)),
+        totalStakeSnapshot: BigInt(String(r.total_stake_snapshot)),
+        quorumBps: Number(r.quorum_bps),
+        status: r.status as VerificationRound['status'],
+        openedAt: Number(r.opened_at),
+        deadline: Number(r.deadline),
+        oracleHash: r.oracle_hash as string,
+      };
+    },
+
+    getOracleInfo: async (operator: string): Promise<OracleInfo | null> => {
+      const contractId = this.requireOracleRegistryContractId();
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        contractId,
+        'get_oracle_info',
+        [new Address(operator).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval);
+      if (!raw) return null;
+
+      const r = raw as Record<string, unknown>;
+      return {
+        address: r.address as string,
+        stakeAmount: BigInt(String(r.stake_amount)),
+        stakeToken: r.stake_token as string,
+        isActive: Boolean(r.is_active),
+        totalVerifications: Number(r.total_verifications),
+        totalSlashes: Number(r.total_slashes),
+        registeredAt: Number(r.registered_at),
+        deregisterRequestedAt:
+          r.deregister_requested_at !== undefined && r.deregister_requested_at !== null
+            ? Number(r.deregister_requested_at)
+            : undefined,
+      };
+    },
+  };
+
+  private requireOracleRegistryContractId(): string {
+    if (!this.config.oracleRegistryContractId) {
+      throw new Error('oracleRegistryContractId is not configured on this AsteraClient');
+    }
+    return this.config.oracleRegistryContractId;
+  }
 
   private async submitTx(
     signedXDR: string,

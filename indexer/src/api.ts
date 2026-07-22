@@ -3,7 +3,7 @@
  */
 
 import express from 'express';
-import { Database } from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import { getEvents } from './db';
 
 export function startApiServer(db: Database.Database, port: number): void {
@@ -143,6 +143,68 @@ export function startApiServer(db: Database.Database, port: number): void {
     }
   });
 
+  // #861: reconstruct a VerificationRound's status/history off-chain from the
+  // oracle_registry contract's indexed events, rather than requiring a
+  // simulated read against the live contract for every query. `rnd_open`
+  // opens/reopens a round, `voted` records individual votes, and
+  // `consensus`/`rnd_exp`/`fallback` are the terminal-or-expiry transitions —
+  // the latest one of those (by ledger sequence) is the round's current
+  // status.
+  app.get('/oracle-registry/rounds/:invoiceId', (req, res) => {
+    try {
+      const { invoiceId } = req.params;
+      if (!invoiceId) {
+        return res.status(400).json({ error: 'invoiceId path param is required' });
+      }
+
+      const events = getEvents(db, {
+        contractType: 'oracle_registry',
+        limit: 1000,
+        offset: 0,
+      });
+
+      const matches = events
+        .filter((evt) => extractInvoiceId(evt.value) === invoiceId)
+        .sort((a, b) => a.ledgerSequence - b.ledgerSequence);
+
+      if (matches.length === 0) {
+        return res.status(404).json({ error: `No round found for invoice ${invoiceId}` });
+      }
+
+      let status: string = 'Unknown';
+      for (const evt of matches) {
+        switch (evt.eventType) {
+          case 'rnd_open':
+            status = 'Open';
+            break;
+          case 'consensus':
+          case 'fallback':
+            status = roundApproved(evt.value) ? 'ConsensusApproved' : 'ConsensusRejected';
+            break;
+          case 'rnd_exp':
+            status = 'Expired';
+            break;
+          default:
+            break;
+        }
+      }
+
+      return res.json({
+        invoiceId,
+        status,
+        events: matches.map((evt) => ({
+          eventType: evt.eventType,
+          value: evt.value,
+          ledgerSequence: evt.ledgerSequence,
+          ledgerCloseAt: evt.ledgerCloseAt,
+          txHash: evt.txHash,
+        })),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Get latest ledger
   app.get('/ledger/latest', (_req, res) => {
     try {
@@ -160,4 +222,22 @@ export function startApiServer(db: Database.Database, port: number): void {
   app.listen(port, () => {
     console.log(`[Astera Indexer API] Server running on port ${port}`);
   });
+}
+
+// #861: every oracle_registry event's value carries the invoice_id as its
+// first tuple element, except `rnd_exp` which publishes the bare invoice_id
+// (not wrapped in a tuple) — handle both shapes rather than assuming one.
+function extractInvoiceId(value: any): string | null {
+  if (value === null || value === undefined) return null;
+  const candidate = Array.isArray(value) ? value[0] : value;
+  if (candidate === null || candidate === undefined) return null;
+  if (typeof candidate === 'object') return null;
+  return String(candidate);
+}
+
+// `consensus` publishes (invoice_id, approved) and `fallback` publishes
+// (invoice_id, approved, admin, reason) — both carry `approved` at index 1.
+function roundApproved(value: any): boolean {
+  if (!Array.isArray(value) || value.length < 2) return false;
+  return Boolean(value[1]);
 }

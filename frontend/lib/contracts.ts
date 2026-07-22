@@ -6,6 +6,7 @@ import {
   POOL_CONTRACT_ID,
   CREDIT_SCORE_CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
+  ORACLE_REGISTRY_CONTRACT_ID,
   NETWORK,
   simulateTx,
   submitTx,
@@ -31,6 +32,9 @@ import type {
   GovernanceConfig,
   GovernanceProposal,
   StellarAddress,
+  OracleInfo,
+  VerificationRound,
+  OracleRegistryConfig,
 } from './types';
 // Auto-generated contract bindings (single source of truth for the on-chain
 // ABI — methods, struct shapes and error codes). Regenerate with
@@ -65,6 +69,9 @@ validateContractId(POOL_CONTRACT_ID, 'pool');
 validateContractId(CREDIT_SCORE_CONTRACT_ID, 'credit_score');
 if (GOVERNANCE_CONTRACT_ID) {
   validateContractId(GOVERNANCE_CONTRACT_ID, 'governance');
+}
+if (ORACLE_REGISTRY_CONTRACT_ID) {
+  validateContractId(ORACLE_REGISTRY_CONTRACT_ID, 'oracle_registry');
 }
 
 // ── Mock mode (#229) ─────────────────────────────────────────────────────────
@@ -1304,6 +1311,159 @@ export async function buildCancelProposalTx(
     networkPassphrase: NETWORK,
   })
     .addOperation(contract.call('cancel_proposal', nativeToScVal(proposalId, { type: 'u64' })))
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- #861: Oracle Registry (N-of-M staked oracle consensus network) ----
+// ORACLE_REGISTRY_CONTRACT_ID is optional — unset until the registry is
+// deployed, mirroring how GOVERNANCE_CONTRACT_ID is handled above.
+
+export async function getRegistryConfig(): Promise<OracleRegistryConfig> {
+  const sim = await simulateTx(
+    ORACLE_REGISTRY_CONTRACT_ID,
+    'get_registry_config',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>;
+
+  return {
+    minStake: BigInt(String(raw.min_stake)),
+    stakeToken: raw.stake_token as string,
+    requiredVotes: Number(raw.required_votes),
+    quorumBps: Number(raw.quorum_bps),
+    roundDurationSecs: Number(raw.round_duration_secs),
+    deregisterCooldownSecs: Number(raw.deregister_cooldown_secs),
+    treasury: (raw.treasury as string | null) ?? null,
+  };
+}
+
+export async function listActiveOracles(): Promise<StellarAddress[]> {
+  const sim = await simulateTx(
+    ORACLE_REGISTRY_CONTRACT_ID,
+    'list_active_oracles',
+    [],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as unknown[];
+  return (raw ?? []) as StellarAddress[];
+}
+
+export async function getOracleInfo(operator: string): Promise<OracleInfo | null> {
+  const sim = await simulateTx(
+    ORACLE_REGISTRY_CONTRACT_ID,
+    'get_oracle_info',
+    [new Address(operator).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  const info = raw as Record<string, unknown>;
+
+  return {
+    address: info.address as StellarAddress,
+    stakeAmount: BigInt(String(info.stake_amount)),
+    stakeToken: info.stake_token as string,
+    isActive: Boolean(info.is_active),
+    totalVerifications: Number(info.total_verifications),
+    totalSlashes: Number(info.total_slashes),
+    registeredAt: Number(info.registered_at),
+    deregisterRequestedAt:
+      info.deregister_requested_at !== undefined && info.deregister_requested_at !== null
+        ? Number(info.deregister_requested_at)
+        : null,
+  };
+}
+
+export async function getVerificationRound(invoiceId: number): Promise<VerificationRound | null> {
+  const sim = await simulateTx(
+    ORACLE_REGISTRY_CONTRACT_ID,
+    'get_verification_round',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval);
+  if (!raw) return null;
+  const round = raw as Record<string, unknown>;
+
+  return {
+    invoiceId: Number(round.invoice_id),
+    requiredVotes: Number(round.required_votes),
+    totalRegisteredOracles: Number(round.total_registered_oracles),
+    weightFor: BigInt(String(round.weight_for)),
+    weightAgainst: BigInt(String(round.weight_against)),
+    totalStakeSnapshot: BigInt(String(round.total_stake_snapshot)),
+    quorumBps: Number(round.quorum_bps),
+    status: round.status as VerificationRound['status'],
+    openedAt: Number(round.opened_at),
+    deadline: Number(round.deadline),
+    oracleHash: round.oracle_hash as string,
+  };
+}
+
+export async function buildAdminResolveRoundTx(params: {
+  admin: StellarAddress;
+  invoiceId: number;
+  approved: boolean;
+  reason: string;
+}): Promise<string> {
+  const account = await getRpcAccount(params.admin);
+  const contract = new Contract(ORACLE_REGISTRY_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'admin_resolve_round',
+        new Address(params.admin).toScVal(),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        nativeToScVal(params.approved, { type: 'bool' }),
+        nativeToScVal(params.reason, { type: 'string' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+export async function buildSlashOracleTx(params: {
+  admin: StellarAddress;
+  operator: StellarAddress;
+  bps: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.admin);
+  const contract = new Contract(ORACLE_REGISTRY_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'slash_oracle',
+        new Address(params.admin).toScVal(),
+        new Address(params.operator).toScVal(),
+        nativeToScVal(params.bps, { type: 'u32' }),
+      ),
+    )
     .setTimeout(30)
     .build();
 

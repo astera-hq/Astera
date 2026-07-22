@@ -26,8 +26,8 @@ mod share {
     soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/share.wasm");
 }
 
-mod insurance {
-    soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/insurance.wasm");
+mod oracle_registry {
+    soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/oracle_registry.wasm");
 }
 
 fn metadata_url(env: &Env) -> String {
@@ -2149,183 +2149,284 @@ fn test_multiple_simultaneous_withdrawals_high_deployment() {
     assert!(balance3 > 4_000_000_000i128);
 }
 
-struct InsuredScenarioResult {
-    investor_final_balance: i128,
-    premium_paid: i128,
-    claims_paid: i128,
-}
-
-/// Runs the identical fund → default → (partial) collateral seizure lifecycle
-/// twice — once with the #866 default-insurance reserve wired up and once
-/// without — and diffs the investor's final balance between the two runs.
-///
-/// #866 acceptance criterion: investors funding an insured invoice end up
-/// strictly better off on default than investors funding an equivalent
-/// uninsured invoice, and the improvement is accounted for exactly by
-/// (claim payout − premium paid) — not an approximation.
+/// #861: N-of-M staked oracle consensus network — end-to-end test with the
+/// real compiled `oracle_registry.wasm` and `invoice.wasm` artifacts (not
+/// in-process stubs). Five oracles register with equal stake; the registry's
+/// quorum is configured to 6000 bps (60%) so that exactly 3 of 5 approving
+/// votes (60% of equal-weighted stake) crosses the threshold — matching the
+/// "consensus approves at exactly quorum" acceptance criterion. Once quorum
+/// is reached the registry calls back into `consensus_verify`, and the pool
+/// funds the now-`Verified` invoice exactly as it would after a legacy
+/// single-oracle `verify_invoice` call.
 #[test]
-fn test_insurance_reduces_investor_loss_on_default() {
-    fn run_scenario(use_insurance: bool) -> InsuredScenarioResult {
-        let env = test_env();
-        env.mock_all_auths_allowing_non_root_auth();
-        env.ledger().with_mut(|l| l.timestamp = 100_000);
+fn test_oracle_consensus_quorum_approves_and_pool_funds_invoice() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
 
-        let admin = Address::generate(&env);
-        let sme = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let token_admin = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
 
-        let invoice_id_addr = env.register_contract_wasm(None, invoice::WASM);
-        let pool_id = env.register_contract_wasm(None, pool::WASM);
-        let share_id = env.register_contract_wasm(None, share::WASM);
-        let usdc_id = env
-            .register_stellar_asset_contract_v2(token_admin)
-            .address();
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let registry_id = env.register_contract_wasm(None, oracle_registry::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
 
-        let invoice_client = invoice::Client::new(&env, &invoice_id_addr);
-        let pool_client = pool::Client::new(&env, &pool_id);
-        let share_client = share::Client::new(&env, &share_id);
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    let share_client = share::Client::new(&env, &share_id);
+    let registry_client = oracle_registry::Client::new(&env, &registry_id);
 
-        invoice_client.initialize(
-            &admin,
-            &pool_id,
-            &10_000_000_000i128,
-            &(30u64 * 86_400u64),
-            &7u32,
-        );
-        share_client.initialize(
-            &admin,
-            &7u32,
-            &String::from_str(&env, "Pool Shares"),
-            &String::from_str(&env, "POOL"),
-        );
-        initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id_addr);
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+    credit_client.initialize(&admin, &invoice_id, &pool_id);
 
-        // 30% collateral required — deliberately partial, so a genuine
-        // shortfall remains after seizure for insurance to (partly) cover.
-        propose_and_execute(
-            &env,
-            &pool_client,
-            &admin,
-            pool::AdminOperation::SetCollateralConfig(1_000i128, 3_000u32),
-        );
+    // A placeholder legacy `Oracle` address is still required so that newly
+    // created invoices enter `AwaitingVerification` (that gate is keyed off
+    // whether *any* oracle is configured, independent of the consensus flag).
+    invoice_client.set_oracle(&admin, &Address::generate(&env));
+    registry_client.initialize(&admin, &usdc_id, &1_000i128);
+    registry_client.set_invoice_contract(&admin, &invoice_id);
+    // 6000 bps (60%) quorum so 3-of-5 equally-staked oracles lands exactly on
+    // the threshold, per the "approves at exactly quorum" scenario.
+    registry_client.set_registry_config(
+        &admin,
+        &1_000i128,
+        &3u32,
+        &6_000u32,
+        &(3 * 86_400u64),
+        &(7 * 86_400u64),
+    );
+    invoice_client.set_oracle_registry(&admin, &registry_id);
+    invoice_client.set_consensus_required(&admin, &true);
 
-        let principal: i128 = 10_000;
-        let required_col = pool_client.required_collateral_for(&principal);
-
-        let mut insurance_client_opt: Option<insurance::Client> = None;
-        if use_insurance {
-            let insurance_id = env.register_contract_wasm(None, insurance::WASM);
-            let insurance_client = insurance::Client::new(&env, &insurance_id);
-            insurance_client.initialize(&admin, &pool_id, &invoice_id_addr);
-
-            let mut tiers = soroban_sdk::Vec::new(&env);
-            tiers.push_back(insurance::RiskTier {
-                min_score: 200,
-                max_score: 850,
-                risk_multiplier_bps: 10_000,
-            });
-            insurance_client.set_premium_config(
-                &admin,
-                &insurance::PremiumConfig {
-                    base_rate_bps: 200,
-                    tenor_bps_per_day: 5,
-                    risk_tiers: tiers,
-                    default_risk_multiplier_bps: 10_000,
-                    min_premium_bps: 10,
-                    max_premium_bps: 2_000,
-                    default_coverage_bps: 8_000,
-                },
-            );
-            // Seed the reserve generously so the claim below is solved solvently.
-            soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
-                .mint(&admin, &1_000_000i128);
-            insurance_client.fund_reserve_from_treasury(&admin, &usdc_id, &1_000_000i128);
-
-            pool_client.set_insurance_contract(&admin, &insurance_id);
-            insurance_client_opt = Some(insurance_client);
-        }
-
-        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &required_col);
-        pool_client.deposit(&investor, &usdc_id, &1_000_000i128);
-        pool_client.deposit_collateral(&1u64, &sme, &usdc_id, &required_col);
-
-        let due_date = env.ledger().timestamp() + 30 * 86_400;
-        let inv_id = invoice_client.create_invoice(
-            &sme,
-            &String::from_str(&env, "ACME Corp"),
-            &principal,
-            &due_date,
-            &String::from_str(&env, "Invoice #001"),
-            &String::from_str(&env, "hash123"),
-            &metadata_url(&env),
-        );
-        assert_eq!(inv_id, 1);
-        pool_client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
-        invoice_client.mark_funded(&1u64, &pool_id);
-
-        let grace_period = invoice_client.get_grace_period() as u64;
-        env.ledger()
-            .with_mut(|l| l.timestamp = due_date + grace_period * 86_400 + 1);
-        invoice_client.mark_defaulted(&1u64, &pool_id);
-
-        propose_and_execute(
-            &env,
-            &pool_client,
-            &admin,
-            pool::AdminOperation::SeizeCollateral(1u64),
-        );
-
-        // file_claim is permissionless and is not chained automatically off
-        // seizure (Soroban disallows pool being re-entered while it's still
-        // on the call stack executing execute_seize_collateral) — file it as
-        // a separate follow-up call, as a keeper/SME/frontend would.
-        if let Some(ref client) = insurance_client_opt {
-            client.file_claim(&admin, &1u64);
-        }
-
-        let shares = share_client.balance(&investor);
-        pool_client.withdraw(&investor, &usdc_id, &shares);
-        let investor_final_balance =
-            soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor);
-
-        let (premium_paid, claims_paid) = match insurance_client_opt {
-            Some(client) => {
-                let coverage = client.get_coverage_record(&1u64).unwrap();
-                let status = client.get_reserve_status(&usdc_id);
-                (coverage.premium_paid, status.total_claims_paid)
-            }
-            None => (0, 0),
-        };
-
-        InsuredScenarioResult {
-            investor_final_balance,
-            premium_paid,
-            claims_paid,
-        }
+    let mut oracles = Vec::new();
+    for _ in 0..5 {
+        let op = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&op, &1_000i128);
+        registry_client.register_oracle(&op, &1_000i128);
+        oracles.push(op);
     }
 
-    let uninsured = run_scenario(false);
-    let insured = run_scenario(true);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
 
-    assert_eq!(uninsured.claims_paid, 0);
-    assert_eq!(uninsured.premium_paid, 0);
-    assert!(insured.claims_paid > 0, "expected a nonzero claim payout");
-
-    assert!(
-        insured.investor_final_balance > uninsured.investor_final_balance,
-        "insured investors ({}) should end up strictly better off than uninsured investors ({}) on default",
-        insured.investor_final_balance,
-        uninsured.investor_final_balance
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::AwaitingVerification
     );
 
-    // The improvement is accounted for exactly: claim payout minus what the
-    // pool spent on the premium (also drawn from the pool's own balance).
-    let expected_delta = insured.claims_paid - insured.premium_paid;
-    let actual_delta = insured.investor_final_balance - uninsured.investor_final_balance;
+    // The legacy path is locked out while consensus verification is required.
+    let legacy_attempt = invoice_client.try_verify_invoice(
+        &inv_id,
+        &oracles[0],
+        &true,
+        &String::from_str(&env, ""),
+        &String::from_str(&env, "hash123"),
+    );
+    assert!(legacy_attempt.is_err());
+
+    registry_client.open_verification_round(&admin, &inv_id, &String::from_str(&env, "hash123"));
+
+    // 2 reject first (40% weight — below the 3000/5000 threshold on its own).
+    registry_client.submit_vote(&oracles[0], &inv_id, &false, &String::from_str(&env, "e"));
+    registry_client.submit_vote(&oracles[1], &inv_id, &false, &String::from_str(&env, "e"));
     assert_eq!(
-        actual_delta, expected_delta,
-        "investor balance improvement should equal claim payout minus premium paid exactly"
+        registry_client
+            .get_verification_round(&inv_id)
+            .unwrap()
+            .status,
+        oracle_registry::RoundStatus::Open
+    );
+
+    // 3 approve — cumulative weight hits exactly 3000, the quorum threshold.
+    registry_client.submit_vote(&oracles[2], &inv_id, &true, &String::from_str(&env, "e"));
+    registry_client.submit_vote(&oracles[3], &inv_id, &true, &String::from_str(&env, "e"));
+    registry_client.submit_vote(&oracles[4], &inv_id, &true, &String::from_str(&env, "e"));
+
+    let round = registry_client.get_verification_round(&inv_id).unwrap();
+    assert_eq!(
+        round.status,
+        oracle_registry::RoundStatus::ConsensusApproved
+    );
+    assert_eq!(round.weight_for, 3_000i128);
+    assert_eq!(round.weight_against, 2_000i128);
+
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(invoice.status, invoice::InvoiceStatus::Verified);
+    assert!(invoice.oracle_verified);
+
+    // The pool funds the now-Verified invoice exactly like the legacy flow.
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+    invoice_client.mark_funded(&inv_id, &pool_id);
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Funded
+    );
+}
+
+/// #861: the escape hatch — if oracle participation never reaches quorum
+/// before the round's deadline, the round expires and an admin fallback
+/// (`admin_resolve_round`) resolves it so the invoice is never permanently
+/// bricked by an unresponsive oracle set.
+#[test]
+fn test_oracle_consensus_round_expires_then_admin_fallback_resolves() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let registry_id = env.register_contract_wasm(None, oracle_registry::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let share_client = share::Client::new(&env, &share_id);
+    let registry_client = oracle_registry::Client::new(&env, &registry_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+
+    invoice_client.set_oracle(&admin, &Address::generate(&env));
+    registry_client.initialize(&admin, &usdc_id, &1_000i128);
+    registry_client.set_invoice_contract(&admin, &invoice_id);
+    invoice_client.set_oracle_registry(&admin, &registry_id);
+    invoice_client.set_consensus_required(&admin, &true);
+
+    let mut oracles = Vec::new();
+    for _ in 0..5 {
+        let op = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&op, &1_000i128);
+        registry_client.register_oracle(&op, &1_000i128);
+        oracles.push(op);
+    }
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+
+    registry_client.open_verification_round(&admin, &inv_id, &String::from_str(&env, "hash123"));
+
+    // Only a single oracle ever votes — well short of the default 6600 bps
+    // quorum out of 5000 total stake.
+    registry_client.submit_vote(&oracles[0], &inv_id, &true, &String::from_str(&env, "e"));
+    assert_eq!(
+        registry_client
+            .get_verification_round(&inv_id)
+            .unwrap()
+            .status,
+        oracle_registry::RoundStatus::Open
+    );
+
+    // Advance past the default 3-day round deadline.
+    env.ledger().with_mut(|l| l.timestamp += 3 * 86_400 + 1);
+    registry_client.expire_round(&inv_id);
+    assert_eq!(
+        registry_client
+            .get_verification_round(&inv_id)
+            .unwrap()
+            .status,
+        oracle_registry::RoundStatus::Expired
+    );
+
+    // The invoice is still stuck in AwaitingVerification until the admin
+    // fallback resolves it — it must never be permanently bricked.
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::AwaitingVerification
+    );
+
+    registry_client.admin_resolve_round(
+        &admin,
+        &inv_id,
+        &true,
+        &String::from_str(&env, "manual review: oracle participation too low"),
+    );
+
+    let invoice = invoice_client.get_invoice(&inv_id);
+    assert_eq!(invoice.status, invoice::InvoiceStatus::Verified);
+
+    // Fully unblocked: the pool can now fund it like any other verified invoice.
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+    invoice_client.mark_funded(&inv_id, &pool_id);
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Funded
     );
 }
