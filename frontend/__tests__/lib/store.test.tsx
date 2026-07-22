@@ -54,6 +54,7 @@ describe('useStore', () => {
       yieldTimelockSecs: 0,
       maxSingleInvestorBps: 10000,
       maxWithdrawalQueueAgeDays: 7,
+      maxWithdrawalQueueDepth: 500,
     };
 
     act(() => {

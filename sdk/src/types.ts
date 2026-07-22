@@ -52,6 +52,30 @@ export interface PoolConfig {
   compoundInterest: boolean;
 }
 
+// #865: withdrawal-queue completion + liquidity forecasting
+
+export interface WithdrawalRequest {
+  investor: string;
+  token: string;
+  shares: bigint;
+  requestedAt: number;
+  requestId: bigint;
+}
+
+export interface WaitEstimate {
+  queuePosition: number;
+  capitalAhead: bigint;
+  nearestInvoiceDueDate: number;
+  /** Predicted seconds until this request is likely to clear. An estimate, not a guarantee. */
+  estimatedWaitSecs: number;
+}
+
+export interface LiquidityForecastPoint {
+  /** Days from now (1-indexed). */
+  day: number;
+  projectedAvailable: bigint;
+}
+
 export interface PoolTokenTotals {
   totalDeposited: bigint;
   totalDeployed: bigint;
