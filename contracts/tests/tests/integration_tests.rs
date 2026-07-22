@@ -2134,6 +2134,260 @@ fn test_multiple_simultaneous_withdrawals_high_deployment() {
     assert!(balance3 > 4_000_000_000i128);
 }
 
+/// #860: end-to-end multi-investor co-funding round spanning invoice + pool
+/// + credit_score — three investors co-fund a single oracle-verified
+/// invoice with a non-round-number bps split, the SME is paid, and full
+/// repayment credits each co-funder proportionally without touching the
+/// pool's general reward_per_share accumulator.
+#[test]
+fn test_co_funding_round_end_to_end_with_credit_score() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+    let lender3 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_addr = env.register_contract_wasm(None, invoice::WASM);
+    let pool_addr = env.register_contract_wasm(None, pool::WASM);
+    let credit_addr = env.register_contract_wasm(None, credit_score::WASM);
+    let share_addr = env.register_contract_wasm(None, share::WASM);
+    let usdc_addr = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_addr);
+    let pool_client = pool::Client::new(&env, &pool_addr);
+    let credit_client = credit_score::Client::new(&env, &credit_addr);
+    let share_client = share::Client::new(&env, &share_addr);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_addr,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_addr, &share_addr, &invoice_addr);
+    credit_client.initialize(&admin, &invoice_addr, &pool_addr);
+    pool_client.set_credit_score_contract(&admin, &credit_addr);
+    invoice_client.set_oracle(&admin, &oracle);
+
+    for lender in [&lender1, &lender2, &lender3] {
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
+            .mint(lender, &10_000_000_000i128);
+        pool_client.deposit(lender, &usdc_addr, &10_000_000_000i128);
+    }
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr).mint(&sme, &10_000_000_000i128);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "Co-Funded Corp"),
+        &9_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #CF-001"),
+        &String::from_str(&env, "hash_cf"),
+        &metadata_url(&env),
+    );
+    invoice_client.verify_invoice(
+        &inv_id,
+        &oracle,
+        &true,
+        &String::from_str(&env, ""),
+        &String::from_str(&env, "hash_cf"),
+    );
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Verified
+    );
+
+    let deadline = env.ledger().timestamp() + 10_000;
+    pool_client.open_co_funding(
+        &admin,
+        &pool::OpenCoFundingRequest {
+            invoice_id: inv_id,
+            token: usdc_addr.clone(),
+            target_principal: 9_000_000_000i128,
+            sme: sme.clone(),
+            due_date,
+            funding_deadline: deadline,
+            min_commitment: 0,
+            max_investor_bps: 0,
+        },
+    );
+
+    // Non-round-number split across 3 lenders: 3000/3000/3000 out of 9000 ->
+    // 3333/3333/3334 bps, exercising the exact fractional-split acceptance
+    // criterion from #860.
+    pool_client.commit_to_invoice(&lender1, &inv_id, &3_000_000_000i128);
+    pool_client.commit_to_invoice(&lender2, &inv_id, &3_000_000_000i128);
+    pool_client.commit_to_invoice(&lender3, &inv_id, &3_000_000_000i128);
+
+    let round = pool_client.get_co_funding_round(&inv_id).unwrap();
+    assert_eq!(round.committed_principal, 9_000_000_000i128);
+
+    let sme_balance_before = soroban_sdk::token::Client::new(&env, &usdc_addr).balance(&sme);
+    pool_client.finalize_co_funding(&admin, &inv_id);
+    let sme_balance_after = soroban_sdk::token::Client::new(&env, &usdc_addr).balance(&sme);
+    assert_eq!(sme_balance_after - sme_balance_before, 9_000_000_000i128);
+
+    // Funding this way still drives mark_funded and the credit_score
+    // record_funding signal exactly like the admin lump-sum path does.
+    invoice_client.mark_funded(&inv_id, &pool_addr);
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Funded
+    );
+    let credit_before_repay = credit_client.get_credit_score(&sme);
+    assert_eq!(credit_before_repay.total_volume, 9_000_000_000i128);
+
+    // Repay in full and confirm the reward_per_share accumulator — which
+    // would otherwise siphon co-funders' interest to every LP holder in the
+    // pool, including the three lenders' own general deposits that funded
+    // OTHER investors' pools too — stays untouched for this invoice.
+    let totals_before_repay = pool_client.get_token_totals(&usdc_addr);
+    env.ledger().with_mut(|l| l.timestamp += 15 * 86_400);
+    let total_due = pool_client.estimate_repayment(&inv_id, &None);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr).mint(&sme, &total_due);
+    pool_client.repay_invoice(&inv_id, &sme, &total_due);
+    invoice_client.mark_paid(&inv_id, &pool_addr);
+
+    let totals_after_repay = pool_client.get_token_totals(&usdc_addr);
+    assert_eq!(
+        totals_after_repay.reward_per_share,
+        totals_before_repay.reward_per_share
+    );
+
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Paid
+    );
+    let funded_record = pool_client.get_funded_invoice(&inv_id).unwrap();
+    assert_eq!(funded_record.repaid_amount, total_due);
+    assert_eq!(funded_record.co_funding_round_id, Some(inv_id));
+
+    // Each lender should now be able to withdraw more than their original
+    // 10B deposit — proof their proportional share of principal + interest
+    // was actually credited as fresh, withdrawable LP shares.
+    for lender in [&lender1, &lender2, &lender3] {
+        let shares = share_client.balance(lender);
+        pool_client.withdraw(lender, &usdc_addr, &shares);
+        let balance = soroban_sdk::token::Client::new(&env, &usdc_addr).balance(lender);
+        assert!(
+            balance > 10_000_000_000i128,
+            "lender balance {} should exceed original 10B deposit after proportional payout",
+            balance
+        );
+    }
+}
+
+/// #860: a round that never reaches its minimum commitment before the
+/// deadline must refund every participant in full rather than leaving the
+/// invoice permanently stuck — and the pool must still be able to fund
+/// other invoices normally afterward.
+#[test]
+fn test_co_funding_round_expires_and_refunds_then_pool_still_usable() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_addr = env.register_contract_wasm(None, invoice::WASM);
+    let pool_addr = env.register_contract_wasm(None, pool::WASM);
+    let share_addr = env.register_contract_wasm(None, share::WASM);
+    let usdc_addr = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let pool_client = pool::Client::new(&env, &pool_addr);
+    let share_client = share::Client::new(&env, &share_addr);
+
+    invoice_client_init(&env, &invoice_addr, &admin, &pool_addr);
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_addr, &share_addr, &invoice_addr);
+
+    for lender in [&lender1, &lender2] {
+        soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
+            .mint(lender, &10_000_000_000i128);
+        pool_client.deposit(lender, &usdc_addr, &10_000_000_000i128);
+    }
+
+    let inv_id = 42u64;
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let deadline = env.ledger().timestamp() + 1_000;
+    pool_client.open_co_funding(
+        &admin,
+        &pool::OpenCoFundingRequest {
+            invoice_id: inv_id,
+            token: usdc_addr.clone(),
+            target_principal: 9_000_000_000i128,
+            sme: sme.clone(),
+            due_date,
+            funding_deadline: deadline,
+            min_commitment: 8_000_000_000i128,
+            max_investor_bps: 0,
+        },
+    );
+
+    // Only 2B committed against a 9B target with an 8B minimum — well short.
+    pool_client.commit_to_invoice(&lender1, &inv_id, &1_000_000_000i128);
+    pool_client.commit_to_invoice(&lender2, &inv_id, &1_000_000_000i128);
+
+    env.ledger().with_mut(|l| l.timestamp = deadline + 1);
+    pool_client.finalize_co_funding(&admin, &inv_id);
+
+    let round = pool_client.get_co_funding_round(&inv_id).unwrap();
+    assert_eq!(round.status, pool::CoFundingStatus::Expired);
+    assert!(pool_client.get_funded_invoice(&inv_id).is_none());
+
+    // Both lenders should be able to withdraw their full original deposit —
+    // proof the refund returned 100% of committed principal.
+    for lender in [&lender1, &lender2] {
+        let shares = share_client.balance(lender);
+        pool_client.withdraw(lender, &usdc_addr, &shares);
+        let balance = soroban_sdk::token::Client::new(&env, &usdc_addr).balance(lender);
+        assert_eq!(balance, 10_000_000_000i128);
+    }
+
+    // Pool must still be fully usable for ordinary lump-sum funding after an
+    // expired co-funding round — nothing should be left in a stuck state.
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_addr)
+        .mint(&lender1, &5_000_000_000i128);
+    pool_client.deposit(&lender1, &usdc_addr, &5_000_000_000i128);
+    pool_client.fund_invoice(
+        &admin,
+        &43u64,
+        &1_000_000_000i128,
+        &sme,
+        &(env.ledger().timestamp() + 30 * 86_400),
+        &usdc_addr,
+    );
+    let totals = pool_client.get_token_totals(&usdc_addr);
+    assert_eq!(totals.total_deployed, 1_000_000_000i128);
+}
+
 /// #861: N-of-M staked oracle consensus network — end-to-end test with the
 /// real compiled `oracle_registry.wasm` and `invoice.wasm` artifacts (not
 /// in-process stubs). Five oracles register with equal stake; the registry's

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
+import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { PoolStatsSkeleton } from '@/components/PoolStats';
@@ -196,9 +197,17 @@ export default function InvestPage() {
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-5xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
-          <p className="text-brand-muted">{t('description')}</p>
+        <div className="mb-8 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
+            <p className="text-brand-muted">{t('description')}</p>
+          </div>
+          <Link
+            href="/invest/co-funding"
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-semibold hover:border-brand-gold hover:text-brand-gold transition-colors whitespace-nowrap"
+          >
+            Browse Co-Funding Rounds →
+          </Link>
         </div>
 
         {/* ── Top grid: Pool stats + deposit form ── */}

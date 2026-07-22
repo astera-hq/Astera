@@ -1,4 +1,5 @@
 export const Errors = {
+  0: { message: 'AlreadyInitialized' },
   1: { message: 'NotInitialized' },
   2: { message: 'TokenNotAccepted' },
   3: { message: 'TokenAlreadyAccepted' },
@@ -52,6 +53,31 @@ export const Errors = {
   51: { message: 'InvalidUpgradeTimelock' },
   52: { message: 'InvalidWasmHash' },
   53: { message: 'InsufficientPoolFunds' },
+  54: { message: 'AdminChangePending' },
+  55: { message: 'AdminChangeTimelockNotExpired' },
+  56: { message: 'NoAdminChangeProposed' },
+  57: { message: 'TimestampInPast' },
+  58: { message: 'InvoiceExpired' },
+  59: { message: 'OperationRequiresProposal' },
+  60: { message: 'ProposalNotFound' },
+  61: { message: 'ProposalNotReady' },
+  62: { message: 'ProposalAlreadyExecuted' },
+  63: { message: 'ProposalAlreadyCancelled' },
+  64: { message: 'InvalidOperationDelay' },
+  65: { message: 'TokenHasActiveCofundingCommitments' },
+  // #860: multi-investor co-funding rounds
+  66: { message: 'CoFundingRoundNotFound' },
+  67: { message: 'CoFundingRoundAlreadyExists' },
+  68: { message: 'CoFundingRoundNotOpen' },
+  69: { message: 'CoFundingRoundAlreadyFinalized' },
+  70: { message: 'CoFundingDeadlinePassed' },
+  71: { message: 'CoFundingDeadlineNotPassed' },
+  72: { message: 'CoFundingBelowMinimum' },
+  73: { message: 'CoFundingInvestorCapExceeded' },
+  74: { message: 'CoFundingNoCommitment' },
+  75: { message: 'CoFundingRoundNotFilled' },
+  76: { message: 'CoFundingTooManyParticipants' },
+  77: { message: 'InvalidCoFundingParams' },
 } as const;
 
 export type PoolErrorCode = keyof typeof Errors;

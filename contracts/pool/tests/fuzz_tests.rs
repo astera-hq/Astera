@@ -726,3 +726,107 @@ mod deterministic_fuzz {
         assert!(!client.get_investor_kyc(&investor));
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    // #860: co-funding bps invariant — across randomized commit/withdraw/
+    // transfer sequences, the sum of a round's CoFundShare bps must never
+    // exceed BPS_DENOM (10_000), and committed_principal must never exceed
+    // target_principal.
+    #[test]
+    fn prop_co_funding_bps_never_exceeds_denom(
+        commit_amounts in proptest::collection::vec(0i128..3_000i128, 4),
+        withdraw_mask in proptest::collection::vec(proptest::bool::ANY, 4),
+        do_transfer in proptest::bool::ANY,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let sme = Address::generate(&env);
+
+        let mut investors = std::vec::Vec::new();
+        for _ in 0..4 {
+            let investor = Address::generate(&env);
+            mint(&env, &usdc_id, &investor, 10_000);
+            client.deposit(&investor, &usdc_id, &10_000);
+            investors.push(investor);
+        }
+
+        let invoice_id = 1u64;
+        let due_date = env.ledger().timestamp() + 1_000_000;
+        let deadline = env.ledger().timestamp() + 10_000;
+        client.open_co_funding(&admin, &pool::OpenCoFundingRequest {
+            invoice_id,
+            token: usdc_id.clone(),
+            target_principal: 10_000,
+            sme,
+            due_date,
+            funding_deadline: deadline,
+            min_commitment: 0,
+            max_investor_bps: 0,
+        });
+
+        let total_bps = |client: &FundingPoolClient, investors: &std::vec::Vec<Address>| -> u64 {
+            investors
+                .iter()
+                .map(|inv| client.get_co_fund_share(&invoice_id, inv) as u64)
+                .sum()
+        };
+
+        for (i, amount) in commit_amounts.iter().enumerate() {
+            if *amount > 0 {
+                // Overshoot past the target is clamped, not rejected — any
+                // error here would be a genuine bug, not an expected input
+                // rejection, since commit_to_invoice never errors on a
+                // too-large `amount` by design.
+                client.commit_to_invoice(&investors[i], &invoice_id, amount);
+            }
+            let round = client.get_co_funding_round(&invoice_id).unwrap();
+            prop_assert!(
+                total_bps(&client, &investors) <= 10_000,
+                "bps sum exceeds 10_000 after commit {}",
+                i
+            );
+            prop_assert!(
+                round.committed_principal <= round.target_principal,
+                "committed {} exceeds target {}",
+                round.committed_principal,
+                round.target_principal
+            );
+        }
+
+        for (i, should_withdraw) in withdraw_mask.iter().enumerate() {
+            if *should_withdraw {
+                // May legitimately fail with CoFundingNoCommitment if this
+                // investor never committed — that's fine, just skip.
+                let _ = client.try_withdraw_co_funding_commitment(&investors[i], &invoice_id);
+                prop_assert!(
+                    total_bps(&client, &investors) <= 10_000,
+                    "bps sum exceeds 10_000 after withdraw {}",
+                    i
+                );
+            }
+        }
+
+        if do_transfer {
+            let from_bps = client.get_co_fund_share(&invoice_id, &investors[0]);
+            if from_bps > 0 {
+                // Only succeeds once the round is Filled; either outcome is
+                // fine, the invariant must hold regardless.
+                let _ = client.try_transfer_co_fund_share(
+                    &investors[0],
+                    &invoice_id,
+                    &usdc_id,
+                    &investors[1],
+                    &from_bps,
+                );
+            }
+        }
+
+        prop_assert!(
+            total_bps(&client, &investors) <= 10_000,
+            "final bps sum exceeds 10_000"
+        );
+    }
+}
