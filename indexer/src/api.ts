@@ -327,6 +327,107 @@ export function startApiServer(db: Database.Database, port: number): void {
     }
   });
 
+  // #865: reconstruct current withdrawal-queue depth for `token` off-chain from the
+  // pool contract's indexed wd_queue/wd_cncl/wd_part/wd_full events, rather than
+  // requiring a live contract simulation for every query (same approach as the
+  // oracle-registry rounds endpoint above). Each event's value is a positional tuple
+  // matching the Rust event payload: wd_queue = (investor, token, shares, request_id);
+  // wd_cncl = (investor, token, request_id); wd_part = (investor, token, amount,
+  // shares_to_burn, request_id); wd_full = (investor, token, payout, shares,
+  // request_id) — request_id is 0 on wd_full when the withdrawal settled immediately
+  // rather than draining a queued request, and is ignored for reconstruction here.
+  //
+  // This endpoint intentionally only reports queue *depth and membership* — an
+  // authoritative wait-time estimate depends on live pool state (trailing inflow
+  // rate, current liquidity, invoice due dates) that isn't reconstructable from the
+  // event log alone. Callers wanting `estimated_wait_secs` should simulate the pool
+  // contract's `estimate_withdrawal_wait` directly (as the frontend already does).
+  app.get('/pool/:token/withdrawal-queue', (req, res) => {
+    try {
+      const { token } = req.params;
+      if (!token) {
+        return res.status(400).json({ error: 'token path param is required' });
+      }
+
+      const events = getEvents(db, {
+        contractType: 'pool',
+        limit: 5000,
+        offset: 0,
+      })
+        .filter((evt) =>
+          ['wd_queue', 'wd_cncl', 'wd_part', 'wd_full'].includes(evt.eventType),
+        )
+        .sort((a, b) => a.ledgerSequence - b.ledgerSequence);
+
+      const pending = new Map<
+        string,
+        { requestId: string; investor: string; shares: string; queuedAt: string; ledgerSequence: number }
+      >();
+
+      for (const evt of events) {
+        const value = evt.value;
+        if (!Array.isArray(value) || value.length < 2) continue;
+        if (String(value[1]) !== token) continue;
+
+        switch (evt.eventType) {
+          case 'wd_queue': {
+            const [investor, , shares, requestId] = value;
+            pending.set(String(requestId), {
+              requestId: String(requestId),
+              investor: String(investor),
+              shares: String(shares),
+              queuedAt: evt.ledgerCloseAt,
+              ledgerSequence: evt.ledgerSequence,
+            });
+            break;
+          }
+          case 'wd_cncl': {
+            const requestId = String(value[2]);
+            pending.delete(requestId);
+            break;
+          }
+          case 'wd_part': {
+            const requestId = String(value[4]);
+            const sharesBurned = BigInt(String(value[3] ?? 0));
+            const entry = pending.get(requestId);
+            if (entry) {
+              const remaining = BigInt(entry.shares) - sharesBurned;
+              entry.shares = remaining.toString();
+            }
+            break;
+          }
+          case 'wd_full': {
+            const requestId = String(value[4]);
+            if (requestId !== '0') {
+              pending.delete(requestId);
+            }
+            break;
+          }
+          default:
+            break;
+        }
+      }
+
+      const requests = Array.from(pending.values()).sort(
+        (a, b) => a.ledgerSequence - b.ledgerSequence,
+      );
+
+      return res.json({
+        token,
+        depth: requests.length,
+        requests: requests.map((r, i) => ({
+          queuePosition: i + 1,
+          requestId: r.requestId,
+          investor: r.investor,
+          shares: r.shares,
+          queuedAt: r.queuedAt,
+        })),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Get latest ledger
   app.get('/ledger/latest', (_req, res) => {
     try {

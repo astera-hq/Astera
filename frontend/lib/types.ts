@@ -63,6 +63,8 @@ export interface PoolConfig {
   // #233: max single-investor concentration
   maxSingleInvestorBps: number;
   maxWithdrawalQueueAgeDays: number;
+  // #865: global cap on outstanding withdrawal-queue entries per token (0 = unlimited)
+  maxWithdrawalQueueDepth: number;
 }
 
 export interface PoolTokenTotals {
@@ -76,6 +78,24 @@ export interface WaitEstimate {
   queuePosition: number;
   capitalAhead: bigint;
   nearestInvoiceDueDate: number;
+  /** #865: predicted seconds until this request likely clears. An estimate, not a guarantee. */
+  estimatedWaitSecs: number;
+}
+
+/** #865: a single pending entry returned by `get_withdrawal_queue`. */
+export interface WithdrawalRequest {
+  investor: string;
+  token: string;
+  shares: bigint;
+  requestedAt: number;
+  requestId: number;
+}
+
+/** #865: one projected point returned by `get_liquidity_forecast`. */
+export interface LiquidityForecastPoint {
+  /** Days from now (1-indexed). */
+  day: number;
+  projectedAvailable: bigint;
 }
 
 export type ProposalStatus = 'Active' | 'Passed' | 'Rejected' | 'Executed' | 'Cancelled';

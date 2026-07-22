@@ -17,6 +17,9 @@ import type {
   CoFundingRound,
   OracleInfo,
   VerificationRound,
+  WithdrawalRequest,
+  WaitEstimate,
+  LiquidityForecastPoint,
 } from './types';
 
 const SIMULATION_SOURCE_ACCOUNT = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
@@ -586,6 +589,181 @@ export class AsteraClient {
         throw new Error(`Simulation failed: ${sim.error}`);
       }
       return Number(scValToNative(sim.result!.retval));
+    },
+
+    // #865: withdrawal-queue completion + liquidity forecasting
+
+    getWithdrawalQueue: async (token: string): Promise<WithdrawalRequest[]> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_withdrawal_queue',
+        [new Address(token).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
+      return raw.map((r) => ({
+        investor: r.investor as string,
+        token: r.token as string,
+        shares: BigInt(String(r.shares)),
+        requestedAt: Number(r.requested_at),
+        requestId: BigInt(String(r.request_id)),
+      }));
+    },
+
+    estimateWithdrawalWait: async (investor: string, token: string): Promise<WaitEstimate> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'estimate_withdrawal_wait',
+        [new Address(investor).toScVal(), new Address(token).toScVal()],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>;
+      return {
+        queuePosition: Number(raw.queue_position),
+        capitalAhead: BigInt(String(raw.capital_ahead)),
+        nearestInvoiceDueDate: Number(raw.nearest_invoice_due_date),
+        estimatedWaitSecs: Number(raw.estimated_wait_secs),
+      };
+    },
+
+    getLiquidityForecast: async (
+      token: string,
+      horizonDays: number,
+    ): Promise<LiquidityForecastPoint[]> => {
+      const sim = await simulateTx(
+        this.server,
+        this.config.network,
+        this.config.poolContractId,
+        'get_liquidity_forecast',
+        [new Address(token).toScVal(), nativeToScVal(horizonDays, { type: 'u32' })],
+        SIMULATION_SOURCE_ACCOUNT,
+      );
+
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+      const raw = scValToNative(sim.result!.retval) as Record<string, unknown>[];
+      return raw.map((r) => ({
+        day: Number(r.day),
+        projectedAvailable: BigInt(String(r.projected_available)),
+      }));
+    },
+
+    requestWithdrawal: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      token: string;
+      shares: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.investor);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'request_withdrawal',
+            new Address(params.investor).toScVal(),
+            new Address(params.token).toScVal(),
+            nativeToScVal(params.shares, { type: 'i128' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    cancelWithdrawalRequest: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      investor: string;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.investor);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'cancel_withdrawal_request',
+            new Address(params.investor).toScVal(),
+            new Address(params.token).toScVal(),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
+    },
+
+    /** Permissionless: anyone can trigger a drain attempt against current liquidity. */
+    drainWithdrawalQueue: async (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> => {
+      const account = await this.server.getAccount(params.caller);
+      const contract = new Contract(this.config.poolContractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.network,
+      })
+        .addOperation(
+          contract.call(
+            'drain_withdrawal_queue',
+            new Address(params.caller).toScVal(),
+            new Address(params.token).toScVal(),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const sim = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(sim)) {
+        throw new Error(`Simulation failed: ${sim.error}`);
+      }
+
+      const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await params.signer(prepared.toXDR());
+      const result = await this.submitTx(signedXdr, params.onProgress);
+      return result.hash;
     },
   };
 
