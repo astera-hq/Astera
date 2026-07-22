@@ -1,8 +1,10 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
+import { LiquidityForecastChart } from '@/components/analytics/LiquidityForecastChart';
 import {
   getInvestorPosition,
   getPoolConfig,
@@ -10,9 +12,14 @@ import {
   getPoolTokenTotals,
   getExchangeRate,
   estimateWithdrawalWait,
+  getLiquidityForecast,
+  buildRequestWithdrawalTx,
+  buildCancelWithdrawalRequestTx,
+  buildDrainWithdrawalQueueTx,
+  submitTx,
 } from '@/lib/contracts';
-import { formatUSDC, stablecoinLabel } from '@/lib/stellar';
-import type { PoolTokenTotals, WaitEstimate } from '@/lib/types';
+import { formatUSDC, stablecoinLabel, toStroops } from '@/lib/stellar';
+import type { PoolTokenTotals, WaitEstimate, LiquidityForecastPoint } from '@/lib/types';
 
 interface PortfolioSnapshot {
   totalDeposited: bigint;
@@ -27,8 +34,19 @@ interface TokenRow {
   totals: PoolTokenTotals;
   position: PortfolioSnapshot | null;
   waitEstimate: WaitEstimate | null;
+  forecast: LiquidityForecastPoint[];
   /** Exchange rate in bps (10_000 = 1:1 USD) */
   rateBps: number;
+}
+
+/** Render a seconds duration as a short human string, e.g. "3h", "2d", "~1mo". */
+function formatWaitEstimate(secs: number): string {
+  if (secs <= 0) return 'moments';
+  const day = 86_400;
+  if (secs < 3_600) return `${Math.max(1, Math.round(secs / 60))}m`;
+  if (secs < day) return `${Math.round(secs / 3_600)}h`;
+  if (secs < day * 60) return `${Math.round(secs / day)}d`;
+  return `~${Math.round(secs / (day * 30))}mo`;
 }
 
 function TokenPositionSkeleton() {
@@ -164,6 +182,8 @@ export default function PortfolioPage() {
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [requestAmounts, setRequestAmounts] = useState<Record<string, string>>({});
+  const [queueActionLoading, setQueueActionLoading] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     if (!wallet.connected || !wallet.address) return;
@@ -175,11 +195,12 @@ export default function PortfolioPage() {
 
       const rowData: TokenRow[] = await Promise.all(
         tokens.map(async (token) => {
-          const [totals, rawPos, rateBps, waitEstimate] = await Promise.all([
+          const [totals, rawPos, rateBps, waitEstimate, forecast] = await Promise.all([
             getPoolTokenTotals(token),
             getInvestorPosition(wallet.address!, token),
             getExchangeRate(token).catch(() => 10_000),
             estimateWithdrawalWait(wallet.address!, token).catch(() => null),
+            getLiquidityForecast(token, 30).catch(() => []),
           ]);
 
           const position: PortfolioSnapshot | null = rawPos
@@ -192,7 +213,7 @@ export default function PortfolioPage() {
               }
             : null;
 
-          return { token, totals, position, waitEstimate, rateBps };
+          return { token, totals, position, waitEstimate, forecast, rateBps };
         }),
       );
 
@@ -218,6 +239,64 @@ export default function PortfolioPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  async function signAndSubmit(xdrPromise: Promise<string>): Promise<void> {
+    const xdr = await xdrPromise;
+    const freighter = await import('@stellar/freighter-api');
+    const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
+      networkPassphrase: 'Test SDF Network ; September 2015',
+      address: wallet.address!,
+    });
+    if (signError) throw new Error(signError.message);
+    await submitTx(signedTxXdr);
+  }
+
+  async function handleRequestWithdrawal(token: string) {
+    if (!wallet.address) return;
+    const raw = requestAmounts[token];
+    if (!raw || parseFloat(raw) <= 0) return;
+
+    setQueueActionLoading((p) => ({ ...p, [token]: true }));
+    try {
+      const shares = toStroops(parseFloat(raw));
+      await signAndSubmit(buildRequestWithdrawalTx(wallet.address, token, shares));
+      toast.success(`Withdrawal request submitted for ${formatUSDC(shares)}.`);
+      setRequestAmounts((p) => ({ ...p, [token]: '' }));
+      await load();
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to request withdrawal.');
+    } finally {
+      setQueueActionLoading((p) => ({ ...p, [token]: false }));
+    }
+  }
+
+  async function handleCancelWithdrawal(token: string) {
+    if (!wallet.address) return;
+    setQueueActionLoading((p) => ({ ...p, [token]: true }));
+    try {
+      await signAndSubmit(buildCancelWithdrawalRequestTx(wallet.address, token));
+      toast.success('Withdrawal request cancelled.');
+      await load();
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to cancel withdrawal request.');
+    } finally {
+      setQueueActionLoading((p) => ({ ...p, [token]: false }));
+    }
+  }
+
+  async function handleDrainQueue(token: string) {
+    if (!wallet.address) return;
+    setQueueActionLoading((p) => ({ ...p, [token]: true }));
+    try {
+      await signAndSubmit(buildDrainWithdrawalQueueTx(wallet.address, token));
+      toast.success('Drain attempt submitted.');
+      await load();
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to drain withdrawal queue.');
+    } finally {
+      setQueueActionLoading((p) => ({ ...p, [token]: false }));
+    }
+  }
 
   if (!wallet.connected) {
     return (
@@ -448,12 +527,14 @@ export default function PortfolioPage() {
           {/* Per-token positions (collapsible when > 1 token) */}
           <div className="space-y-4">
             <h2 className="text-white font-semibold text-lg">Token Positions</h2>
-            {rows.map(({ token, position, totals, waitEstimate, rateBps }) => {
+            {rows.map(({ token, position, totals, waitEstimate, forecast, rateBps }) => {
               const isCollapsed = collapsed[token] ?? false;
               const usdcDeposited = position ? toUsdcEquiv(position.totalDeposited, rateBps) : 0n;
               const dueDate = waitEstimate?.nearestInvoiceDueDate
                 ? new Date(waitEstimate.nearestInvoiceDueDate * 1000).toLocaleDateString()
                 : 'No active invoice due date';
+              const isQueued = Boolean(waitEstimate && waitEstimate.queuePosition > 0);
+              const actionLoading = queueActionLoading[token] ?? false;
               return (
                 <div
                   key={token}
@@ -532,7 +613,7 @@ export default function PortfolioPage() {
                         />
                       </div>
 
-                      {waitEstimate && waitEstimate.queuePosition > 0 && (
+                      {isQueued && waitEstimate && (
                         <div className="mt-4 rounded-xl border border-brand-border bg-black/20 p-4">
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div>
@@ -541,12 +622,76 @@ export default function PortfolioPage() {
                                 Position {waitEstimate.queuePosition} with{' '}
                                 {formatUSDC(waitEstimate.capitalAhead)} ahead
                               </p>
+                              <p className="text-brand-muted text-xs mt-1">
+                                Estimated wait:{' '}
+                                <span className="text-white">
+                                  {formatWaitEstimate(waitEstimate.estimatedWaitSecs)}
+                                </span>{' '}
+                                <span className="opacity-60">(estimate, not a guarantee)</span>
+                              </p>
                             </div>
                             <div className="text-left sm:text-right">
                               <p className="text-brand-muted text-xs">Nearest invoice due</p>
                               <p className="text-white text-sm font-medium">{dueDate}</p>
                             </div>
                           </div>
+                          <div className="flex flex-wrap gap-2 mt-3">
+                            <button
+                              onClick={() => handleCancelWithdrawal(token)}
+                              disabled={actionLoading}
+                              className="px-3 py-1.5 text-xs rounded-lg border border-brand-border text-white hover:bg-brand-border transition-colors disabled:opacity-50"
+                            >
+                              Cancel request
+                            </button>
+                            <button
+                              onClick={() => handleDrainQueue(token)}
+                              disabled={actionLoading}
+                              className="px-3 py-1.5 text-xs rounded-lg border border-brand-border text-brand-gold hover:bg-brand-border transition-colors disabled:opacity-50"
+                              title="Anyone can trigger a drain attempt against current liquidity"
+                            >
+                              Try drain now
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {!isQueued && position && position.available > 0n && (
+                        <div className="mt-4 rounded-xl border border-brand-border bg-black/20 p-4">
+                          <p className="text-white font-medium mb-2">Request withdrawal</p>
+                          <p className="text-brand-muted text-xs mb-3">
+                            If pool liquidity can&apos;t cover it immediately, your request is queued
+                            and settled automatically (FIFO, oldest-first) as liquidity arrives.
+                          </p>
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              placeholder="Amount"
+                              value={requestAmounts[token] ?? ''}
+                              onChange={(e) =>
+                                setRequestAmounts((p) => ({ ...p, [token]: e.target.value }))
+                              }
+                              className="flex-1 bg-brand-dark border border-brand-border rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-brand-gold"
+                            />
+                            <button
+                              onClick={() => handleRequestWithdrawal(token)}
+                              disabled={actionLoading || !requestAmounts[token]}
+                              className="px-4 py-1.5 text-xs rounded-lg bg-brand-gold text-black font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+                            >
+                              {actionLoading ? 'Submitting…' : 'Request'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {forecast.length > 0 && (
+                        <div className="mt-4">
+                          <LiquidityForecastChart
+                            data={forecast}
+                            title="30-Day Liquidity Forecast"
+                            queuedDemand={waitEstimate?.capitalAhead}
+                          />
                         </div>
                       )}
                     </>

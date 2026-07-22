@@ -41,7 +41,48 @@ function buildPoolConfig(adminAddress: string) {
     yield_timelock_secs: 0,
     max_single_investor_bps: 5000,
     max_withdrawal_queue_age_days: 7,
+    max_withdrawal_queue_depth: 500,
   };
+}
+
+const MOCK_USDC_ID = 'CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF';
+
+// #865: withdrawal-queue completion + liquidity forecasting
+function buildTokenTotals(): Record<string, unknown> {
+  return {
+    pool_value: '10000000000',
+    total_deployed: '9000000000',
+    total_paid_out: '500000000',
+    total_fee_revenue: '25000000',
+    reward_per_share: '0',
+    protocol_revenue: '0',
+  };
+}
+
+function buildWithdrawalQueue(investorAddress: string): Record<string, unknown>[] {
+  return [
+    {
+      investor: investorAddress,
+      token: MOCK_USDC_ID,
+      shares: '2000000000',
+      requested_at: Math.floor(Date.now() / 1000) - 3600,
+      request_id: '1',
+    },
+    {
+      investor: INVOICE_CONTRACT_ID,
+      token: MOCK_USDC_ID,
+      shares: '1500000000',
+      requested_at: Math.floor(Date.now() / 1000) - 1800,
+      request_id: '2',
+    },
+  ];
+}
+
+function buildLiquidityForecast(): Record<string, unknown>[] {
+  return Array.from({ length: 30 }, (_, i) => ({
+    day: i + 1,
+    projected_available: String(1_000_000_000 + i * 50_000_000),
+  }));
 }
 
 // #861: N-of-M staked oracle consensus network
@@ -88,6 +129,14 @@ function mockReturnValue(method: string | null, adminAddress: string): xdr.ScVal
       return nativeToScVal(buildOracleInfo(adminAddress));
     case 'get_verification_round':
       return nativeToScVal(null);
+    case 'accepted_tokens':
+      return nativeToScVal([MOCK_USDC_ID]);
+    case 'get_token_totals':
+      return nativeToScVal(buildTokenTotals());
+    case 'get_withdrawal_queue':
+      return nativeToScVal(buildWithdrawalQueue(adminAddress));
+    case 'get_liquidity_forecast':
+      return nativeToScVal(buildLiquidityForecast());
     default:
       return nativeToScVal(null);
   }

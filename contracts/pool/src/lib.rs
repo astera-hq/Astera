@@ -4,29 +4,6 @@
 // - Invoice contract: may call pool for state reads
 // - Anyone: public view functions
 
-// IMPLEMENTATION APPROACH for #222 - Pool Token Removal Safety Checks
-//
-// RECON FINDINGS:
-// - remove_token() currently: checks admin auth, finds token in accepted list, removes if pool_value=0 and total_deployed=0
-// - TokenTotals: PoolTokenTotals struct with fields: pool_value, total_deployed, total_paid_out, total_fee_revenue, reward_per_share, protocol_revenue
-// - get_token_totals(): returns PoolTokenTotals struct
-// - get_withdrawal_queue(): DOES NOT EXIST - no withdrawal queue functionality found in codebase
-// - PoolError: #[contracterror] enum, next code #[u32] = 21 (after InsufficientCoFundShare = 20)
-// - Storage pattern: DataKey::TokenTotals uses instance storage, no TTL
-// - Auth pattern: admin.require_auth() + Self::require_admin(&env, &admin)
-// - Share token burn: no existing burn logic found, share tokens handled via external contract calls
-// - Tests use: Env::default(), env.mock_all_auths(), FundingPoolClient::new(), client.try_method() for error testing
-//
-// STRATEGY:
-// 1. Add 3 safety checks before existing removal logic using exact storage helpers
-// 2. Extend PoolError with TokenHasActiveBalances(#21), TokenHasDeployedCapital(#22),
-//    TokenHasPendingWithdrawals(#23) following exact error pattern
-// 3. Since no withdrawal queue exists, will skip that check for now and add placeholder
-// 4. Tests: 4 new unit tests matching exact test framework from recon
-//
-// FILES: modify contracts/pool/src/lib.rs only + new tests
-// UNRESOLVED: No withdrawal queue found - will implement basic check structure
-
 #![no_std]
 
 use soroban_sdk::{
@@ -159,6 +136,8 @@ pub enum PoolError {
     InvalidOperationDelay = 64,
     // #567: token removal blocked while a funded invoice still references this token
     TokenHasActiveCofundingCommitments = 65,
+    // #865: global withdrawal-queue depth cap reached for this token
+    WithdrawalQueueFull = 66,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -191,6 +170,22 @@ const DEFAULT_MAX_SINGLE_INVESTOR_BPS: u32 = 2_000;
 const DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS: u32 = 10_000;
 const DEFAULT_WITHDRAWAL_COOLDOWN_SECS: u64 = 0;
 const DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS: u32 = 30;
+// #865: global cap on outstanding withdrawal-queue entries per token (0 = unlimited).
+// Bounds the O(n) queue scan/rewrite cost in request_withdrawal/cancel_withdrawal_request/
+// process_withdrawal_queue. Each investor can already only hold one queued request at a
+// time (request_withdrawal rejects a second with AlreadyQueuedForWithdrawal), so this is
+// effectively a cap on the number of distinct investors queued at once.
+const DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH: u32 = 500;
+// #865: fixed-size ring buffer capacity for the trailing deposit-inflow rate used by
+// estimate_withdrawal_wait/get_liquidity_forecast, mirroring the credit_score contract's
+// PaymentHistory rolling-window pattern.
+const MAX_INFLOW_HISTORY: u32 = 50;
+// #865: clamp bounds for the predictive wait estimate so a sparse/empty inflow history
+// or a huge queue never produces a nonsensical (zero or unbounded) estimate.
+const MIN_WAIT_ESTIMATE_SECS: u64 = 3_600; // 1 hour
+const MAX_WAIT_ESTIMATE_SECS: u64 = 31_536_000; // 365 days
+                                                // #865: liquidity forecast is capped to this many days to bound loop iteration/gas cost.
+const MAX_FORECAST_HORIZON_DAYS: u32 = 365;
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const ACTIVE_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365;
@@ -231,6 +226,34 @@ pub struct WaitEstimate {
     pub queue_position: u32,
     pub capital_ahead: i128,
     pub nearest_invoice_due_date: u64,
+    /// #865: predicted seconds until this request is likely to clear, projected from
+    /// `capital_ahead` divided by the trailing deposit-inflow rate (see
+    /// `get_liquidity_forecast`), combined with `nearest_invoice_due_date` and clamped to
+    /// `[MIN_WAIT_ESTIMATE_SECS, MAX_WAIT_ESTIMATE_SECS]`. This is an estimate, not a
+    /// guarantee — actual settlement depends on future deposits/repayments.
+    pub estimated_wait_secs: u64,
+}
+
+/// #865: a single projected point in `get_liquidity_forecast`'s horizon.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidityForecastPoint {
+    /// Days from now (1-indexed; day 1 is the first point after "now").
+    pub day: u32,
+    /// Projected `available_liquidity` at this point: current liquidity, plus principal
+    /// from open invoices whose `due_date` falls within the window, plus the trailing
+    /// deposit-inflow rate extrapolated over the elapsed days.
+    pub projected_available: i128,
+}
+
+/// #865: one recorded inflow event (new investor capital arriving via `deposit`), used to
+/// compute a trailing average inflow rate. Mirrors the credit_score contract's
+/// `PaymentHistory` ring-buffer pattern.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InflowEvent {
+    pub amount: i128,
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -259,6 +282,8 @@ pub struct PoolConfig {
     pub max_utilization_bps: u32,
     pub utilization_warning_bps: u32,
     pub max_withdrawal_queue_age_days: u32,
+    // #865: global cap on outstanding withdrawal-queue entries per token (0 = unlimited).
+    pub max_withdrawal_queue_depth: u32,
 }
 
 #[contracttype]
@@ -501,6 +526,16 @@ pub enum DataKey {
     Proposal(u64),
     NextProposalId,
     OperationDelaySecs,
+    // #865: per-token index of every invoice_id ever funded, so liquidity forecasting and
+    // wait estimation can enumerate open invoices without assuming caller-supplied
+    // invoice_ids are a dense sequential range (they are not — see fund_invoice_request).
+    TokenInvoiceIds(Address),
+    // #865: deposit-inflow ring buffer (token -> current length / start index), mirroring
+    // the credit_score contract's PaymentHistory pattern. Instance storage: small, hot.
+    InflowHistoryLen(Address),
+    InflowHistoryStart(Address),
+    // #865: individual ring-buffer slot: (token, slot_index) -> InflowEvent.
+    InflowRecord(Address, u32),
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -815,6 +850,89 @@ fn available_liquidity(tt: &PoolTokenTotals) -> PoolResult<i128> {
         .ok_or(PoolError::AmountOverflow)
 }
 
+/// #865: record a new-capital inflow event (currently only `deposit`) into the
+/// fixed-size ring buffer used to project a trailing inflow rate. Mirrors the
+/// credit_score contract's `PaymentHistory` write path: once the buffer is full,
+/// the oldest slot is overwritten and the start index advances.
+fn record_inflow_event(env: &Env, token: &Address, amount: i128) {
+    let len_key = DataKey::InflowHistoryLen(token.clone());
+    let start_key = DataKey::InflowHistoryStart(token.clone());
+    let len: u32 = env.storage().instance().get(&len_key).unwrap_or(0);
+    let start: u32 = env.storage().instance().get(&start_key).unwrap_or(0);
+    let event = InflowEvent {
+        amount,
+        timestamp: env.ledger().timestamp(),
+    };
+
+    if len < MAX_INFLOW_HISTORY {
+        env.storage()
+            .persistent()
+            .set(&DataKey::InflowRecord(token.clone(), len), &event);
+        env.storage().instance().set(&len_key, &(len + 1));
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::InflowRecord(token.clone(), start), &event);
+        let new_start = (start + 1) % MAX_INFLOW_HISTORY;
+        env.storage().instance().set(&start_key, &new_start);
+    }
+}
+
+/// #865: trailing inflow rate in token-units-per-second, averaged over the recorded
+/// window of the ring buffer (oldest recorded event to now). Returns `0` when there's
+/// no history yet (e.g. a brand-new pool) so callers can treat that as "unknown".
+fn trailing_inflow_rate_per_sec(env: &Env, token: &Address) -> i128 {
+    let len: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::InflowHistoryLen(token.clone()))
+        .unwrap_or(0);
+    if len == 0 {
+        return 0;
+    }
+    let start: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::InflowHistoryStart(token.clone()))
+        .unwrap_or(0);
+
+    let mut total: i128 = 0;
+    let mut oldest_ts: u64 = u64::MAX;
+    let now = env.ledger().timestamp();
+    for offset in 0..len {
+        let idx = (start + offset) % MAX_INFLOW_HISTORY;
+        if let Some(record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, InflowEvent>(&DataKey::InflowRecord(token.clone(), idx))
+        {
+            total = total.saturating_add(record.amount);
+            if record.timestamp < oldest_ts {
+                oldest_ts = record.timestamp;
+            }
+        }
+    }
+    // Elapsed window; floor at 1 day so a burst of deposits in the same ledger close
+    // doesn't produce a division by (near) zero and an absurdly high rate.
+    let elapsed = now.saturating_sub(oldest_ts).max(SECS_PER_DAY);
+    total / elapsed as i128
+}
+
+/// #865: append `invoice_id` to the per-token index of every invoice ever funded, so
+/// forecasting/estimation code can enumerate open invoices for a token without assuming
+/// invoice_ids are a dense sequential range (they're caller-supplied — see
+/// `fund_invoice_request` — and not guaranteed to be).
+fn record_funded_invoice_id(env: &Env, token: &Address, invoice_id: u64) {
+    let key = DataKey::TokenInvoiceIds(token.clone());
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env));
+    ids.push_back(invoice_id);
+    env.storage().persistent().set(&key, &ids);
+}
+
 fn calculate_reward_delta(total_interest: i128, total_shares: i128) -> PoolResult<i128> {
     total_interest
         .checked_mul(REWARD_PRECISION)
@@ -897,6 +1015,8 @@ fn fund_invoice_request(
         .persistent()
         .set(&DataKey::FundedInvoice(request.invoice_id), &funded);
     set_funded_invoice_ttl(env, request.invoice_id, false);
+    // #865: index this invoice_id so liquidity forecasting can enumerate open invoices.
+    record_funded_invoice_id(env, &request.token, request.invoice_id);
 
     let prev_deployed = tt.total_deployed;
     tt.total_deployed = tt
@@ -1035,6 +1155,7 @@ impl FundingPool {
             max_utilization_bps: DEFAULT_MAX_UTILIZATION_BPS,
             utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
             max_withdrawal_queue_age_days: DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS,
+            max_withdrawal_queue_depth: DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -1489,6 +1610,17 @@ impl FundingPool {
             return Err(PoolError::TransferMismatch);
         }
 
+        // #865: record this deposit as an inflow event for the trailing-rate forecast,
+        // and opportunistically drain any queued withdrawals now that fresh liquidity
+        // has arrived — don't wait solely for the next repayment (mirrors the same
+        // best-effort, non-blocking pattern used in repay_invoice_request).
+        record_inflow_event(&env, &token, usdc_received);
+        let post_deposit_liquidity = available_liquidity(&tt).unwrap_or(0);
+        if let Err(e) = Self::process_withdrawal_queue(&env, token, post_deposit_liquidity) {
+            let _ = e;
+            env.logs().add("Failed to process withdrawal queue", &[]);
+        }
+
         Self::non_reentrant_end(&env);
 
         env.events().publish(
@@ -1740,6 +1872,17 @@ impl FundingPool {
                 share_token,
             )?;
         } else {
+            // #865: bound the number of distinct investors that can sit in the queue at
+            // once (each investor already can only hold one entry — see the
+            // AlreadyQueuedForWithdrawal check above — so this caps total queue depth).
+            let config = get_config_cached(&env)?;
+            if config.max_withdrawal_queue_depth > 0
+                && queue.len() >= config.max_withdrawal_queue_depth
+            {
+                Self::non_reentrant_end(&env);
+                return Err(PoolError::WithdrawalQueueFull);
+            }
+
             // Insufficient liquidity - queue the request
             request_id = Self::generate_request_id(&env, &token);
             let request = WithdrawalRequest {
@@ -1757,9 +1900,13 @@ impl FundingPool {
             let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
             env.storage().persistent().set(&request_key, &request);
 
+            // #865: include `token` so the indexer can reconstruct per-token queue
+            // state without a live contract call — see settle_queued_withdrawal /
+            // process_withdrawal_queue's wd_full/wd_part events below, which do the
+            // same for consistency.
             env.events().publish(
                 (EVT, symbol_short!("wd_queue")),
-                (investor, shares, request_id),
+                (investor, token, shares, request_id),
             );
         }
 
@@ -1875,34 +2022,91 @@ impl FundingPool {
             position = position.saturating_add(1);
         }
 
-        let stats: PoolStorageStats = env
-            .storage()
-            .instance()
-            .get(&DataKey::StorageStats)
-            .unwrap_or_default();
+        let now = env.ledger().timestamp();
+        let open_invoices = Self::open_invoices_for_token(&env, &token);
         let mut nearest_invoice_due_date = 0u64;
-        let mut invoice_id = 1u64;
-        while invoice_id <= stats.total_funded_invoices {
-            if let Some(record) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, FundedInvoice>(&DataKey::FundedInvoice(invoice_id))
-            {
-                if record.token == token
-                    && record.repaid_amount < record.principal
-                    && (nearest_invoice_due_date == 0 || record.due_date < nearest_invoice_due_date)
-                {
-                    nearest_invoice_due_date = record.due_date;
-                }
+        for record in open_invoices.iter() {
+            if nearest_invoice_due_date == 0 || record.due_date < nearest_invoice_due_date {
+                nearest_invoice_due_date = record.due_date;
             }
-            invoice_id = invoice_id.saturating_add(1);
         }
+
+        // #865: project a wait time from `capital_ahead` and the trailing deposit-inflow
+        // rate. When there's no inflow history yet, fall back to time-until-nearest-due-
+        // date (a repayment is the other event that can unblock the queue). When both
+        // signals are available, use whichever implies the sooner clearing. This is an
+        // estimate, not a guarantee — actual settlement depends on future deposits and
+        // repayments.
+        let rate = trailing_inflow_rate_per_sec(&env, &token);
+        let via_rate = if rate > 0 && capital_ahead > 0 {
+            Some((capital_ahead / rate) as u64)
+        } else if capital_ahead <= 0 {
+            Some(0)
+        } else {
+            None
+        };
+        let via_due_date = if nearest_invoice_due_date > now {
+            Some(nearest_invoice_due_date - now)
+        } else {
+            None
+        };
+        let estimated_wait_secs = match (via_rate, via_due_date) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => MAX_WAIT_ESTIMATE_SECS,
+        }
+        .clamp(MIN_WAIT_ESTIMATE_SECS, MAX_WAIT_ESTIMATE_SECS);
 
         WaitEstimate {
             queue_position,
             capital_ahead,
             nearest_invoice_due_date,
+            estimated_wait_secs,
         }
+    }
+
+    /// #865: project available liquidity at up to `horizon_days` daily points, based on
+    /// principal from open invoices' known due dates plus the trailing deposit-inflow
+    /// rate extrapolated forward. `horizon_days` is clamped to
+    /// `[1, MAX_FORECAST_HORIZON_DAYS]` to bound loop iteration cost.
+    pub fn get_liquidity_forecast(
+        env: Env,
+        token: Address,
+        horizon_days: u32,
+    ) -> Vec<LiquidityForecastPoint> {
+        bump_instance(&env);
+        let horizon = horizon_days.clamp(1, MAX_FORECAST_HORIZON_DAYS);
+        let tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token.clone()))
+            .unwrap_or_default();
+        let current_liquidity = available_liquidity(&tt).unwrap_or(0);
+        let now = env.ledger().timestamp();
+        let open_invoices = Self::open_invoices_for_token(&env, &token);
+        let rate = trailing_inflow_rate_per_sec(&env, &token);
+
+        let mut points = Vec::new(&env);
+        for day in 1..=horizon {
+            let horizon_ts = now.saturating_add((day as u64) * SECS_PER_DAY);
+            let mut expected_repayments: i128 = 0;
+            for invoice in open_invoices.iter() {
+                if invoice.due_date <= horizon_ts {
+                    let outstanding = invoice.principal.saturating_sub(invoice.repaid_amount);
+                    expected_repayments = expected_repayments.saturating_add(outstanding);
+                }
+            }
+            let extrapolated_inflow = rate.saturating_mul((day as i128) * SECS_PER_DAY as i128);
+            let projected_available = current_liquidity
+                .saturating_add(expected_repayments)
+                .saturating_add(extrapolated_inflow);
+            points.push_back(LiquidityForecastPoint {
+                day,
+                projected_available,
+            });
+        }
+        points
     }
 
     /// Process withdrawal immediately (helper function)
@@ -1924,9 +2128,40 @@ impl FundingPool {
         let token_client = token::Client::new(env, &token);
         token_client.transfer(&env.current_contract_address(), &investor, &amount);
 
-        env.events()
-            .publish((EVT, symbol_short!("wd_full")), (investor, amount, shares));
+        // #865: `request_id` is 0 here (settled immediately, never queued) — matches
+        // the same "0 = not queued" convention `request_withdrawal` returns to the
+        // caller, so the indexer can uniformly read index 4 across every wd_full
+        // event and know 0 means "not a queue removal."
+        env.events().publish(
+            (EVT, symbol_short!("wd_full")),
+            (investor, token, amount, shares, 0u64),
+        );
         Ok(())
+    }
+
+    /// #865: return every still-open (not fully repaid) `FundedInvoice` for `token`,
+    /// looked up via the `TokenInvoiceIds` index rather than assuming invoice_ids are a
+    /// dense sequential range starting at 1 (they're caller-supplied and not guaranteed
+    /// to be — see `fund_invoice_request`).
+    fn open_invoices_for_token(env: &Env, token: &Address) -> Vec<FundedInvoice> {
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenInvoiceIds(token.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut open = Vec::new(env);
+        for invoice_id in ids.iter() {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, FundedInvoice>(&DataKey::FundedInvoice(invoice_id))
+            {
+                if record.token == *token && record.repaid_amount < record.principal {
+                    open.push_back(record);
+                }
+            }
+        }
+        open
     }
 
     fn generate_request_id(env: &Env, token: &Address) -> u64 {
@@ -1971,6 +2206,7 @@ impl FundingPool {
             (EVT, symbol_short!("wd_part")),
             (
                 request.investor.clone(),
+                token.clone(),
                 amount,
                 shares_to_burn,
                 request.request_id,
@@ -2107,7 +2343,13 @@ impl FundingPool {
                 env.storage().persistent().remove(&request_key);
                 env.events().publish(
                     (EVT, symbol_short!("wd_full")),
-                    (request.investor, payout, request.shares),
+                    (
+                        request.investor,
+                        request.token.clone(),
+                        payout,
+                        request.shares,
+                        request.request_id,
+                    ),
                 );
             } else {
                 let remaining_request = WithdrawalRequest {
@@ -3353,6 +3595,50 @@ impl FundingPool {
         env.events()
             .publish((EVT, symbol_short!("set_wdage")), (admin, days));
         Ok(())
+    }
+
+    /// #865: set the global cap on outstanding withdrawal-queue entries per token
+    /// (0 = unlimited). Bounds queue-scan/rewrite cost as queue depth grows.
+    pub fn set_max_withdrawal_queue_depth(
+        env: Env,
+        admin: Address,
+        depth: u32,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut config = get_config_cached(&env)?;
+        config.max_withdrawal_queue_depth = depth;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_wdcap")), (admin, depth));
+        Ok(())
+    }
+
+    /// #865: permissionless entrypoint to drain the withdrawal queue against currently
+    /// available liquidity. Previously the queue only drained opportunistically from a
+    /// full invoice repayment (and now also from `deposit`); this lets anyone (a keeper,
+    /// an investor themselves, a cron job) trigger a drain attempt at any time without
+    /// waiting on either of those events.
+    pub fn drain_withdrawal_queue(
+        env: Env,
+        caller: Address,
+        token: Address,
+    ) -> Result<(), PoolError> {
+        caller.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::assert_accepted_token(&env, &token)?;
+
+        non_reentrant!(&env, {
+            let tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&DataKey::TokenTotals(token.clone()))
+                .unwrap_or_default();
+            let liquid = available_liquidity(&tt)?;
+            Self::process_withdrawal_queue(&env, token, liquid)
+        })
     }
 
     // ---- #247: co-fund share transfer (secondary market) ----
@@ -6232,6 +6518,7 @@ mod test {
             max_utilization_bps: DEFAULT_MAX_UTILIZATION_BPS,
             utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
             max_withdrawal_queue_age_days: DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS,
+            max_withdrawal_queue_depth: DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH,
         };
 
         assert_eq!(

@@ -26,6 +26,8 @@ import type {
   PoolConfig,
   PoolTokenTotals,
   WaitEstimate,
+  WithdrawalRequest,
+  LiquidityForecastPoint,
   FundedInvoice,
   CollateralConfig,
   CollateralDeposit,
@@ -276,6 +278,7 @@ export async function getPoolConfig(): Promise<PoolConfig> {
     yieldTimelockSecs: Number(raw.yield_timelock_secs ?? 0),
     maxSingleInvestorBps: Number(raw.max_single_investor_bps ?? 0),
     maxWithdrawalQueueAgeDays: Number(raw.max_withdrawal_queue_age_days ?? 0),
+    maxWithdrawalQueueDepth: Number(raw.max_withdrawal_queue_depth ?? 0),
   };
 }
 
@@ -299,7 +302,50 @@ export async function estimateWithdrawalWait(
     queuePosition: Number(estimate.queue_position ?? 0),
     capitalAhead: BigInt(String(estimate.capital_ahead ?? 0)),
     nearestInvoiceDueDate: Number(estimate.nearest_invoice_due_date ?? 0),
+    estimatedWaitSecs: Number(estimate.estimated_wait_secs ?? 0),
   };
+}
+
+export async function getWithdrawalQueue(token: string): Promise<WithdrawalRequest[]> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_withdrawal_queue',
+    [new Address(token).toScVal()],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>[];
+  if (!Array.isArray(raw)) return [];
+
+  return raw.map((r) => ({
+    investor: r.investor as string,
+    token: r.token as string,
+    shares: BigInt(String(r.shares ?? 0)),
+    requestedAt: Number(r.requested_at ?? 0),
+    requestId: Number(r.request_id ?? 0),
+  }));
+}
+
+export async function getLiquidityForecast(
+  token: string,
+  horizonDays: number,
+): Promise<LiquidityForecastPoint[]> {
+  const sim = await simulateTx(
+    POOL_CONTRACT_ID,
+    'get_liquidity_forecast',
+    [new Address(token).toScVal(), nativeToScVal(horizonDays, { type: 'u32' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
+  );
+
+  const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
+  const raw = scValToNative(result!.retval) as Record<string, unknown>[];
+  if (!Array.isArray(raw)) return [];
+
+  return raw.map((r) => ({
+    day: Number(r.day ?? 0),
+    projectedAvailable: BigInt(String(r.projected_available ?? 0)),
+  }));
 }
 
 export async function getAcceptedTokens(): Promise<string[]> {
@@ -548,6 +594,99 @@ export async function buildWithdrawTx(
         new Address(investor).toScVal(),
         new Address(token).toScVal(),
         nativeToScVal(amount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildRequestWithdrawalTx(
+  investor: string,
+  token: string,
+  shares: bigint,
+): Promise<string> {
+  const account = await getRpcAccount(investor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'request_withdrawal',
+        new Address(investor).toScVal(),
+        new Address(token).toScVal(),
+        nativeToScVal(shares, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildCancelWithdrawalRequestTx(
+  investor: string,
+  token: string,
+): Promise<string> {
+  const account = await getRpcAccount(investor);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'cancel_withdrawal_request',
+        new Address(investor).toScVal(),
+        new Address(token).toScVal(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/** Permissionless: anyone can trigger a drain attempt against current liquidity. */
+export async function buildDrainWithdrawalQueueTx(
+  caller: string,
+  token: string,
+): Promise<string> {
+  const account = await getRpcAccount(caller);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'drain_withdrawal_queue',
+        new Address(caller).toScVal(),
+        new Address(token).toScVal(),
       ),
     )
     .setTimeout(30)
