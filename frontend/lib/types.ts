@@ -135,6 +135,25 @@ export interface FundedInvoice {
   dueDate: number;
   /** Total amount repaid so far (supports partial repayments) */
   repaidAmount: bigint;
+  /** #860: set when this invoice was funded through a co-funding round. */
+  coFundingRoundId?: number;
+}
+
+// #860: multi-investor co-funding rounds
+export type CoFundingStatus = 'Open' | 'Filled' | 'Cancelled' | 'Expired';
+
+export interface CoFundingRound {
+  invoiceId: number;
+  token: string;
+  sme: string;
+  dueDate: number;
+  targetPrincipal: bigint;
+  committedPrincipal: bigint;
+  fundingDeadline: number;
+  status: CoFundingStatus;
+  minCommitment: bigint;
+  maxInvestorBps: number;
+  participants: string[];
 }
 
 export type WalletState = {

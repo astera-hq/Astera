@@ -15,7 +15,6 @@ import {
   buildCommitToInvoiceTx,
   buildCreateInvoiceTx,
   buildMarkDefaultedTx,
-  buildInitCoFundingTx,
   buildSetYieldTx,
   submitTx,
 } from './contracts';

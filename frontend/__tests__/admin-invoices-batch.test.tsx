@@ -11,14 +11,14 @@ jest.mock('@/lib/store', () => ({
 const mockGetInvoiceCount = jest.fn();
 const mockGetMultipleInvoices = jest.fn();
 const mockGetPoolTokenTotals = jest.fn();
-const mockBuildInitCoFundingTx = jest.fn();
+const mockBuildOpenCoFundingTx = jest.fn();
 const mockSubmitTx = jest.fn();
 
 jest.mock('@/lib/contracts', () => ({
   getInvoiceCount: mockGetInvoiceCount,
   getMultipleInvoices: mockGetMultipleInvoices,
   getPoolTokenTotals: mockGetPoolTokenTotals,
-  buildInitCoFundingTx: mockBuildInitCoFundingTx,
+  buildOpenCoFundingTx: mockBuildOpenCoFundingTx,
   submitTx: mockSubmitTx,
 }));
 
@@ -53,7 +53,7 @@ describe('AdminInvoicesPage batch funding', () => {
       totalPaidOut: 0n,
       totalFeeRevenue: 0n,
     });
-    mockBuildInitCoFundingTx.mockResolvedValue('test-xdr');
+    mockBuildOpenCoFundingTx.mockResolvedValue('test-xdr');
     mockSubmitTx.mockResolvedValue({});
     process.env.NEXT_PUBLIC_USDC_TOKEN_ID = 'GUSDC123';
   });
@@ -84,15 +84,26 @@ describe('AdminInvoicesPage batch funding', () => {
     await userEvent.click(confirmButton);
 
     await waitFor(() => {
-      expect(mockBuildInitCoFundingTx).toHaveBeenCalledWith({
-        admin: 'GADMINTEST',
-        invoiceId: 123,
-        principal: 100000000n,
-        sme: 'GSMEOWNER',
-        dueDate: 1950000000,
-        token: 'GUSDC123',
-      });
+      expect(mockBuildOpenCoFundingTx).toHaveBeenCalledWith(
+        expect.objectContaining({
+          admin: 'GADMINTEST',
+          invoiceId: 123,
+          targetPrincipal: 100000000n,
+          sme: 'GSMEOWNER',
+          dueDate: 1950000000,
+          token: 'GUSDC123',
+          minCommitment: 0n,
+          maxInvestorBps: 0,
+        }),
+      );
     });
+    // fundingDeadline is derived from Date.now() at call time — assert it's
+    // a sane ~7-day window rather than an exact timestamp (which would make
+    // this test flaky).
+    const callArg = mockBuildOpenCoFundingTx.mock.calls[0]![0];
+    const nowSecs = Math.floor(Date.now() / 1000);
+    expect(callArg.fundingDeadline).toBeGreaterThan(nowSecs);
+    expect(callArg.fundingDeadline).toBeLessThanOrEqual(nowSecs + 7 * 24 * 60 * 60 + 5);
 
     await waitFor(() => expect(mockSubmitTx).toHaveBeenCalledWith('signedXdr'));
   });

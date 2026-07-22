@@ -9,7 +9,7 @@ import {
   getMultipleInvoices,
   getInvoiceCount,
   getPoolTokenTotals,
-  buildInitCoFundingTx,
+  buildOpenCoFundingTx,
   submitTx,
 } from '@/lib/contracts';
 import { formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
@@ -17,6 +17,8 @@ import type { Invoice } from '@/lib/types';
 
 /** Number of invoices to scan per batch */
 const PAGE_SIZE = 20;
+/** #860: default co-funding window for the one-click "approve" action */
+const COFUNDING_DEFAULT_WINDOW_SECS = 7 * 24 * 60 * 60;
 
 type InvoiceTab = 'pending' | 'funding';
 type ModalAction = 'approve' | 'dispute' | 'verify' | null;
@@ -174,13 +176,19 @@ export default function AdminInvoicesPage() {
         setBatchProgress({ current: index + 1, total: invoicesToFund.length, finished: false });
 
         try {
-          const xdr = await buildInitCoFundingTx({
+          const xdr = await buildOpenCoFundingTx({
             admin: wallet.address,
             invoiceId: invoice.id,
-            principal: invoice.amount,
+            targetPrincipal: invoice.amount,
             sme: invoice.owner,
             dueDate: invoice.dueDate,
             token: invoice.poolContract,
+            // Quick one-click "approve for co-funding" — a 7-day funding
+            // window, no minimum raise, no per-investor cap. Admins who
+            // want custom terms use the dedicated co-funding round form.
+            fundingDeadline: Math.floor(Date.now() / 1000) + COFUNDING_DEFAULT_WINDOW_SECS,
+            minCommitment: 0n,
+            maxInvestorBps: 0,
           });
 
           const freighter = await import('@stellar/freighter-api');
@@ -219,13 +227,16 @@ export default function AdminInvoicesPage() {
     setActionLoading(invoice.id);
 
     try {
-      const xdr = await buildInitCoFundingTx({
+      const xdr = await buildOpenCoFundingTx({
         admin: wallet.address,
         invoiceId: invoice.id,
-        principal: invoice.amount,
+        targetPrincipal: invoice.amount,
         sme: invoice.owner,
         dueDate: invoice.dueDate,
         token: invoice.poolContract,
+        fundingDeadline: Math.floor(Date.now() / 1000) + COFUNDING_DEFAULT_WINDOW_SECS,
+        minCommitment: 0n,
+        maxInvestorBps: 0,
       });
 
       const freighter = await import('@stellar/freighter-api');
