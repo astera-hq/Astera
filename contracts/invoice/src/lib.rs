@@ -1,6 +1,9 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(test)]
+extern crate std;
+
 // === AUTHORIZED CALLERS ===
 // - Admin: initialize(), admin-only setters
 // - Pool contract: mark_funded(), mark_paid(), mark_defaulted()
@@ -280,6 +283,7 @@ pub enum DataKey {
     ExpirationDurationSecs,
     DailyInvoiceLimit,
     DisputeResolutionWindow,
+    Dispute(u64),
     ContractVersion,
     MigrationVersion,
     RequireRegisteredDebtor,
@@ -328,6 +332,7 @@ fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
 
     invoice.status = InvoiceStatus::Expired;
     remove_invoice_from_owner(env, &invoice.owner, invoice.id);
+    decrease_debtor_exposure(env, &invoice.debtor, invoice.amount);
     env.storage()
         .persistent()
         .set(&DataKey::Invoice(invoice.id), &invoice);
@@ -492,6 +497,19 @@ fn set_sme_outstanding(env: &Env, sme: &Address, value: i128) {
 fn decrease_sme_outstanding(env: &Env, sme: &Address, amount: i128) {
     let current = get_sme_outstanding(env, sme);
     set_sme_outstanding(env, sme, current.saturating_sub(amount));
+}
+
+fn decrease_debtor_exposure(env: &Env, debtor: &String, amount: i128) {
+    let maybe_record: Option<DebtorRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::DebtorRecord(debtor.clone()));
+    if let Some(mut record) = maybe_record {
+        record.current_exposure = record.current_exposure.saturating_sub(amount);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DebtorRecord(debtor.clone()), &record);
+    }
 }
 
 /// Add an invoice ID to the owner's invoice index (#651).
@@ -1511,6 +1529,7 @@ impl InvoiceContract {
                 invoice.status = InvoiceStatus::Cancelled;
                 let sme = invoice.owner.clone();
                 decrease_sme_outstanding(&env, &sme, invoice.amount);
+                decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
                 let mut stats: StorageStats = env
                     .storage()
                     .instance()
@@ -1655,20 +1674,7 @@ impl InvoiceContract {
         invoice.paid_at = env.ledger().timestamp();
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
-        // Release this invoice's amount from the debtor registry's exposure
-        // tracking, if the debtor field refers to a registered debtor (#241).
-        // Without this, a debtor's exposure capacity would never be freed up
-        // by paid invoices, permanently shrinking how much new business can
-        // be written against them.
-        let debtor_key = DataKey::DebtorRecord(invoice.debtor.clone());
-        if let Some(mut record) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, DebtorRecord>(&debtor_key)
-        {
-            record.current_exposure = record.current_exposure.saturating_sub(invoice.amount);
-            env.storage().persistent().set(&debtor_key, &record);
-        }
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1718,6 +1724,7 @@ impl InvoiceContract {
         invoice.status = InvoiceStatus::Defaulted;
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1902,6 +1909,7 @@ impl InvoiceContract {
         remove_invoice_from_owner(&env, &invoice.owner, id);
         let sme = invoice.owner.clone();
         decrease_sme_outstanding(&env, &sme, invoice.amount);
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
@@ -1964,6 +1972,7 @@ impl InvoiceContract {
         // State transition: move to Cancelled
         invoice.status = InvoiceStatus::Cancelled;
         remove_invoice_from_owner(&env, &invoice.owner, id);
+        decrease_debtor_exposure(&env, &invoice.debtor, invoice.amount);
 
         // Note: We do NOT call decrease_sme_outstanding here because the invoice
         // was never funded. SME outstanding is only incremented in mark_funded(),
@@ -2225,6 +2234,7 @@ impl InvoiceContract {
         let mut expired_inv = inv;
         expired_inv.status = InvoiceStatus::Expired;
         remove_invoice_from_owner(&env, &expired_inv.owner, id);
+        decrease_debtor_exposure(&env, &expired_inv.debtor, expired_inv.amount);
         env.storage()
             .persistent()
             .set(&DataKey::Invoice(id), &expired_inv);
@@ -2772,9 +2782,6 @@ impl InvoiceContract {
         false
     }
 }
-
-#[cfg(test)]
-extern crate std;
 
 #[cfg(test)]
 mod test {
@@ -4799,7 +4806,7 @@ mod test {
         client.register_debtor(&admin, &debtor_id, &debtor_name, &max_exposure);
 
         // Create first invoice for 2000
-        let id1 = client.create_invoice_with_metadata(
+        let _id1 = client.create_invoice_with_metadata(
             &sme,
             &debtor_id,
             &2_000i128,
@@ -4814,7 +4821,7 @@ mod test {
         assert_eq!(debtor1.current_exposure, 2_000);
 
         // Create second invoice for 2500
-        let id2 = client.create_invoice_with_metadata(
+        let _id2 = client.create_invoice_with_metadata(
             &sme,
             &debtor_id,
             &2_500i128,

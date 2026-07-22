@@ -35,6 +35,7 @@ jobs:
             invoice
             pool
             credit_score
+            insurance
             share
             frontend
             contracts

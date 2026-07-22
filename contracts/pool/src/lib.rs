@@ -501,6 +501,8 @@ pub enum DataKey {
     Proposal(u64),
     NextProposalId,
     OperationDelaySecs,
+    // #866: optional default-insurance reserve integration
+    InsuranceContract,
 }
 
 const EVT: Symbol = symbol_short!("POOL");
@@ -516,6 +518,48 @@ pub trait CreditScoreContract {
 pub trait InvoiceContract {
     fn get_authorized_pool(env: Env) -> Address;
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
+}
+
+/// Cross-contract interface to the optional default-insurance reserve (#866).
+///
+/// `file_claim` is deliberately *not* declared/called here: Soroban disallows
+/// A→B→A re-entrancy, and `insurance.file_claim` itself calls back into this
+/// pool contract (`get_funded_invoice`, `get_collateral_deposit`,
+/// `receive_insurance_payout`) to independently re-derive the shortfall. If
+/// pool called `file_claim` from inside `execute_seize_collateral`, that
+/// callback into pool while pool is still on the call stack would trap. This
+/// is exactly why `file_claim` is designed to be permissionless — anyone
+/// (a keeper, the SME, the frontend) calls it directly against the insurance
+/// contract as a follow-up transaction after collateral has been seized.
+#[contractclient(name = "InsuranceClient")]
+pub trait InsuranceContract {
+    fn purchase_coverage(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        principal: i128,
+        sme: Address,
+        due_date: u64,
+        token: Address,
+    ) -> InsuranceCoverageRecord;
+}
+
+/// Local mirror of insurance::CoverageRecord. Cross-contract return-value
+/// decoding requires the field set to match exactly (not a subset) — unlike
+/// struct *arguments*, which do tolerate extra fields on the callee's side —
+/// so every field must be reproduced here even though pool only reads
+/// `premium_paid` (to keep protocol_revenue accounting in sync with what was
+/// actually drawn).
+#[contracttype]
+#[derive(Clone)]
+pub struct InsuranceCoverageRecord {
+    pub invoice_id: u64,
+    pub token: Address,
+    pub principal: i128,
+    pub premium_paid: i128,
+    pub coverage_bps: u32,
+    pub purchased_at: u64,
+    pub claimed: bool,
 }
 
 // Cache for config to reduce storage reads
@@ -650,6 +694,38 @@ fn u128_to_i128(value: u128) -> PoolResult<i128> {
     Ok(value as i128)
 }
 
+fn update_investor_available(
+    env: &Env,
+    investor: &Address,
+    token: &Address,
+    delta: i128,
+) -> PoolResult<()> {
+    let pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+    let mut position: InvestorPosition =
+        env.storage()
+            .persistent()
+            .get(&pos_key)
+            .unwrap_or(InvestorPosition {
+                deposited: 0,
+                available: 0,
+                deployed: 0,
+                earned: 0,
+                deposit_count: 0,
+            });
+
+    if delta >= 0 {
+        position.available = position
+            .available
+            .checked_add(delta)
+            .ok_or(PoolError::AmountOverflow)?;
+    } else {
+        position.available = position.available.saturating_sub(-delta);
+    }
+
+    env.storage().persistent().set(&pos_key, &position);
+    Ok(())
+}
+
 fn calculate_factoring_fee(principal: i128, factoring_fee_bps: u32) -> PoolResult<i128> {
     let numerator = (principal as u128)
         .checked_mul(factoring_fee_bps as u128)
@@ -758,6 +834,10 @@ fn denormalize_from_stroops(amount: i128, token_decimals: u32) -> i128 {
 /// Returns 0 if the principal is below the threshold (no collateral required).
 fn get_credit_score_contract(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::CreditScoreContract)
+}
+
+fn get_insurance_contract(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::InsuranceContract)
 }
 
 fn fee_tier_matches(tier: &FeeTier, principal: i128, score: u32) -> bool {
@@ -978,6 +1058,39 @@ fn fund_invoice_request(
             &request.sme,
             &request.principal,
         );
+    }
+
+    // #866: optionally purchase default-insurance coverage for this invoice.
+    // Non-fatal — a temporary insurance-contract outage must never block
+    // funding, mirroring the credit_score integration above. The pool itself
+    // is the payer (auto-authorized since it's the direct caller): the
+    // insurance contract pulls the premium directly out of the pool's real
+    // token balance via its own `transfer` call. That's real value leaving
+    // the pool regardless of internal bookkeeping, so pool_value (investor
+    // NAV) must be written down by the same amount or later withdrawals
+    // would overdraw the pool's actual balance — exactly the class of bug
+    // fixed in execute_seize_collateral above. protocol_revenue is drawn
+    // down first (best-effort, floored at zero) since that's the intended
+    // funding source; any remainder still comes out of pool_value.
+    if let Some(insurance_contract) = get_insurance_contract(env) {
+        let insurance_client = InsuranceClient::new(env, &insurance_contract);
+        if let Ok(Ok(coverage)) = insurance_client.try_purchase_coverage(
+            &env.current_contract_address(),
+            &request.invoice_id,
+            &request.principal,
+            &request.sme,
+            &request.due_date,
+            &request.token,
+        ) {
+            let mut tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&token_totals_key)
+                .unwrap_or_default();
+            tt.protocol_revenue = tt.protocol_revenue.saturating_sub(coverage.premium_paid);
+            tt.pool_value = tt.pool_value.saturating_sub(coverage.premium_paid);
+            env.storage().instance().set(&token_totals_key, &tt);
+        }
     }
 
     Ok(())
@@ -1468,10 +1581,10 @@ impl FundingPool {
 
         // #233: update investor position — track in USDC terms to match pool_value
         investor_position.deposited += usdc_received;
-        // #217: `available` tracks shares not yet withdrawn or reserved by a
-        // queued withdrawal request, in share-token units (matches what
-        // request_withdrawal compares it against).
-        investor_position.available += shares_to_mint;
+        investor_position.available = investor_position
+            .available
+            .checked_add(shares_to_mint)
+            .ok_or(PoolError::AmountOverflow)?;
         investor_position.deposit_count += 1;
         env.storage()
             .persistent()
@@ -1595,17 +1708,7 @@ impl FundingPool {
         burn_args.push_back(investor.clone().into_val(&env));
         burn_args.push_back(shares.into_val(&env));
         let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "burn"), burn_args);
-
-        // #217: keep `available` in sync with actual burned shares.
-        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        if let Some(mut position) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, InvestorPosition>(&investor_pos_key)
-        {
-            position.available = position.available.saturating_sub(shares);
-            env.storage().persistent().set(&investor_pos_key, &position);
-        }
+        update_investor_available(&env, &investor, &token, -shares)?;
 
         // Update USDC-denominated pool value SECOND - effects
         tt.pool_value -= usdc_amount;
@@ -1669,7 +1772,7 @@ impl FundingPool {
         }
 
         let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        let mut position: InvestorPosition = env
+        let position: InvestorPosition = env
             .storage()
             .persistent()
             .get(&investor_pos_key)
@@ -1683,10 +1786,6 @@ impl FundingPool {
         if shares > position.available {
             return Err(PoolError::WithdrawalExceedsLimit);
         }
-        // #217: reserve these shares immediately so they can't be double-spent
-        // by another request_withdrawal/withdraw call before this one settles.
-        position.available -= shares;
-        env.storage().persistent().set(&investor_pos_key, &position);
 
         Self::non_reentrant_start(&env);
 
@@ -1741,6 +1840,7 @@ impl FundingPool {
             )?;
         } else {
             // Insufficient liquidity - queue the request
+            update_investor_available(&env, &investor, &token, -shares)?;
             request_id = Self::generate_request_id(&env, &token);
             let request = WithdrawalRequest {
                 investor: investor.clone(),
@@ -1786,11 +1886,11 @@ impl FundingPool {
 
             let mut new_queue = Vec::new(&env);
             let mut request_id = 0u64;
-            let mut cancelled_shares = 0i128;
+            let mut request_shares = 0i128;
             for req in queue.iter() {
                 if req.investor == investor {
                     request_id = req.request_id;
-                    cancelled_shares = req.shares;
+                    request_shares = req.shares;
                 } else {
                     new_queue.push_back(req);
                 }
@@ -1802,17 +1902,7 @@ impl FundingPool {
 
             let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
             env.storage().persistent().remove(&request_key);
-
-            // #217: release the shares this request had reserved.
-            let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-            if let Some(mut position) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, InvestorPosition>(&investor_pos_key)
-            {
-                position.available += cancelled_shares;
-                env.storage().persistent().set(&investor_pos_key, &position);
-            }
+            update_investor_available(&env, &investor, &token, request_shares)?;
 
             env.events().publish(
                 (EVT, symbol_short!("wd_cncl")),
@@ -1916,6 +2006,7 @@ impl FundingPool {
         share_token: Address,
     ) -> Result<(), PoolError> {
         Self::burn_withdrawal_shares(env, &share_token, investor.clone(), shares);
+        update_investor_available(env, &investor, &token, -shares)?;
 
         tt.pool_value -= amount;
         let token_totals_key = DataKey::TokenTotals(token.clone());
@@ -2813,9 +2904,16 @@ impl FundingPool {
                 .get(&token_totals_key)
                 .unwrap_or_default();
 
-            // The seized collateral reduces the effective loss: add it to pool_value and
-            // reduce total_deployed by the original principal (the invoice is now a loss).
-            tt.pool_value += col.amount;
+            // The defaulted invoice's principal is a receivable that pool_value already
+            // counts as an asset (via total_deployed) — it must be written off here, offset
+            // by whatever collateral was actually recovered, or pool_value silently overstates
+            // investor claims by the unrecovered shortfall. total_deployed drops by the full
+            // principal regardless, since the invoice is no longer outstanding either way.
+            tt.pool_value = tt
+                .pool_value
+                .checked_sub(record.principal)
+                .and_then(|v| v.checked_add(col.amount))
+                .ok_or(PoolError::AmountOverflow)?;
             tt.total_deployed -= record.principal;
             env.storage().instance().set(&token_totals_key, &tt);
 
@@ -2837,6 +2935,17 @@ impl FundingPool {
                 (EVT, Symbol::new(env, "col_seiz_default")),
                 (invoice_id, col.depositor, col.amount, admin.clone(), now),
             );
+
+            // #866: the default-insurance reserve's file_claim is deliberately
+            // *not* called from here — insurance.file_claim calls back into
+            // this pool contract (get_funded_invoice / get_collateral_deposit
+            // / receive_insurance_payout) to independently re-derive the
+            // shortfall, and Soroban disallows that A→B→A re-entrancy while
+            // pool is still on the call stack executing this very function.
+            // Instead file_claim is permissionless: anyone (a keeper, the SME,
+            // the frontend) files it directly against the insurance contract
+            // as a follow-up call once collateral has been seized.
+
             Ok(())
         })
     }
@@ -3150,6 +3259,70 @@ impl FundingPool {
     pub fn get_credit_score_contract(env: Env) -> Option<Address> {
         bump_instance(&env);
         env.storage().instance().get(&DataKey::CreditScoreContract)
+    }
+
+    /// #866: wire up the optional default-insurance reserve. Absence (`None`)
+    /// disables the integration entirely — mirrors `CreditScoreContract`.
+    pub fn set_insurance_contract(
+        env: Env,
+        admin: Address,
+        insurance_contract: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::InsuranceContract, &insurance_contract);
+        Ok(())
+    }
+
+    pub fn get_insurance_contract(env: Env) -> Option<Address> {
+        bump_instance(&env);
+        env.storage().instance().get(&DataKey::InsuranceContract)
+    }
+
+    /// #866: called by the insurance contract after it transfers a claim
+    /// payout to the pool, so that payout is credited into this token's
+    /// `pool_value` — the same accounting bucket collateral seizure already
+    /// credits — making investors whole from the reserve. Only the configured
+    /// insurance contract may call this (`insurance.require_auth()` succeeds
+    /// automatically only when insurance itself is the direct caller).
+    pub fn receive_insurance_payout(
+        env: Env,
+        insurance: Address,
+        token: Address,
+        invoice_id: u64,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        insurance.require_auth();
+        bump_instance(&env);
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceContract)
+            .ok_or(PoolError::Unauthorized)?;
+        if insurance != configured {
+            return Err(PoolError::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let mut tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&token_totals_key)
+            .unwrap_or_default();
+        tt.pool_value = tt
+            .pool_value
+            .checked_add(amount)
+            .ok_or(PoolError::AmountOverflow)?;
+        env.storage().instance().set(&token_totals_key, &tt);
+        env.events()
+            .publish((EVT, symbol_short!("ins_pay")), (invoice_id, token, amount));
+        Ok(())
     }
 
     pub fn set_compound_interest(
@@ -6295,6 +6468,7 @@ mod test {
             &usdc_id,
         );
         let attacker = Address::generate(&env);
+        // Non-admin is rejected by require_admin before the proposal-flow gate.
         let result = client.try_seize_collateral(&attacker, &1u64);
         assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
     }
@@ -7536,22 +7710,9 @@ mod test {
         mint(&env, &usdc_id, &sme, 20_000);
         client.deposit(&alice, &usdc_id, &10_000);
         client.deposit(&bob, &usdc_id, &10_000);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
-        client.fund_invoice(
-            &admin,
-            &2u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + 10_000),
-            &usdc_id,
-        );
+        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
+        client.fund_invoice(&admin, &1u64, &10_000, &sme, &due_date, &usdc_id);
+        client.fund_invoice(&admin, &2u64, &10_000, &sme, &due_date, &usdc_id);
 
         client.request_withdrawal(&alice, &usdc_id, &10_000);
         client.request_withdrawal(&bob, &usdc_id, &10_000);
@@ -7865,9 +8026,14 @@ mod test {
 
         propose_and_execute_seize_collateral(&env, &client, &admin, 1u64);
 
-        // 1. Check pool value increased, total deployed decreased by principal
+        // 1. Check pool value is written down by the unrecovered shortfall
+        // (principal minus recovered collateral), and total deployed
+        // decreased by the full principal.
         let tt_after = client.get_token_totals(&usdc_id);
-        assert_eq!(tt_after.pool_value, tt_before.pool_value + required);
+        assert_eq!(
+            tt_after.pool_value,
+            tt_before.pool_value - principal + required
+        );
         assert_eq!(
             tt_after.total_deployed,
             tt_before.total_deployed - principal

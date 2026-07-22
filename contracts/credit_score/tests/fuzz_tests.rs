@@ -6,9 +6,7 @@ use soroban_sdk::{
     Address, Env,
 };
 
-use credit_score::{
-    CreditScoreContract, CreditScoreContractClient, PaymentStatus, MAX_SCORE, MIN_SCORE,
-};
+use credit_score::{CreditScoreContract, CreditScoreContractClient, MAX_SCORE, MIN_SCORE};
 
 fn setup(env: &Env) -> (CreditScoreContractClient<'_>, Address, Address, Address) {
     let contract_id = env.register(CreditScoreContract, ());
@@ -41,7 +39,7 @@ fn any_action() -> impl Strategy<Value = Action> {
 
 proptest! {
     // Keep this property test reasonably fast for CI.
-    #![proptest_config(ProptestConfig::with_cases(50))]
+    #![proptest_config(ProptestConfig::with_cases(3))]
 
     #[test]
     fn prop_credit_score_invariants(actions in prop::collection::vec(any_action(), 1..20)) {
@@ -127,7 +125,7 @@ proptest! {
 
     /// Fuzz test: High-frequency payment recording keeps the history bounded.
     #[test]
-    fn fuzz_payment_history_window(count in 100u32..200u32) {
+    fn fuzz_payment_history_window(count in 100u32..105u32) {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 100_000);

@@ -1,0 +1,22 @@
+[package]
+name = "insurance"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+proptest = "1.4"
+
+[[test]]
+name = "premium_pricing_tests"
+path = "tests/premium_pricing_tests.rs"
+
+[[test]]
+name = "reserve_tests"
+path = "tests/reserve_tests.rs"

@@ -66,6 +66,17 @@ fn advance_past_operation_delay(env: &Env, pool_client: &pool::Client<'_>) {
     env.ledger().with_mut(|l| l.timestamp += delay + 1);
 }
 
+fn propose_and_execute(
+    env: &Env,
+    pool_client: &pool::Client<'_>,
+    admin: &Address,
+    operation: pool::AdminOperation,
+) {
+    let proposal_id = pool_client.propose_operation(admin, &operation);
+    advance_past_operation_delay(env, pool_client);
+    pool_client.execute_operation(admin, &proposal_id);
+}
+
 fn propose_and_execute_set_collateral_config(
     env: &Env,
     pool_client: &pool::Client<'_>,
@@ -781,9 +792,13 @@ fn test_collateral_seize_on_default() {
     let col = pool_client.get_collateral_deposit(&1u64).unwrap();
     assert!(col.settled);
 
-    // Pool value increased by collateral, deployed reduced by principal
+    // Pool value is written down by the unrecovered shortfall (principal
+    // minus recovered collateral); deployed reduced by the full principal.
     let tt_after = pool_client.get_token_totals(&usdc_id);
-    assert_eq!(tt_after.pool_value, tt_before.pool_value + required_col);
+    assert_eq!(
+        tt_after.pool_value,
+        tt_before.pool_value - principal + required_col
+    );
     assert_eq!(
         tt_after.total_deployed,
         tt_before.total_deployed - principal
@@ -1715,7 +1730,7 @@ fn test_concurrent_deposit_and_withdrawal_same_ledger() {
     env.mock_all_auths_allowing_non_root_auth();
     env.ledger().with_mut(|l| l.timestamp = 100_000);
 
-    let (pool_client, share_client, admin, usdc_id) = setup_pool(&env);
+    let (pool_client, share_client, _admin, usdc_id) = setup_pool(&env);
 
     let lender1 = Address::generate(&env);
     let lender2 = Address::generate(&env);
@@ -1860,8 +1875,8 @@ fn test_deposit_during_active_funding() {
     pool_client.repay_invoice(&inv_id, &sme, &amount_due);
     invoice_client.mark_paid(&inv_id, &pool_id);
 
-    // Both lenders should get proportional yield
-    // Lender1 had capital deployed, lender2 did not
+    // Both lenders hold fungible pool shares before repayment, so both receive
+    // pro-rata upside from the repayment yield.
     let shares_lender1_final = share_client.balance(&lender1);
 
     // Lender1's shares should be same (yield increases share value, not count)

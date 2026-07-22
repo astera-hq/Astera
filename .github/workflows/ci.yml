@@ -54,7 +54,17 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test -- --runInBand
+      - run: npm run build
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -70,7 +80,8 @@ jobs:
         run: cargo build --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry
 
       - name: Run cross-contract integration tests
-        run: cargo test --manifest-path ../contracts/tests/Cargo.toml
+        working-directory: .
+        run: cargo test --manifest-path contracts/tests/Cargo.toml
 
   # E2E Tests job is temporarily disabled: frontend/e2e/contract-ids.ts
   # deliberately fails fast in CI when real (non-placeholder) contract IDs
@@ -167,6 +178,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - name: Install Soroban CLI system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libudev-dev libusb-1.0-0-dev pkg-config
       - name: Install Soroban CLI
         if: env.HAS_DEPLOY_SECRET == 'true'
         # Building soroban-cli from source via `cargo install` pulls in native

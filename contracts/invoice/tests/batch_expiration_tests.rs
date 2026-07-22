@@ -6,7 +6,7 @@ use soroban_sdk::{
     Address, Env, String, Vec,
 };
 
-fn setup(env: &Env) -> (InvoiceContractClient, Address, Address) {
+fn setup(env: &Env) -> (InvoiceContractClient<'_>, Address, Address) {
     let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(env, &contract_id);
     let admin = Address::generate(env);

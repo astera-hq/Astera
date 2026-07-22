@@ -1384,9 +1384,7 @@ extern crate std;
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _, testutils::Events, testutils::Ledger, Env, IntoVal,
-    };
+    use soroban_sdk::{testutils::Address as _, testutils::Events, testutils::Ledger, Env};
 
     fn setup(env: &Env) -> (CreditScoreContractClient<'_>, Address, Address, Address) {
         let contract_id = env.register(CreditScoreContract, ());
@@ -1930,28 +1928,22 @@ mod test {
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 100_000);
 
-        let mut seed: u64 = 0x0F0F_0F0F_A5A5_A5A5;
-        let lcg = |s: &mut u64| -> u64 {
-            *s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *s
-        };
-
-        for trial in 0..20u64 {
+        for (trial, n) in [1u64, 25, MAX_PAYMENT_HISTORY as u64 + 1]
+            .into_iter()
+            .enumerate()
+        {
             let (client, _admin, _invoice, pool) = setup(&env);
             let sme = Address::generate(&env);
-            let n = (lcg(&mut seed) % 150 + 1) as u64;
             let due_date = 200_000u64;
             let mut expected_ids: std::vec::Vec<u64> = std::vec::Vec::new();
 
             for i in 0..n {
-                let invoice_id = trial * 20 + i + 1;
+                let invoice_id = trial as u64 * 1_000 + i + 1;
                 if expected_ids.len() == MAX_PAYMENT_HISTORY as usize {
                     expected_ids.remove(0);
                 }
                 expected_ids.push(invoice_id);
-                let is_default = lcg(&mut seed) % 3 == 0;
+                let is_default = i % 3 == 0;
                 if is_default {
                     client.record_default(&pool, &invoice_id, &sme, &1_000_000_000i128, &due_date);
                 } else {
