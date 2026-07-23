@@ -3,7 +3,7 @@
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, Env,
+    Address, Env, Vec,
 };
 
 use credit_score::{
@@ -152,5 +152,50 @@ proptest! {
         prop_assert_eq!(history.len(), credit_score::MAX_PAYMENT_HISTORY);
         prop_assert_eq!(history.get(0).unwrap().invoice_id, (count as u64) - 99);
         prop_assert_eq!(history.get(99).unwrap().invoice_id, count as u64);
+    }
+
+    /// #868: the blended score stays within [MIN_SCORE, MAX_SCORE] and is
+    /// monotonic in a single hypothetical attestor's score_contribution, with
+    /// everything else (internal history, weight) held fixed.
+    #[test]
+    fn prop_blended_score_bounds_and_monotonic(
+        internal_payment_count in 0u32..10u32,
+        weight_bps in 1u32..=10_000u32,
+        sc_a in 0u32..=1000u32,
+        sc_b in 0u32..=1000u32,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        for i in 0..internal_payment_count {
+            client.record_payment(
+                &pool,
+                &(i as u64 + 1),
+                &sme,
+                &1_000_000_000i128,
+                &due_date,
+                &(due_date - 1000),
+            );
+        }
+
+        let (low, high) = if sc_a <= sc_b { (sc_a, sc_b) } else { (sc_b, sc_a) };
+
+        let hypo_low = Vec::from_array(&env, [(weight_bps, low)]);
+        let hypo_high = Vec::from_array(&env, [(weight_bps, high)]);
+
+        let blended_low = client.simulate_score_with_attestations(&sme, &hypo_low);
+        let blended_high = client.simulate_score_with_attestations(&sme, &hypo_high);
+
+        prop_assert!(blended_low >= MIN_SCORE && blended_low <= MAX_SCORE);
+        prop_assert!(blended_high >= MIN_SCORE && blended_high <= MAX_SCORE);
+        prop_assert!(
+            blended_high >= blended_low,
+            "blended score not monotonic in score_contribution: low={} -> {}, high={} -> {}",
+            low, blended_low, high, blended_high
+        );
     }
 }

@@ -157,6 +157,10 @@ export function startApiServer(db: Database.Database, port: number): void {
     'cf_fin',
   ]);
 
+  // #868: credit_score attestation lifecycle events, keyed by attestation id
+  // (the first tuple element of each of these three event types).
+  const ATTESTATION_LIFECYCLE_EVENT_TYPES = new Set(['att_sub', 'att_disp', 'att_res']);
+
   app.get('/co-funding/rounds', (_req, res) => {
     try {
       const events = getEvents(db, { contractType: 'pool', limit: 2000, offset: 0 });
@@ -327,102 +331,84 @@ export function startApiServer(db: Database.Database, port: number): void {
     }
   });
 
-  // #865: reconstruct current withdrawal-queue depth for `token` off-chain from the
-  // pool contract's indexed wd_queue/wd_cncl/wd_part/wd_full events, rather than
-  // requiring a live contract simulation for every query (same approach as the
-  // oracle-registry rounds endpoint above). Each event's value is a positional tuple
-  // matching the Rust event payload: wd_queue = (investor, token, shares, request_id);
-  // wd_cncl = (investor, token, request_id); wd_part = (investor, token, amount,
-  // shares_to_burn, request_id); wd_full = (investor, token, payout, shares,
-  // request_id) — request_id is 0 on wd_full when the withdrawal settled immediately
-  // rather than draining a queued request, and is ignored for reconstruction here.
-  //
-  // This endpoint intentionally only reports queue *depth and membership* — an
-  // authoritative wait-time estimate depends on live pool state (trailing inflow
-  // rate, current liquidity, invoice due dates) that isn't reconstructable from the
-  // event log alone. Callers wanting `estimated_wait_secs` should simulate the pool
-  // contract's `estimate_withdrawal_wait` directly (as the frontend already does).
-  app.get('/pool/:token/withdrawal-queue', (req, res) => {
+  // #868: reconstruct an SME's attestation history from the credit_score
+  // contract's indexed att_sub/att_disp/att_res events. `att_sub` carries
+  // (id, sme, attestor, score_contribution); `att_disp`/`att_res` only carry
+  // the attestation id, so we first find every id submitted for this SME via
+  // att_sub, then replay the matching lifecycle events in ledger order to
+  // derive each attestation's current status. Time-based expiry isn't
+  // eventful and is therefore not reflected here — callers who need the
+  // authoritative status should also check the contract's `get_attestation`.
+  app.get('/credit-score/:sme/attestations', (req, res) => {
     try {
-      const { token } = req.params;
-      if (!token) {
-        return res.status(400).json({ error: 'token path param is required' });
+      const { sme } = req.params;
+      if (!sme) {
+        return res.status(400).json({ error: 'sme path param is required' });
       }
+      const smeLower = sme.toLowerCase();
 
-      const events = getEvents(db, {
-        contractType: 'pool',
-        limit: 5000,
-        offset: 0,
-      })
-        .filter((evt) =>
-          ['wd_queue', 'wd_cncl', 'wd_part', 'wd_full'].includes(evt.eventType),
-        )
-        .sort((a, b) => a.ledgerSequence - b.ledgerSequence);
+      const events = getEvents(db, { contractType: 'credit_score', limit: 5000, offset: 0 });
 
-      const pending = new Map<
-        string,
-        { requestId: string; investor: string; shares: string; queuedAt: string; ledgerSequence: number }
-      >();
-
+      const attestationIds = new Set<string>();
       for (const evt of events) {
+        if (evt.eventType !== 'att_sub') continue;
         const value = evt.value;
-        if (!Array.isArray(value) || value.length < 2) continue;
-        if (String(value[1]) !== token) continue;
-
-        switch (evt.eventType) {
-          case 'wd_queue': {
-            const [investor, , shares, requestId] = value;
-            pending.set(String(requestId), {
-              requestId: String(requestId),
-              investor: String(investor),
-              shares: String(shares),
-              queuedAt: evt.ledgerCloseAt,
-              ledgerSequence: evt.ledgerSequence,
-            });
-            break;
-          }
-          case 'wd_cncl': {
-            const requestId = String(value[2]);
-            pending.delete(requestId);
-            break;
-          }
-          case 'wd_part': {
-            const requestId = String(value[4]);
-            const sharesBurned = BigInt(String(value[3] ?? 0));
-            const entry = pending.get(requestId);
-            if (entry) {
-              const remaining = BigInt(entry.shares) - sharesBurned;
-              entry.shares = remaining.toString();
-            }
-            break;
-          }
-          case 'wd_full': {
-            const requestId = String(value[4]);
-            if (requestId !== '0') {
-              pending.delete(requestId);
-            }
-            break;
-          }
-          default:
-            break;
+        const smeAddr = Array.isArray(value) ? value[1] : undefined;
+        if (typeof smeAddr === 'string' && smeAddr.toLowerCase() === smeLower) {
+          attestationIds.add(String(value[0]));
         }
       }
 
-      const requests = Array.from(pending.values()).sort(
-        (a, b) => a.ledgerSequence - b.ledgerSequence,
-      );
+      const lifecycleEvents = events
+        .filter((evt) => {
+          if (!ATTESTATION_LIFECYCLE_EVENT_TYPES.has(evt.eventType)) return false;
+          const id = Array.isArray(evt.value) ? String(evt.value[0]) : null;
+          return id !== null && attestationIds.has(id);
+        })
+        .sort((a, b) => a.ledgerSequence - b.ledgerSequence);
 
-      return res.json({
-        token,
-        depth: requests.length,
-        requests: requests.map((r, i) => ({
-          queuePosition: i + 1,
-          requestId: r.requestId,
-          investor: r.investor,
-          shares: r.shares,
-          queuedAt: r.queuedAt,
-        })),
+      const attestations = Array.from(attestationIds).map((id) => {
+        const idEvents = lifecycleEvents.filter(
+          (evt) => Array.isArray(evt.value) && String(evt.value[0]) === id,
+        );
+        let status = 'Active';
+        let attestor: string | null = null;
+        let scoreContribution: number | null = null;
+        for (const evt of idEvents) {
+          const value = evt.value as any[];
+          switch (evt.eventType) {
+            case 'att_sub':
+              attestor = typeof value[2] === 'string' ? value[2] : null;
+              scoreContribution = value[3] !== undefined ? Number(value[3]) : null;
+              status = 'Active';
+              break;
+            case 'att_disp':
+              status = 'Disputed';
+              break;
+            case 'att_res':
+              status = value[1] ? 'Active' : 'Revoked';
+              break;
+            default:
+              break;
+          }
+        }
+        return {
+          id,
+          sme,
+          attestor,
+          scoreContribution,
+          status,
+          events: idEvents.map((evt) => ({
+            eventType: evt.eventType,
+            value: evt.value,
+            ledgerSequence: evt.ledgerSequence,
+            ledgerCloseAt: evt.ledgerCloseAt,
+            txHash: evt.txHash,
+          })),
+        };
       });
+
+      return res.json({ sme, attestations });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }

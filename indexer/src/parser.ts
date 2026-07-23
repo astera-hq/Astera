@@ -54,6 +54,12 @@ const CREDIT_SCORE_EVENT_TYPES = new Set([
   'thresh',
   'lt_upd',
   'hist_upd',
+  // #868: external attestations + dispute mechanism
+  'att_reg',
+  'att_deact',
+  'att_sub',
+  'att_disp',
+  'att_res',
 ]);
 
 function classifyContract(contractId: string, contractType: string, eventType: string): ContractType {

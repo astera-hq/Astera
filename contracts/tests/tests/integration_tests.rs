@@ -2807,3 +2807,165 @@ fn test_oracle_consensus_round_expires_then_admin_fallback_resolves() {
         invoice::InvoiceStatus::Funded
     );
 }
+
+/// #868: credit_score v2 — a brand-new SME with zero internal payment history
+/// gets a baseline-only (internal-only) score, gains a business-registry
+/// attestation that measurably raises the blended score, disputes a bad-faith
+/// attestation which reverts the score, and continues to fund/repay invoices
+/// through the pool normally throughout.
+#[test]
+fn test_credit_score_attestation_lifecycle_alongside_normal_pool_activity() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let registry_attestor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let credit_id = env.register_contract_wasm(None, credit_score::WASM);
+    let share_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let credit_client = credit_score::Client::new(&env, &credit_id);
+    let share_client = share::Client::new(&env, &share_id);
+
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    share_client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_id, &invoice_id);
+    credit_client.initialize(&admin, &invoice_id, &pool_id);
+
+    // A brand-new SME with zero on-chain history gets the pre-v2 baseline
+    // score, untouched — the whole "cold start" problem this issue exists for.
+    let baseline = credit_client.get_credit_score(&sme);
+    assert_eq!(baseline.total_invoices, 0);
+    assert_eq!(baseline.blended_score, baseline.score);
+
+    // Admin registers a business-registry attestor and it verifies the SME's
+    // registration, submitting a strong (near-max) external signal.
+    credit_client.register_attestor(
+        &admin,
+        &registry_attestor,
+        &credit_score::AttestorType::BusinessRegistry,
+        &10_000u32,
+    );
+    let attestation_id = credit_client.submit_attestation(
+        &registry_attestor,
+        &sme,
+        &credit_score::AttestorType::BusinessRegistry,
+        &950u32,
+        &String::from_str(&env, "business-registry-report-hash"),
+        &(env.ledger().timestamp() + 365 * 24 * 60 * 60),
+    );
+
+    let with_attestation = credit_client.get_credit_score(&sme);
+    assert!(
+        with_attestation.blended_score > baseline.blended_score,
+        "verified business registration should measurably raise a cold-start SME's score: {} -> {}",
+        baseline.blended_score,
+        with_attestation.blended_score
+    );
+    // The pure internal (payment-history) score is unaffected.
+    assert_eq!(with_attestation.score, baseline.score);
+
+    // Meanwhile the SME funds and repays an invoice through the pool exactly
+    // like any other SME — attestations never block normal protocol usage.
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &10_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &10_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &5_000_000_000i128);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "Cold Start Corp"),
+        &2_000_000_000i128,
+        &due_date,
+        &String::from_str(&env, "Invoice #CS-001"),
+        &String::from_str(&env, "hash_cs"),
+        &metadata_url(&env),
+    );
+    pool_client.fund_invoice(
+        &admin,
+        &inv_id,
+        &2_000_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+    invoice_client.mark_funded(&inv_id, &pool_id);
+    assert_eq!(
+        invoice_client.get_invoice(&inv_id).status,
+        invoice::InvoiceStatus::Funded
+    );
+
+    env.ledger().with_mut(|l| l.timestamp += 10 * 86_400);
+    let amount_due = pool_client.estimate_repayment(&inv_id, &None);
+    pool_client.repay_invoice(&inv_id, &sme, &amount_due);
+    invoice_client.mark_paid(&inv_id, &pool_id);
+    credit_client.record_payment(
+        &pool_id,
+        &inv_id,
+        &sme,
+        &2_000_000_000i128,
+        &due_date,
+        &env.ledger().timestamp(),
+    );
+
+    let after_repayment = credit_client.get_credit_score(&sme);
+    assert_eq!(after_repayment.total_invoices, 1);
+    assert_eq!(after_repayment.paid_on_time, 1);
+    assert!(
+        after_repayment.blended_score > with_attestation.blended_score,
+        "a genuine on-time repayment should further raise the blended score"
+    );
+
+    // The SME disputes the attestation as bad-faith (e.g. a competitor forged
+    // the registry entry); the admin investigates and does not uphold it, so
+    // it is permanently revoked and immediately excluded from scoring.
+    credit_client.dispute_attestation(
+        &sme,
+        &attestation_id,
+        &String::from_str(&env, "forged-registry-entry-reason-hash"),
+    );
+    let disputed = credit_client.get_credit_score(&sme);
+    assert_eq!(
+        disputed.blended_score, disputed.score,
+        "disputing the attestation must immediately exclude it from the blended score"
+    );
+
+    credit_client.resolve_attestation_dispute(&admin, &attestation_id, &false);
+    let attestation = credit_client.get_attestation(&attestation_id).unwrap();
+    assert!(matches!(
+        attestation.status,
+        credit_score::AttestationStatus::Revoked
+    ));
+    let after_revocation = credit_client.get_credit_score(&sme);
+    assert_eq!(after_revocation.blended_score, after_revocation.score);
+
+    // Normal pool operation continues to work after all of this — the
+    // investor can still withdraw their principal plus yield.
+    let shares = share_client.balance(&investor);
+    pool_client.withdraw(&investor, &usdc_id, &shares);
+    let investor_balance = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor);
+    assert!(investor_balance > 5_000_000_000i128);
+}

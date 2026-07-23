@@ -44,6 +44,26 @@ pub enum CreditScoreError {
     AdminChangeTimelockNotExpired = 13,
     /// #565: no admin change has been proposed.
     NoAdminChangeProposed = 14,
+    /// #868: attestor address has not been registered.
+    AttestorNotFound = 15,
+    /// #868: attestor exists but has been deactivated.
+    AttestorInactive = 16,
+    /// #868: attestor weight_bps must be in (0, 10_000].
+    InvalidAttestorWeight = 17,
+    /// #868: attestation score_contribution must be in [0, 1000].
+    InvalidScoreContribution = 18,
+    /// #868: attestation expires_at must be in the future and within the max horizon.
+    InvalidAttestationExpiry = 19,
+    /// #868: no attestation exists with the given id.
+    AttestationNotFound = 20,
+    /// #868: attestation is not in the Active status required for this operation.
+    AttestationNotActive = 21,
+    /// #868: caller is neither the attested SME nor the admin.
+    UnauthorizedDisputeCaller = 22,
+    /// #868: attestation is not currently under dispute.
+    DisputeNotFound = 23,
+    /// #868: internal/external attestation blend weights are invalid (must sum to 10_000 bps).
+    InvalidAttestationConfig = 24,
 }
 
 /// Semantic version of this credit-score contract (#237).
@@ -105,11 +125,27 @@ const ADMIN_CHANGE_TIMELOCK_SECS: u64 = 172_800; // 48 hours — #565
 /// Current on-chain storage schema version (#397). Bump by one and add a
 /// matching arm in `run_migration` whenever the persistent storage layout
 /// changes so a deployed contract can migrate state after a WASM upgrade.
-const CURRENT_MIGRATION_VERSION: u32 = 1;
+///
+/// #868: bumped to 2 for the `ScoringConfig.attestation` field added by
+/// credit_score v2. `ScoringConfig` is stored as a single versioned blob that
+/// is only ever replaced wholesale via the admin-only `set_scoring_config`
+/// (never partially decoded), so there is no in-place field migration to run
+/// here — an operator upgrading a live contract must call `set_scoring_config`
+/// once with a `ScoreAttestationConfig` populated (e.g. the v2 defaults) to
+/// re-persist a config the new WASM can decode.
+const CURRENT_MIGRATION_VERSION: u32 = 2;
 pub const MAX_PAYMENT_HISTORY: u32 = 100;
 
 /// Max page size for list_all_sme_stats to prevent gas exhaustion.
 const MAX_SME_PAGE_SIZE: u32 = 100;
+
+/// #868: attestor weight is basis points of a 0–10_000 (0–100%) scale.
+const MAX_WEIGHT_BPS: u32 = 10_000;
+/// #868: attestation `score_contribution` is a normalized 0–1000 signal.
+const MAX_SCORE_CONTRIBUTION: u32 = 1000;
+/// #868: an attestation cannot be issued with an expiry more than ~2 years out,
+/// preventing absurd far-future expiries that would never lapse.
+const MAX_ATTESTATION_HORIZON_SECS: u64 = 2 * 365 * 24 * 60 * 60;
 
 #[contracttype]
 #[derive(Clone)]
@@ -195,12 +231,24 @@ pub struct ScoreBonusConfig {
     pub min_milestone_volume: i128,
 }
 
+/// #868: blend ratio between the internal (payment-history-derived) score and
+/// the external-attestation-derived component. Versioned alongside the rest
+/// of `ScoringConfig` (see `core.score_version`) so a re-weighting cannot
+/// silently reinterpret previously-computed scores.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoreAttestationConfig {
+    pub internal_weight_bps: u32,
+    pub external_weight_bps: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScoringConfig {
     pub core: ScoreCoreConfig,
     pub averages: ScoreAverageConfig,
     pub bonuses: ScoreBonusConfig,
+    pub attestation: ScoreAttestationConfig,
 }
 
 impl ScoringConfig {
@@ -236,6 +284,14 @@ impl ScoringConfig {
                 vol_bonus_pts3: VOLUME_BONUS_POINTS_3,
                 min_milestone_volume: DEFAULT_MIN_MILESTONE_VOLUME,
             },
+            // #868: 30% external weight by default — meaningful but bounded influence
+            // for SMEs who have attestations; SMEs with none are unaffected (see
+            // `blend_score`, which returns the internal score untouched when there is
+            // no external component regardless of these weights).
+            attestation: ScoreAttestationConfig {
+                internal_weight_bps: 7_000,
+                external_weight_bps: 3_000,
+            },
         }
     }
 }
@@ -258,6 +314,56 @@ impl ScoreThresholds {
             fair: 580,
         }
     }
+}
+
+/// #868: category of an external attestor / attestation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttestorType {
+    BusinessRegistry,
+    CreditBureau,
+    ExternalProtocol,
+    Manual,
+}
+
+/// #868: a registered source of external credit signal.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttestorInfo {
+    pub address: Address,
+    pub attestor_type: AttestorType,
+    pub is_active: bool,
+    /// Basis points (1–10_000) weighting this attestor's contribution within
+    /// the weighted average of an SME's active attestations.
+    pub weight_bps: u32,
+    pub registered_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttestationStatus {
+    Active,
+    Disputed,
+    Revoked,
+    Expired,
+}
+
+/// #868: a single external credit signal submitted by a registered attestor
+/// about an SME. `score_contribution` is the attestor's own 0–1000 normalized
+/// signal — not directly the final blended score.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attestation {
+    pub id: u64,
+    pub sme: Address,
+    pub attestor: Address,
+    pub attestation_type: AttestorType,
+    pub score_contribution: u32,
+    /// Off-chain document/report hash — no PII stored on-chain.
+    pub evidence_hash: String,
+    pub submitted_at: u64,
+    pub expires_at: u64,
+    pub status: AttestationStatus,
 }
 
 /// Returned by `get_credit_score`. Includes the current config version alongside the
@@ -286,6 +392,10 @@ pub struct CreditScoreResponse {
     pub config_version: u32,
     /// True when `score_version != config_version` — the score is stale.
     pub is_stale: bool,
+    /// #868: `score` blended with the SME's active external attestations
+    /// (`ScoreAttestationConfig` weights). Equal to `score` when the SME has
+    /// zero active attestations — existing SMEs are never regressed by v2.
+    pub blended_score: u32,
 }
 
 #[contracttype]
@@ -327,6 +437,18 @@ pub enum DataKey {
     AdminChangeScheduledAt,
     SmeByIndex(u32),
     SmeCount,
+    /// #868: registered attestor info, keyed by attestor address.
+    Attestor(Address),
+    /// #868: addresses of all currently-active attestors.
+    ActiveAttestorList,
+    /// #868: monotonic attestation id counter.
+    AttestationCount,
+    /// #868: attestation record, keyed by id.
+    Attestation(u64),
+    /// #868: ids of all attestations ever submitted about an SME.
+    SmeAttestations(Address),
+    /// #868: reason hash supplied to `dispute_attestation`, keyed by attestation id.
+    AttestationDisputeReason(u64),
 }
 
 const EVT: Symbol = symbol_short!("CREDIT");
@@ -501,6 +623,60 @@ fn calculate_average_payment_days(paid_on_time: u32, paid_late: u32, total_late_
         return 0;
     }
     total_late_days / total_paid as i64
+}
+
+/// #868: weighted average of active attestation `score_contribution`s (each
+/// 0–1000), scaled into the `[min_score, max_score]` credit-score range.
+/// Returns `None` when there are no active attestations so callers can
+/// distinguish "no external signal" from "external signal happens to equal
+/// the internal score".
+fn compute_external_component(
+    signals: &Vec<(u32, u32)>,
+    min_score: u32,
+    max_score: u32,
+) -> Option<u32> {
+    if signals.is_empty() {
+        return None;
+    }
+    let mut weighted_sum: i128 = 0;
+    let mut weight_total: i128 = 0;
+    for (weight_bps, score_contribution) in signals.iter() {
+        weighted_sum += weight_bps as i128 * score_contribution as i128;
+        weight_total += weight_bps as i128;
+    }
+    if weight_total == 0 {
+        return None;
+    }
+    let avg_contribution = weighted_sum / weight_total; // 0..=1000
+    let range = max_score as i128 - min_score as i128;
+    let scaled = min_score as i128 + (avg_contribution * range) / MAX_SCORE_CONTRIBUTION as i128;
+    Some(scaled.clamp(min_score as i128, max_score as i128) as u32)
+}
+
+/// #868: blend the internal (payment-history) score with the external
+/// attestation component per `ScoreAttestationConfig`. Degrades to
+/// `internal_score` untouched when `external` is `None` (zero active
+/// attestations) — this is what keeps every pre-v2 SME's score unchanged.
+fn blend_score(
+    internal_score: u32,
+    external: Option<u32>,
+    config: &ScoreAttestationConfig,
+    min_score: u32,
+    max_score: u32,
+) -> u32 {
+    let external_score = match external {
+        None => return internal_score,
+        Some(v) => v,
+    };
+    let internal_w = config.internal_weight_bps as i128;
+    let external_w = config.external_weight_bps as i128;
+    let total_w = internal_w + external_w;
+    if total_w == 0 {
+        return internal_score;
+    }
+    let blended =
+        (internal_score as i128 * internal_w + external_score as i128 * external_w) / total_w;
+    blended.clamp(min_score as i128, max_score as i128) as u32
 }
 
 #[contractimpl]
@@ -880,6 +1056,7 @@ impl CreditScoreContract {
     pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreResponse {
         let data = Self::get_or_create_credit_data(&env, &sme);
         let config_version = load_scoring_config(&env).core.score_version;
+        let blended_score = Self::compute_blended_score(&env, &sme, data.score);
         CreditScoreResponse {
             sme: data.sme,
             score: data.score,
@@ -893,6 +1070,7 @@ impl CreditScoreContract {
             score_version: data.score_version,
             config_version,
             is_stale: data.score_version != config_version,
+            blended_score,
         }
     }
 
@@ -1073,6 +1251,15 @@ impl CreditScoreContract {
             || config.bonuses.vol_bonus_pts3 <= 0
         {
             panic!("invalid scoring config: positive point values required");
+        }
+        // #868: internal/external attestation blend weights must sum to exactly
+        // 10_000 bps (100%) — validated explicitly rather than silently normalized.
+        if config.attestation.internal_weight_bps > MAX_WEIGHT_BPS
+            || config.attestation.external_weight_bps > MAX_WEIGHT_BPS
+            || config.attestation.internal_weight_bps + config.attestation.external_weight_bps
+                != MAX_WEIGHT_BPS
+        {
+            panic_with_error!(&env, CreditScoreError::InvalidAttestationConfig);
         }
 
         let old = load_scoring_config(&env);
@@ -1375,6 +1562,386 @@ impl CreditScoreContract {
             .remove(&DataKey::AdminChangeScheduledAt);
         env.events()
             .publish((EVT, Symbol::new(&env, "admin_chg_cancelled")), admin);
+    }
+
+    // === #868: credit_score v2 — external attestations + dispute mechanism ===
+
+    /// Register (or re-register/reactivate) an attestor. Admin-only.
+    pub fn register_attestor(
+        env: Env,
+        admin: Address,
+        address: Address,
+        attestor_type: AttestorType,
+        weight_bps: u32,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+        if weight_bps == 0 || weight_bps > MAX_WEIGHT_BPS {
+            panic_with_error!(&env, CreditScoreError::InvalidAttestorWeight);
+        }
+
+        let was_active = env
+            .storage()
+            .persistent()
+            .get::<DataKey, AttestorInfo>(&DataKey::Attestor(address.clone()))
+            .map(|info| info.is_active)
+            .unwrap_or(false);
+
+        let info = AttestorInfo {
+            address: address.clone(),
+            attestor_type,
+            is_active: true,
+            weight_bps,
+            registered_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Attestor(address.clone()), &info);
+
+        if !was_active {
+            Self::add_active_attestor(&env, &address);
+        }
+
+        env.events()
+            .publish((EVT, Symbol::new(&env, "att_reg")), (address, weight_bps));
+    }
+
+    /// Deactivate a registered attestor. Admin-only. Does not retroactively
+    /// invalidate attestations the attestor already submitted — only new
+    /// `submit_attestation` calls from them are blocked going forward.
+    pub fn deactivate_attestor(env: Env, admin: Address, address: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+
+        let mut info: AttestorInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Attestor(address.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, CreditScoreError::AttestorNotFound));
+
+        info.is_active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Attestor(address.clone()), &info);
+        Self::remove_active_attestor(&env, &address);
+
+        env.events()
+            .publish((EVT, Symbol::new(&env, "att_deact")), address);
+    }
+
+    fn add_active_attestor(env: &Env, address: &Address) {
+        let mut list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveAttestorList)
+            .unwrap_or_else(|| Vec::new(env));
+        if !list.iter().any(|a| &a == address) {
+            list.push_back(address.clone());
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ActiveAttestorList, &list);
+    }
+
+    fn remove_active_attestor(env: &Env, address: &Address) {
+        let list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveAttestorList)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut filtered = Vec::new(env);
+        for a in list.iter() {
+            if &a != address {
+                filtered.push_back(a);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ActiveAttestorList, &filtered);
+    }
+
+    pub fn get_attestor_info(env: Env, address: Address) -> Option<AttestorInfo> {
+        env.storage().persistent().get(&DataKey::Attestor(address))
+    }
+
+    pub fn list_active_attestors(env: Env) -> Vec<AttestorInfo> {
+        let addresses: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveAttestorList)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut infos = Vec::new(&env);
+        for address in addresses.iter() {
+            if let Some(info) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, AttestorInfo>(&DataKey::Attestor(address))
+            {
+                infos.push_back(info);
+            }
+        }
+        infos
+    }
+
+    /// Submit an attestation about `sme`. Caller must be a registered, active
+    /// attestor. Returns the new attestation id.
+    pub fn submit_attestation(
+        env: Env,
+        attestor: Address,
+        sme: Address,
+        attestation_type: AttestorType,
+        score_contribution: u32,
+        evidence_hash: String,
+        expires_at: u64,
+    ) -> u64 {
+        attestor.require_auth();
+        require_not_paused(&env);
+
+        let info: AttestorInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Attestor(attestor.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, CreditScoreError::AttestorNotFound));
+        if !info.is_active {
+            panic_with_error!(&env, CreditScoreError::AttestorInactive);
+        }
+        if score_contribution > MAX_SCORE_CONTRIBUTION {
+            panic_with_error!(&env, CreditScoreError::InvalidScoreContribution);
+        }
+        let now = env.ledger().timestamp();
+        if expires_at <= now || expires_at > now + MAX_ATTESTATION_HORIZON_SECS {
+            panic_with_error!(&env, CreditScoreError::InvalidAttestationExpiry);
+        }
+
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AttestationCount)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::AttestationCount, &(id + 1));
+
+        let attestation = Attestation {
+            id,
+            sme: sme.clone(),
+            attestor: attestor.clone(),
+            attestation_type,
+            score_contribution,
+            evidence_hash,
+            submitted_at: now,
+            expires_at,
+            status: AttestationStatus::Active,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Attestation(id), &attestation);
+
+        let mut sme_attestations: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SmeAttestations(sme.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        sme_attestations.push_back(id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::SmeAttestations(sme.clone()), &sme_attestations);
+
+        env.events().publish(
+            (EVT, Symbol::new(&env, "att_sub")),
+            (id, sme, attestor, score_contribution),
+        );
+        id
+    }
+
+    /// Lazily flips a stale-but-Active attestation to Expired at read time —
+    /// no separate cleanup transaction required.
+    fn maybe_expire_attestation(env: &Env, mut attestation: Attestation) -> Attestation {
+        if attestation.status != AttestationStatus::Active {
+            return attestation;
+        }
+        if env.ledger().timestamp() <= attestation.expires_at {
+            return attestation;
+        }
+        attestation.status = AttestationStatus::Expired;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Attestation(attestation.id), &attestation);
+        attestation
+    }
+
+    fn load_attestation(env: &Env, id: u64) -> Option<Attestation> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Attestation>(&DataKey::Attestation(id))
+            .map(|a| Self::maybe_expire_attestation(env, a))
+    }
+
+    pub fn get_attestation(env: Env, id: u64) -> Option<Attestation> {
+        Self::load_attestation(&env, id)
+    }
+
+    pub fn list_sme_attestations(env: Env, sme: Address) -> Vec<Attestation> {
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SmeAttestations(sme))
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut attestations = Vec::new(&env);
+        for id in ids.iter() {
+            if let Some(a) = Self::load_attestation(&env, id) {
+                attestations.push_back(a);
+            }
+        }
+        attestations
+    }
+
+    pub fn get_attestation_dispute_reason(env: Env, id: u64) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AttestationDisputeReason(id))
+    }
+
+    /// (weight_bps, score_contribution) pairs for every currently-Active
+    /// attestation about `sme`. Attestor deactivation does *not* filter these
+    /// out — only disputing/revoking/expiring an individual attestation does.
+    fn collect_active_attestation_signals(env: &Env, sme: &Address) -> Vec<(u32, u32)> {
+        let ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SmeAttestations(sme.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+        let mut signals = Vec::new(env);
+        for id in ids.iter() {
+            if let Some(attestation) = Self::load_attestation(env, id) {
+                if attestation.status == AttestationStatus::Active {
+                    if let Some(info) = env
+                        .storage()
+                        .persistent()
+                        .get::<DataKey, AttestorInfo>(&DataKey::Attestor(attestation.attestor))
+                    {
+                        signals.push_back((info.weight_bps, attestation.score_contribution));
+                    }
+                }
+            }
+        }
+        signals
+    }
+
+    fn compute_blended_score(env: &Env, sme: &Address, internal_score: u32) -> u32 {
+        let config = load_scoring_config(env);
+        let signals = Self::collect_active_attestation_signals(env, sme);
+        let external =
+            compute_external_component(&signals, config.core.min_score, config.core.max_score);
+        blend_score(
+            internal_score,
+            external,
+            &config.attestation,
+            config.core.min_score,
+            config.core.max_score,
+        )
+    }
+
+    /// Preview the blended score as if `hypothetical` additional attestations
+    /// (weight_bps, score_contribution) existed, without persisting anything.
+    /// Powers a "what would my score be if I verified X" frontend flow.
+    pub fn simulate_score_with_attestations(
+        env: Env,
+        sme: Address,
+        hypothetical: Vec<(u32, u32)>,
+    ) -> u32 {
+        let data = Self::get_or_create_credit_data(&env, &sme);
+        let config = load_scoring_config(&env);
+        let mut signals = Self::collect_active_attestation_signals(&env, &sme);
+        for pair in hypothetical.iter() {
+            signals.push_back(pair);
+        }
+        let external =
+            compute_external_component(&signals, config.core.min_score, config.core.max_score);
+        blend_score(
+            data.score,
+            external,
+            &config.attestation,
+            config.core.min_score,
+            config.core.max_score,
+        )
+    }
+
+    /// File a dispute against an attestation. Callable by the attested SME or
+    /// the admin. Immediately excludes the attestation from blended scoring.
+    pub fn dispute_attestation(
+        env: Env,
+        caller: Address,
+        attestation_id: u64,
+        reason_hash: String,
+    ) {
+        caller.require_auth();
+        require_not_paused(&env);
+
+        let mut attestation = Self::load_attestation(&env, attestation_id)
+            .unwrap_or_else(|| panic_with_error!(&env, CreditScoreError::AttestationNotFound));
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if caller != attestation.sme && caller != admin {
+            panic_with_error!(&env, CreditScoreError::UnauthorizedDisputeCaller);
+        }
+        if attestation.status != AttestationStatus::Active {
+            panic_with_error!(&env, CreditScoreError::AttestationNotActive);
+        }
+
+        attestation.status = AttestationStatus::Disputed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Attestation(attestation.id), &attestation);
+        env.storage().persistent().set(
+            &DataKey::AttestationDisputeReason(attestation_id),
+            &reason_hash,
+        );
+
+        env.events().publish(
+            (EVT, Symbol::new(&env, "att_disp")),
+            (attestation_id, caller),
+        );
+    }
+
+    /// Resolve a pending attestation dispute. Admin-only. If the attestation
+    /// is upheld (`upheld = true`) it returns to `Active`; otherwise it is
+    /// permanently `Revoked`.
+    pub fn resolve_attestation_dispute(
+        env: Env,
+        admin: Address,
+        attestation_id: u64,
+        upheld: bool,
+    ) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        require_not_paused(&env);
+
+        let mut attestation = Self::load_attestation(&env, attestation_id)
+            .unwrap_or_else(|| panic_with_error!(&env, CreditScoreError::AttestationNotFound));
+        if attestation.status != AttestationStatus::Disputed {
+            panic_with_error!(&env, CreditScoreError::DisputeNotFound);
+        }
+
+        attestation.status = if upheld {
+            AttestationStatus::Active
+        } else {
+            AttestationStatus::Revoked
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Attestation(attestation.id), &attestation);
+
+        env.events().publish(
+            (EVT, Symbol::new(&env, "att_res")),
+            (attestation_id, upheld),
+        );
     }
 }
 
@@ -3143,6 +3710,552 @@ mod test {
         assert_eq!(
             result.unwrap_err().unwrap(),
             CreditScoreError::NoAdminChangeProposed.into()
+        );
+    }
+
+    // === #868: credit_score v2 — external attestations + dispute mechanism ===
+
+    fn register_test_attestor(
+        env: &Env,
+        client: &CreditScoreContractClient,
+        admin: &Address,
+        weight_bps: u32,
+    ) -> Address {
+        let attestor = Address::generate(env);
+        client.register_attestor(
+            admin,
+            &attestor,
+            &AttestorType::BusinessRegistry,
+            &weight_bps,
+        );
+        attestor
+    }
+
+    #[test]
+    fn test_register_and_get_attestor_info() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+
+        let attestor = register_test_attestor(&env, &client, &admin, 5_000);
+
+        let info = client.get_attestor_info(&attestor).unwrap();
+        assert!(info.is_active);
+        assert_eq!(info.weight_bps, 5_000);
+        assert!(matches!(info.attestor_type, AttestorType::BusinessRegistry));
+
+        let active = client.list_active_attestors();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active.get(0).unwrap().address, attestor);
+    }
+
+    #[test]
+    fn test_register_attestor_rejects_zero_weight() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let attestor = Address::generate(&env);
+
+        let result = client.try_register_attestor(&admin, &attestor, &AttestorType::Manual, &0u32);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::InvalidAttestorWeight.into()
+        );
+    }
+
+    #[test]
+    fn test_register_attestor_rejects_weight_over_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let attestor = Address::generate(&env);
+
+        let result =
+            client.try_register_attestor(&admin, &attestor, &AttestorType::Manual, &10_001u32);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::InvalidAttestorWeight.into()
+        );
+    }
+
+    #[test]
+    fn test_deactivate_attestor_removes_from_active_list_but_keeps_info() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let attestor = register_test_attestor(&env, &client, &admin, 5_000);
+
+        client.deactivate_attestor(&admin, &attestor);
+
+        assert_eq!(client.list_active_attestors().len(), 0);
+        let info = client.get_attestor_info(&attestor).unwrap();
+        assert!(!info.is_active);
+    }
+
+    #[test]
+    fn test_deactivate_unknown_attestor_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        let result = client.try_deactivate_attestor(&admin, &stranger);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::AttestorNotFound.into()
+        );
+    }
+
+    #[test]
+    fn test_submit_attestation_by_unregistered_attestor_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        let result = client.try_submit_attestation(
+            &stranger,
+            &sme,
+            &AttestorType::Manual,
+            &500u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::AttestorNotFound.into()
+        );
+    }
+
+    #[test]
+    fn test_submit_attestation_by_deactivated_attestor_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let attestor = register_test_attestor(&env, &client, &admin, 5_000);
+        client.deactivate_attestor(&admin, &attestor);
+
+        let result = client.try_submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::Manual,
+            &500u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::AttestorInactive.into()
+        );
+    }
+
+    #[test]
+    fn test_submit_attestation_rejects_score_contribution_over_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let attestor = register_test_attestor(&env, &client, &admin, 5_000);
+
+        let result = client.try_submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::Manual,
+            &1_001u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::InvalidScoreContribution.into()
+        );
+    }
+
+    #[test]
+    fn test_submit_attestation_rejects_past_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let attestor = register_test_attestor(&env, &client, &admin, 5_000);
+
+        let result = client.try_submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::Manual,
+            &500u32,
+            &String::from_str(&env, "hash"),
+            &500_000u64,
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::InvalidAttestationExpiry.into()
+        );
+    }
+
+    #[test]
+    fn test_submit_attestation_rejects_far_future_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let attestor = register_test_attestor(&env, &client, &admin, 5_000);
+
+        let result = client.try_submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::Manual,
+            &500u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 100 * 365 * 24 * 60 * 60),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::InvalidAttestationExpiry.into()
+        );
+    }
+
+    #[test]
+    fn test_zero_attestation_score_is_backward_compatible() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, _admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let data = client.get_credit_score(&sme);
+        assert_eq!(
+            data.blended_score, data.score,
+            "an SME with zero attestations must see blended_score == score"
+        );
+    }
+
+    #[test]
+    fn test_attestation_blends_score_upward_for_strong_external_signal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+
+        // A single defaulted invoice keeps the internal score low.
+        client.record_default(&pool, &1, &sme, &1_000_000_000i128, &due_date);
+        let before = client.get_credit_score(&sme);
+        assert_eq!(before.blended_score, before.score);
+
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &1000u32, // maximum external signal
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+
+        let after = client.get_credit_score(&sme);
+        assert!(
+            after.blended_score > before.blended_score,
+            "strong external attestation should raise the blended score: {} -> {}",
+            before.blended_score,
+            after.blended_score
+        );
+        assert_eq!(
+            after.score, before.score,
+            "internal score must be untouched by attestations"
+        );
+        assert!(after.blended_score <= MAX_SCORE);
+    }
+
+    #[test]
+    fn test_expired_attestation_excluded_from_blended_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        let expires_at = env.ledger().timestamp() + 1_000;
+        client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &1000u32,
+            &String::from_str(&env, "hash"),
+            &expires_at,
+        );
+
+        let internal_only = client.get_credit_score(&sme).score;
+        let with_attestation = client.get_credit_score(&sme);
+        assert!(with_attestation.blended_score >= internal_only);
+
+        env.ledger().with_mut(|l| l.timestamp = expires_at + 1);
+        let after_expiry = client.get_credit_score(&sme);
+        assert_eq!(
+            after_expiry.blended_score, after_expiry.score,
+            "expired attestation must be excluded without a separate cleanup transaction"
+        );
+
+        let attestation = client.get_attestation(&0u64).unwrap();
+        assert!(matches!(attestation.status, AttestationStatus::Expired));
+    }
+
+    #[test]
+    fn test_dispute_excludes_attestation_and_resolution_not_upheld_revokes_permanently() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        let id = client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &1000u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+
+        let with_attestation = client.get_credit_score(&sme);
+        assert!(with_attestation.blended_score > with_attestation.score);
+
+        client.dispute_attestation(&sme, &id, &String::from_str(&env, "reason"));
+        let disputed = client.get_credit_score(&sme);
+        assert_eq!(
+            disputed.blended_score, disputed.score,
+            "a disputed attestation must be excluded from the very next get_credit_score call"
+        );
+
+        client.resolve_attestation_dispute(&admin, &id, &false);
+        let attestation = client.get_attestation(&id).unwrap();
+        assert!(matches!(attestation.status, AttestationStatus::Revoked));
+
+        let after_revoke = client.get_credit_score(&sme);
+        assert_eq!(after_revoke.blended_score, after_revoke.score);
+
+        // Revocation is permanent — cannot be disputed/resolved again.
+        let redispute = client.try_dispute_attestation(&sme, &id, &String::from_str(&env, "x"));
+        assert_eq!(
+            redispute.unwrap_err().unwrap(),
+            CreditScoreError::AttestationNotActive.into()
+        );
+    }
+
+    #[test]
+    fn test_dispute_resolution_upheld_restores_active_status() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        let id = client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &1000u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+
+        client.dispute_attestation(&sme, &id, &String::from_str(&env, "reason"));
+        client.resolve_attestation_dispute(&admin, &id, &true);
+
+        let attestation = client.get_attestation(&id).unwrap();
+        assert!(matches!(attestation.status, AttestationStatus::Active));
+
+        let restored = client.get_credit_score(&sme);
+        assert!(
+            restored.blended_score > restored.score,
+            "an upheld (restored) attestation must contribute to the blended score again"
+        );
+    }
+
+    #[test]
+    fn test_dispute_by_unrelated_caller_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        let id = client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &500u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+
+        let result =
+            client.try_dispute_attestation(&stranger, &id, &String::from_str(&env, "reason"));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::UnauthorizedDisputeCaller.into()
+        );
+    }
+
+    #[test]
+    fn test_deactivating_attestor_does_not_retroactively_invalidate_prior_attestations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &1000u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+
+        let before_deactivation = client.get_credit_score(&sme);
+        client.deactivate_attestor(&admin, &attestor);
+        let after_deactivation = client.get_credit_score(&sme);
+
+        assert_eq!(
+            before_deactivation.blended_score,
+            after_deactivation.blended_score
+        );
+    }
+
+    #[test]
+    fn test_list_sme_attestations_returns_all_submitted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let attestor = register_test_attestor(&env, &client, &admin, 5_000);
+
+        client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &300u32,
+            &String::from_str(&env, "hash1"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+        client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::CreditBureau,
+            &600u32,
+            &String::from_str(&env, "hash2"),
+            &(env.ledger().timestamp() + 2_000_000),
+        );
+
+        let attestations = client.list_sme_attestations(&sme);
+        assert_eq!(attestations.len(), 2);
+    }
+
+    #[test]
+    fn test_simulate_score_with_attestations_matches_committed_result() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        let (client, admin, _invoice, pool) = setup(&env);
+        let sme = Address::generate(&env);
+        let due_date = 200_000u64;
+        client.record_payment(
+            &pool,
+            &1,
+            &sme,
+            &1_000_000_000i128,
+            &due_date,
+            &(due_date - 1000),
+        );
+
+        let hypothetical = Vec::from_array(&env, [(10_000u32, 1000u32)]);
+        let simulated = client.simulate_score_with_attestations(&sme, &hypothetical);
+
+        let attestor = register_test_attestor(&env, &client, &admin, 10_000);
+        client.submit_attestation(
+            &attestor,
+            &sme,
+            &AttestorType::BusinessRegistry,
+            &1000u32,
+            &String::from_str(&env, "hash"),
+            &(env.ledger().timestamp() + 1_000_000),
+        );
+        let actual = client.get_credit_score(&sme).blended_score;
+
+        assert_eq!(simulated, actual);
+    }
+
+    #[test]
+    fn test_set_scoring_config_rejects_attestation_weights_not_summing_to_10000() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _invoice, _pool) = setup(&env);
+
+        let mut config = ScoringConfig::defaults();
+        config.core.score_version = 2;
+        config.attestation.internal_weight_bps = 6_000;
+        config.attestation.external_weight_bps = 3_000; // sums to 9_000, not 10_000
+
+        let result = client.try_set_scoring_config(&admin, &config);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            CreditScoreError::InvalidAttestationConfig.into()
         );
     }
 }
