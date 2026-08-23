@@ -92,15 +92,19 @@ export function computeScenario(
   const defRate = Math.max(0, Math.min(1, overrideDefaultRate));
   const recovery = Math.max(0, Math.min(1, collateralRecoveryRate));
 
+  const BPS = 10_000n;
+  const utilBps = BigInt(Math.round(util * 10_000));
+  const defRateBps = BigInt(Math.round(defRate * 10_000));
+  const lossRateBps = BigInt(Math.round((1 - recovery) * 10_000));
+
   // Gross yield: only the deployed (utilised) portion earns interest
   const fullInterest = projectedInterestStroops(principalStroops, yieldBps, lockDays);
-  const grossYieldStroops = BigInt(Math.floor(Number(fullInterest) * util));
+  const grossYieldStroops = (fullInterest * utilBps) / BPS;
 
   // Default loss: defaults occur on deployed capital; recovery reduces the loss
-  const deployedStroops = BigInt(Math.floor(Number(principalStroops) * util));
-  const rawLoss = BigInt(Math.floor(Number(deployedStroops) * defRate));
-  const defaultLossStroops =
-    rawLoss > 0n ? BigInt(Math.floor(Number(rawLoss) * (1 - recovery))) : 0n;
+  const deployedStroops = (principalStroops * utilBps) / BPS;
+  const rawLoss = (deployedStroops * defRateBps) / BPS;
+  const defaultLossStroops = rawLoss > 0n ? (rawLoss * lossRateBps) / BPS : 0n;
 
   const netReturnStroops = grossYieldStroops - defaultLossStroops;
 
