@@ -14,7 +14,7 @@ import {
   buildTransferCoFundShareTx,
 } from '@/lib/contracts';
 import { useCoFundingRounds, useCoFundingPositions } from '@/lib/cache';
-import { UseTrackTransaction } from '@/hooks/useTrackTransaction';
+import { useTrackTransaction } from '@/hooks/useTrackTransaction';
 
 const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
   Open: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
@@ -26,7 +26,7 @@ const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
 export default function CoFundingPage() {
   const { wallet } = useStore();
   const [txLoading, setTxLoading] = useState(false);
-  const trackedSubmit = UseTrackTransaction('Co-Funding');
+  const trackedSubmit = useTrackTransaction('Co-Funding');
 
   const [commitAmounts, setCommitAmounts] = useState<Record<number, string>>({});
 
@@ -46,7 +46,7 @@ export default function CoFundingPage() {
       address: wallet.address!,
     });
     if (signError) throw new Error(signError.message || 'Signing rejected.');
-    const submitter = label ? UseTrackTransaction(label) : trackedSubmit;
+    const submitter = label ? useTrackTransaction(label) : trackedSubmit;
     await submitter(signedTxXdr);
   }
 
