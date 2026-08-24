@@ -178,6 +178,15 @@ pub enum PoolError {
     ListingPriceMismatch = 95,
     // #789: invoice contract declined the Funded -> Cancelled transition
     InvoiceNotCancelled = 96,
+    // #760: M-of-N multi-sig approval gate for critical admin operations
+    // (additive on top of the #742 propose/execute timelock above).
+    MultiSigNotConfigured = 97,
+    NotAMultiSigSigner = 98,
+    AlreadyApprovedOperation = 99,
+    MultiSigThresholdNotMet = 100,
+    InvalidMultiSigThreshold = 101,
+    DuplicateMultiSigSigner = 102,
+    NoApprovalToRevoke = 103,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -526,6 +535,17 @@ pub enum AdminOperation {
     RemoveToken(Address),
     SetCollateralConfig(i128, u32),
     SeizeCollateral(u64),
+    // #760: multi-sig-gated routes for the remaining "critical operations"
+    // named in the multi-sig admin issue. These are new, additive routes
+    // through this same propose/approve/execute flow for effects that the
+    // legacy single-admin entrypoints (`propose_admin_change` /
+    // `finalize_admin_change`, `propose_upgrade` / `execute_upgrade`,
+    // `set_factoring_fee`) already provide — those legacy entrypoints are
+    // untouched, so a deployment that never calls `configure_multisig`
+    // keeps working exactly as before.
+    SetAdmin(Address),
+    SetFeeRate(u32),
+    Upgrade(BytesN<32>),
 }
 
 #[contracttype]
@@ -537,6 +557,21 @@ pub struct Proposal {
     pub proposer: Address,
     pub executed: bool,
     pub cancelled: bool,
+    // #760: signers (from the configured `MultiSigConfig`) who have called
+    // `approve_operation` on this specific proposal. Stays empty forever if
+    // `configure_multisig` is never called — `execute_operation` only
+    // checks this against a threshold when a `MultiSigConfig` exists.
+    pub approvals: Vec<Address>,
+}
+
+/// #760: M-of-N signer configuration gating `execute_operation` on top of
+/// the existing time-delay. Mirrors the `MultiSigConfig` shape described in
+/// the multi-sig admin issue (`signers`, `threshold`).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiSigConfig {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
 }
 
 #[contracttype]
@@ -662,6 +697,10 @@ pub enum DataKey {
 const EVT: Symbol = symbol_short!("pool");
 // #799: referral registry contract address, if configured.
 const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
+// #760: M-of-N multi-sig signer config gating `execute_operation`. Symbol
+// key rather than a DataKey variant — DataKey is already at Soroban's
+// 50-variant ceiling (see #867/#777/#773 below).
+const MULTISIG_CONFIG: Symbol = symbol_short!("msig_cfg");
 // #867: stored under a Symbol key (not DataKey) — pool DataKey is already at
 // the Soroban 50-variant ceiling after #863.
 const COMPLIANCE_CFG: Symbol = symbol_short!("cmp_cfg");
@@ -6564,7 +6603,19 @@ impl FundingPool {
             AdminOperation::SetCollateralConfig(threshold, collateral_bps) => {
                 Self::validate_collateral_config(*threshold, *collateral_bps)?
             }
-            AdminOperation::RemoveToken(_) | AdminOperation::SeizeCollateral(_) => {}
+            AdminOperation::SetFeeRate(bps) => {
+                if *bps > BPS_DENOM {
+                    return Err(PoolError::InvalidAmount);
+                }
+            }
+            AdminOperation::Upgrade(wasm_hash) => {
+                if wasm_hash == &BytesN::from_array(&env, &[0u8; 32]) {
+                    return Err(PoolError::InvalidWasmHash);
+                }
+            }
+            AdminOperation::RemoveToken(_)
+            | AdminOperation::SeizeCollateral(_)
+            | AdminOperation::SetAdmin(_) => {}
         }
 
         let now = env.ledger().timestamp();
@@ -6591,6 +6642,7 @@ impl FundingPool {
             proposer: admin.clone(),
             executed: false,
             cancelled: false,
+            approvals: Vec::new(&env),
         };
         env.storage()
             .instance()
@@ -6625,6 +6677,19 @@ impl FundingPool {
             return Err(PoolError::ProposalNotReady);
         }
 
+        // #760: if a multi-sig has been configured, this proposal additionally
+        // requires threshold-of-signers approval (collected via
+        // `approve_operation`) before it can execute — on top of, not instead
+        // of, the time-delay checked above. A deployment that never calls
+        // `configure_multisig` skips this check entirely (unchanged #742
+        // behavior: single admin + timelock only).
+        let multisig: Option<MultiSigConfig> = env.storage().instance().get(&MULTISIG_CONFIG);
+        if let Some(cfg) = multisig {
+            if proposal.approvals.len() < cfg.threshold {
+                return Err(PoolError::MultiSigThresholdNotMet);
+            }
+        }
+
         // Mark as executed before dispatch so a re-entrant call cannot replay it.
         proposal.executed = true;
         env.storage()
@@ -6639,6 +6704,13 @@ impl FundingPool {
             }
             AdminOperation::SeizeCollateral(invoice_id) => {
                 Self::execute_seize_collateral(&env, &admin, invoice_id)?
+            }
+            AdminOperation::SetAdmin(new_admin) => {
+                Self::execute_set_admin_op(&env, &admin, &new_admin)?
+            }
+            AdminOperation::SetFeeRate(bps) => Self::execute_set_fee_rate_op(&env, &admin, bps)?,
+            AdminOperation::Upgrade(wasm_hash) => {
+                Self::execute_upgrade_op(&env, &admin, wasm_hash)?
             }
         }
 
@@ -6697,6 +6769,214 @@ impl FundingPool {
         env.storage()
             .instance()
             .get(&DataKey::Proposal(proposal_id))
+    }
+
+    // ---- #760: M-of-N multi-sig approval gate for critical admin operations ----
+    //
+    // Additive on top of the #742 propose/execute timelock above: once
+    // `configure_multisig` has been called with a non-empty signer set,
+    // `execute_operation` additionally requires at least `threshold` distinct
+    // configured signers to have called `approve_operation` on that specific
+    // proposal, on top of the existing time-delay. A deployment that never
+    // calls `configure_multisig` behaves exactly as before (single admin,
+    // timelock only) — this is fully backward compatible and doesn't touch
+    // any existing entrypoint's external behavior when unconfigured.
+    //
+    // Bootstrapping/updating the signer set itself stays gated by the legacy
+    // single admin key (`require_admin`), matching the same bootstrap
+    // pattern `set_access_control` already uses elsewhere in this contract
+    // (see #864 above) — a role-management system needs *something*
+    // ungated to seed it from.
+
+    /// (Re)configure the multi-sig signer set and threshold. Diffs against
+    /// the previous configuration (if any) to emit `signer_added` /
+    /// `signer_removed` / `threshold_updated` events only for what actually
+    /// changed.
+    pub fn configure_multisig(
+        env: Env,
+        admin: Address,
+        signers: Vec<Address>,
+        threshold: u32,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        Self::validate_multisig_config(&signers, threshold)?;
+
+        let old: Option<MultiSigConfig> = env.storage().instance().get(&MULTISIG_CONFIG);
+        let old_threshold = old.as_ref().map(|c| c.threshold).unwrap_or(0);
+
+        if let Some(old_cfg) = &old {
+            for i in 0..old_cfg.signers.len() {
+                let s = old_cfg.signers.get(i).expect("storage corrupted");
+                if !signers.contains(&s) {
+                    env.events()
+                        .publish((EVT, Symbol::new(&env, "signer_removed")), s);
+                }
+            }
+        }
+        for i in 0..signers.len() {
+            let s = signers.get(i).expect("storage corrupted");
+            let already_present = old.as_ref().map(|c| c.signers.contains(&s)).unwrap_or(false);
+            if !already_present {
+                env.events()
+                    .publish((EVT, Symbol::new(&env, "signer_added")), s);
+            }
+        }
+        if old_threshold != threshold {
+            env.events().publish(
+                (EVT, Symbol::new(&env, "threshold_updated")),
+                (old_threshold, threshold),
+            );
+        }
+
+        env.storage().instance().set(
+            &MULTISIG_CONFIG,
+            &MultiSigConfig {
+                signers,
+                threshold,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn get_multisig_config(env: Env) -> Option<MultiSigConfig> {
+        env.storage().instance().get(&MULTISIG_CONFIG)
+    }
+
+    /// Record `signer`'s approval of a still-pending, unexecuted proposal.
+    /// Each configured signer may approve a given proposal at most once.
+    /// Reaching the threshold does not auto-execute here — `execute_operation`
+    /// still separately enforces its own time-delay, so a caller invokes
+    /// that (already-public) entrypoint once both gates are satisfied.
+    pub fn approve_operation(env: Env, signer: Address, proposal_id: u64) -> Result<(), PoolError> {
+        signer.require_auth();
+        bump_instance(&env);
+
+        let cfg: MultiSigConfig = env
+            .storage()
+            .instance()
+            .get(&MULTISIG_CONFIG)
+            .ok_or(PoolError::MultiSigNotConfigured)?;
+        if !cfg.signers.contains(&signer) {
+            return Err(PoolError::NotAMultiSigSigner);
+        }
+
+        let mut proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(PoolError::ProposalNotFound)?;
+        if proposal.executed {
+            return Err(PoolError::ProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            return Err(PoolError::ProposalAlreadyCancelled);
+        }
+        if proposal.approvals.contains(&signer) {
+            return Err(PoolError::AlreadyApprovedOperation);
+        }
+
+        proposal.approvals.push_back(signer.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events()
+            .publish((EVT, symbol_short!("op_appr")), (signer, proposal_id));
+        Ok(())
+    }
+
+    /// Remove the caller's own prior approval from a still-unexecuted,
+    /// uncancelled proposal — lets a signer correct an approval given in
+    /// error before execution.
+    pub fn revoke_operation_approval(
+        env: Env,
+        signer: Address,
+        proposal_id: u64,
+    ) -> Result<(), PoolError> {
+        signer.require_auth();
+        bump_instance(&env);
+
+        let mut proposal: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(PoolError::ProposalNotFound)?;
+        if proposal.executed {
+            return Err(PoolError::ProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            return Err(PoolError::ProposalAlreadyCancelled);
+        }
+        let idx = proposal.approvals.iter().position(|a| a == signer);
+        let idx = match idx {
+            Some(i) => i as u32,
+            None => return Err(PoolError::NoApprovalToRevoke),
+        };
+        proposal.approvals.remove(idx);
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events()
+            .publish((EVT, symbol_short!("op_revk")), (signer, proposal_id));
+        Ok(())
+    }
+
+    fn validate_multisig_config(signers: &Vec<Address>, threshold: u32) -> PoolResult<()> {
+        if threshold == 0 || threshold > signers.len() {
+            return Err(PoolError::InvalidMultiSigThreshold);
+        }
+        for i in 0..signers.len() {
+            let a = signers.get(i).expect("storage corrupted");
+            for j in 0..i {
+                if signers.get(j).expect("storage corrupted") == a {
+                    return Err(PoolError::DuplicateMultiSigSigner);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_set_admin_op(env: &Env, admin: &Address, new_admin: &Address) -> PoolResult<()> {
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.admin = new_admin.clone();
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("ms_admin")),
+            (admin.clone(), new_admin.clone()),
+        );
+        Ok(())
+    }
+
+    fn execute_set_fee_rate_op(env: &Env, admin: &Address, bps: u32) -> PoolResult<()> {
+        if bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.factoring_fee_bps = bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("ms_fee")), (admin.clone(), bps));
+        Ok(())
+    }
+
+    fn execute_upgrade_op(env: &Env, admin: &Address, wasm_hash: BytesN<32>) -> PoolResult<()> {
+        env.deployer().update_current_contract_wasm(wasm_hash);
+        env.events().publish(
+            (EVT, symbol_short!("ms_upg")),
+            (admin.clone(), env.ledger().timestamp()),
+        );
+        Ok(())
     }
 
     // ---- Internal utility methods ----
@@ -11400,5 +11680,240 @@ mod test {
                 }
             }
         }
+    }
+
+    // ---- #760: multi-sig admin approval gate for critical operations ----
+
+    fn configure_2_of_3(
+        env: &Env,
+        client: &FundingPoolClient<'_>,
+        admin: &Address,
+    ) -> (Address, Address, Address) {
+        let s1 = Address::generate(env);
+        let s2 = Address::generate(env);
+        let s3 = Address::generate(env);
+        let mut signers = Vec::new(env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        signers.push_back(s3.clone());
+        client.configure_multisig(admin, &signers, &2u32);
+        (s1, s2, s3)
+    }
+
+    #[test]
+    fn test_multisig_configure_signers_and_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let (s1, s2, s3) = configure_2_of_3(&env, &client, &admin);
+
+        let cfg = client.get_multisig_config().expect("configured");
+        assert_eq!(cfg.threshold, 2u32);
+        assert_eq!(cfg.signers.len(), 3);
+        assert!(cfg.signers.contains(&s1));
+        assert!(cfg.signers.contains(&s2));
+        assert!(cfg.signers.contains(&s3));
+    }
+
+    #[test]
+    fn test_multisig_rejects_invalid_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let s1 = Address::generate(&env);
+        let mut signers = Vec::new(&env);
+        signers.push_back(s1);
+
+        let result = client.try_configure_multisig(&admin, &signers, &0u32);
+        assert_eq!(result, Err(Ok(PoolError::InvalidMultiSigThreshold)));
+
+        let result2 = client.try_configure_multisig(&admin, &signers, &5u32);
+        assert_eq!(result2, Err(Ok(PoolError::InvalidMultiSigThreshold)));
+    }
+
+    #[test]
+    fn test_multisig_rejects_duplicate_signers() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let s1 = Address::generate(&env);
+        let mut signers = Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s1);
+
+        let result = client.try_configure_multisig(&admin, &signers, &1u32);
+        assert_eq!(result, Err(Ok(PoolError::DuplicateMultiSigSigner)));
+    }
+
+    #[test]
+    fn test_multisig_execute_operation_requires_threshold_approvals() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let (s1, s2, _s3) = configure_2_of_3(&env, &client, &admin);
+
+        let proposal_id = client.propose_operation(
+            &admin,
+            &AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
+        );
+
+        // No approvals yet — even past the timelock, execution is blocked.
+        advance_past_operation_delay(&env, &client);
+        let result = client.try_execute_operation(&admin, &proposal_id);
+        assert_eq!(result, Err(Ok(PoolError::MultiSigThresholdNotMet)));
+
+        // A single approval still isn't enough for a 2-of-3 threshold.
+        client.approve_operation(&s1, &proposal_id);
+        let result = client.try_execute_operation(&admin, &proposal_id);
+        assert_eq!(result, Err(Ok(PoolError::MultiSigThresholdNotMet)));
+
+        // A second distinct signer's approval reaches the threshold.
+        client.approve_operation(&s2, &proposal_id);
+        client.execute_operation(&admin, &proposal_id);
+
+        let cfg = client.get_collateral_config();
+        assert_eq!(cfg.threshold, 1_000i128);
+        assert_eq!(cfg.collateral_bps, 2_000u32);
+    }
+
+    #[test]
+    fn test_multisig_rejects_non_signer_and_duplicate_approval() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let (s1, _s2, _s3) = configure_2_of_3(&env, &client, &admin);
+        let outsider = Address::generate(&env);
+
+        let proposal_id = client.propose_operation(
+            &admin,
+            &AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
+        );
+
+        let result = client.try_approve_operation(&outsider, &proposal_id);
+        assert_eq!(result, Err(Ok(PoolError::NotAMultiSigSigner)));
+
+        client.approve_operation(&s1, &proposal_id);
+        let result = client.try_approve_operation(&s1, &proposal_id);
+        assert_eq!(result, Err(Ok(PoolError::AlreadyApprovedOperation)));
+    }
+
+    #[test]
+    fn test_multisig_revoke_approval() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let (s1, s2, _s3) = configure_2_of_3(&env, &client, &admin);
+
+        let proposal_id = client.propose_operation(
+            &admin,
+            &AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
+        );
+        client.approve_operation(&s1, &proposal_id);
+        client.revoke_operation_approval(&s1, &proposal_id);
+
+        advance_past_operation_delay(&env, &client);
+        let result = client.try_execute_operation(&admin, &proposal_id);
+        assert_eq!(result, Err(Ok(PoolError::MultiSigThresholdNotMet)));
+
+        // Re-approving after revocation still works, and a second signer's
+        // approval reaches the threshold.
+        client.approve_operation(&s1, &proposal_id);
+        client.approve_operation(&s2, &proposal_id);
+        client.execute_operation(&admin, &proposal_id);
+    }
+
+    #[test]
+    fn test_multisig_revoke_without_prior_approval_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let (s1, _s2, _s3) = configure_2_of_3(&env, &client, &admin);
+
+        let proposal_id = client.propose_operation(
+            &admin,
+            &AdminOperation::SetCollateralConfig(1_000i128, 2_000u32),
+        );
+        let result = client.try_revoke_operation_approval(&s1, &proposal_id);
+        assert_eq!(result, Err(Ok(PoolError::NoApprovalToRevoke)));
+    }
+
+    #[test]
+    fn test_multisig_gates_remove_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let (s1, s2, _s3) = configure_2_of_3(&env, &client, &admin);
+
+        let token_admin = Address::generate(&env);
+        let new_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let new_share = env.register(DummyShare, ());
+        client.add_token(&admin, &new_token, &new_share);
+        assert_eq!(client.accepted_tokens().len(), 2);
+
+        let proposal_id =
+            client.propose_operation(&admin, &AdminOperation::RemoveToken(new_token.clone()));
+        client.approve_operation(&s1, &proposal_id);
+        client.approve_operation(&s2, &proposal_id);
+        advance_past_operation_delay(&env, &client);
+        client.execute_operation(&admin, &proposal_id);
+
+        assert_eq!(client.accepted_tokens().len(), 1);
+    }
+
+    #[test]
+    fn test_multisig_gates_set_admin_and_set_fee_rate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let (s1, s2, _s3) = configure_2_of_3(&env, &client, &admin);
+        let new_admin = Address::generate(&env);
+
+        let proposal_id =
+            client.propose_operation(&admin, &AdminOperation::SetAdmin(new_admin.clone()));
+        client.approve_operation(&s1, &proposal_id);
+        client.approve_operation(&s2, &proposal_id);
+        advance_past_operation_delay(&env, &client);
+        client.execute_operation(&admin, &proposal_id);
+
+        // The old admin has lost admin-gated authority.
+        let empty: Vec<Address> = Vec::new(&env);
+        let result = client.try_configure_multisig(&admin, &empty, &1u32);
+        assert_eq!(result, Err(Ok(PoolError::Unauthorized)));
+
+        // The signer set configured before the admin rotation remains valid,
+        // and the new admin can raise further multi-sig-gated proposals.
+        let fee_proposal_id =
+            client.propose_operation(&new_admin, &AdminOperation::SetFeeRate(250u32));
+        client.approve_operation(&s1, &fee_proposal_id);
+        client.approve_operation(&s2, &fee_proposal_id);
+        advance_past_operation_delay(&env, &client);
+        client.execute_operation(&new_admin, &fee_proposal_id);
+    }
+
+    #[test]
+    fn test_multisig_propose_upgrade_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let (_s1, _s2, _s3) = configure_2_of_3(&env, &client, &admin);
+        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let result = client.try_propose_operation(&admin, &AdminOperation::Upgrade(zero_hash));
+        assert_eq!(result, Err(Ok(PoolError::InvalidWasmHash)));
+    }
+
+    #[test]
+    fn test_unconfigured_multisig_keeps_legacy_single_admin_behavior() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+
+        // A deployment that never calls `configure_multisig` sees no change
+        // in behavior: propose + timelock only, no approvals required.
+        assert!(client.get_multisig_config().is_none());
+        propose_and_execute_set_collateral_config(&env, &client, &admin, 1_000i128, 2_000u32);
+        let cfg = client.get_collateral_config();
+        assert_eq!(cfg.threshold, 1_000i128);
     }
 }

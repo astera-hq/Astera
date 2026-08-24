@@ -7,6 +7,24 @@ export interface TrackedRound {
   updatedAt: number;
 }
 
+// Terminal statuses: once a round reaches one of these it will never change
+// again, so it's safe to evict from memory after a retention window.
+const TERMINAL_STATUSES: ReadonlySet<RoundStatus> = new Set([
+  'ConsensusApproved',
+  'ConsensusRejected',
+  'Expired',
+]);
+
+// #1178: `rounds`/`votedByMe` used to grow forever — every invoice ever
+// verified stayed in memory for the lifetime of the process. These bound
+// that growth: a finalized round is evicted `FINALIZED_RETENTION_MS` after
+// it reaches a terminal state (giving the health endpoint a window to still
+// report on recently-finalized rounds), and `MAX_FINALIZED_ROUNDS` is a hard
+// cap enforced FIFO so a burst of finalizations can't blow past the
+// retention window before the next prune runs.
+const FINALIZED_RETENTION_MS = 60 * 60 * 1000; // 1 hour
+const MAX_FINALIZED_ROUNDS = 5000;
+
 /**
  * #861: tracks `VerificationRound` state for the oracle registry this node
  * participates in, purely from the events streamed by `listener.ts` (no
@@ -21,7 +39,18 @@ export class ConsensusTracker {
   private votedByMe = new Set<string>();
   private paused = false;
 
-  constructor(private readonly oraclePublicKey: string) {}
+  // #1178: FIFO queue of invoiceIds in the order they reached a terminal
+  // state, so eviction can cheaply find "oldest finalized round" without
+  // scanning `rounds`. An invoiceId appears at most once (re-finalizing,
+  // e.g. `consensus` followed by `fallback`, moves it to the back instead
+  // of duplicating it).
+  private finalizedOrder: string[] = [];
+  private finalizedSet = new Set<string>();
+
+  constructor(
+    private readonly oraclePublicKey: string,
+    private readonly options: { finalizedRetentionMs?: number; maxFinalizedRounds?: number } = {},
+  ) {}
 
   /** Call with the decoded `(topic1, topic2)` pair and event value for every
    * event emitted under the registry contract's "ORACLE" topic namespace. */
@@ -104,6 +133,63 @@ export class ConsensusTracker {
       votedByThisNode: this.votedByMe.has(invoiceId),
       updatedAt: Date.now(),
     });
+
+    if (TERMINAL_STATUSES.has(status)) {
+      this.markFinalized(invoiceId);
+    }
+
+    this.prune();
+  }
+
+  /** Records `invoiceId` as finalized, moving it to the back of the FIFO
+   * eviction queue if it was already there (e.g. a `consensus` event
+   * followed by a later `fallback` event for the same round). */
+  private markFinalized(invoiceId: string): void {
+    if (this.finalizedSet.has(invoiceId)) {
+      const idx = this.finalizedOrder.indexOf(invoiceId);
+      if (idx !== -1) this.finalizedOrder.splice(idx, 1);
+    }
+    this.finalizedOrder.push(invoiceId);
+    this.finalizedSet.add(invoiceId);
+  }
+
+  /** Evicts finalized rounds that have aged past the retention window, and
+   * caps the number of retained finalized rounds at `maxFinalizedRounds`
+   * (oldest evicted first) so a burst of finalizations can't outpace the
+   * time-based prune. Open rounds are never evicted here — only rounds that
+   * have already reached a terminal status. */
+  private prune(): void {
+    const retentionMs = this.options.finalizedRetentionMs ?? FINALIZED_RETENTION_MS;
+    const maxFinalized = this.options.maxFinalizedRounds ?? MAX_FINALIZED_ROUNDS;
+    const now = Date.now();
+
+    while (this.finalizedOrder.length > 0) {
+      const oldestId = this.finalizedOrder[0];
+      const round = this.rounds.get(oldestId);
+
+      // Round already gone (shouldn't normally happen) — drop the stale
+      // queue entry and keep going.
+      if (!round) {
+        this.finalizedOrder.shift();
+        this.finalizedSet.delete(oldestId);
+        continue;
+      }
+
+      const isStale = now - round.updatedAt >= retentionMs;
+      const overCapacity = this.finalizedOrder.length > maxFinalized;
+      if (!isStale && !overCapacity) break;
+
+      this.finalizedOrder.shift();
+      this.finalizedSet.delete(oldestId);
+      this.rounds.delete(oldestId);
+      this.votedByMe.delete(oldestId);
+    }
+  }
+
+  /** Exposed for tests: current count of rounds retained purely because
+   * they're finalized and within the retention/capacity window. */
+  finalizedCount(): number {
+    return this.finalizedOrder.length;
   }
 }
 
