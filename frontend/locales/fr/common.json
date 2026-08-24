@@ -325,7 +325,13 @@
       "approvedInvoice": "La facture #{id} a été approuvée pour le cofinancement.",
       "defaultedInvoice": "La facture #{id} a été marquée comme DÉFAILLANTE.",
       "unknownError": "Erreur inconnue",
-      "approveFailed": "Échec de l'approbation de la facture."
+      "approveFailed": "Échec de l'approbation de la facture.",
+      "modalApproveTitle": "Approuver la facture #{id}",
+      "modalApproveDescription": "Approuver et financer la facture #{id} pour {amount}. Cela declenchera le cofinancement depuis le pool de liquidite.",
+      "modalDisputeTitle": "Marquer la facture #{id} comme contestee",
+      "modalDisputeDescription": "Marquer la facture #{id} comme contestee. Cela suspendra toutes les activites de financement et signalera la facture pour un examen manuel.",
+      "modalVerifyTitle": "Verifier la facture #{id}",
+      "modalVerifyDescription": "Verifier l'authenticite de la facture #{id}. Cela confirme les details de la facture et active le financement."
     },
     "kyc": {
       "title": "KYC / Liste blanche des investisseurs",

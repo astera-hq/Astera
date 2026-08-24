@@ -22,7 +22,9 @@
       "disputed": "En disputa",
       "funded": "Financiada",
       "paid": "Pagada",
-      "defaulted": "En mora"
+      "defaulted": "En mora",
+      "cancelled": "Cancelado",
+      "expired": "Expirado"
     },
     "sort": {
       "createdDesc": "Fecha de creacion (mas reciente)",
@@ -42,6 +44,21 @@
     "allLoaded": "Todas las facturas cargadas - {count} en total",
     "notifications": {
       "loadError": "No se pudieron cargar las facturas. Verifica que los contratos esten desplegados."
+    },
+    "view": {
+      "list": "Lista",
+      "pipeline": "Flujo"
+    },
+    "pipeline": {
+      "needsAttention": "Requiere atencion",
+      "noAttention": "Ninguna factura requiere atencion en este momento.",
+      "columns": {
+        "pending": "Pendiente",
+        "awaitingVerification": "En espera de verificacion",
+        "verified": "Verificado",
+        "funded": "Financiado",
+        "paid": "Pagado / Completado"
+      }
     }
   },
   "Notifications": {
@@ -129,7 +146,8 @@
       "aging": "Informe de antiguedad",
       "oracles": "Red de oraculos",
       "attestors": "Atestadores de credito",
-      "insurance": "Seguro"
+      "insurance": "Seguro",
+      "revenue": "Ingresos"
     },
     "layout": {
       "accessDeniedTitle": "Identificacion de administrador requerida",
@@ -258,7 +276,13 @@
       "approvedInvoice": "La factura #{id} ha sido aprobada para cofinanciamiento.",
       "defaultedInvoice": "La factura #{id} ha sido marcada como MOROSA.",
       "unknownError": "Error desconocido",
-      "approveFailed": "Error al aprobar la factura."
+      "approveFailed": "Error al aprobar la factura.",
+      "modalApproveTitle": "Aprobar factura #{id}",
+      "modalApproveDescription": "Aprobar y financiar la factura #{id} por {amount}. Esto iniciara el cofinanciamiento desde el pool de liquidez.",
+      "modalDisputeTitle": "Marcar la factura #{id} como disputada",
+      "modalDisputeDescription": "Marcar la factura #{id} como disputada. Esto pausara todas las actividades de financiamiento y marcara la factura para revision manual.",
+      "modalVerifyTitle": "Verificar factura #{id}",
+      "modalVerifyDescription": "Verificar la factura #{id} como autentica. Esto confirma los detalles de la factura y habilita el financiamiento."
     },
     "kyc": {
       "title": "KYC / Lista blanca de inversores",
@@ -636,6 +660,55 @@
       "validIdRequired": "Ingresa un ID de atestacion valido.",
       "lookupFailed": "Error al buscar la atestacion.",
       "transactionFailed": "Transaccion fallida."
+    },
+    "revenue": {
+      "title": "Panel de ingresos del protocolo",
+      "description": "Ingresos por comisiones de factoraje a lo largo del tiempo, estado de la tesoreria y metricas de volumen financiado, todo obtenido del estado on-chain.",
+      "lastUpdated": "Ultima actualizacion: {time}",
+      "loading": "Cargando...",
+      "refresh": "Actualizar datos",
+      "error": "No se pudieron cargar los datos de ingresos. Intentalo de nuevo.",
+      "sectionRevenue": "Resumen de ingresos",
+      "cumulativeFees": "Comisiones acumuladas",
+      "cumulativeFeesDesc": "Total historico de comisiones del protocolo recaudadas",
+      "pendingFees": "Comisiones pendientes",
+      "pendingFeesDesc": "Comisiones sin reclamar en el contrato del pool",
+      "avgFeePerInvoice": "Comision promedio / Factura",
+      "avgFeePerInvoiceDesc": "En todas las facturas financiadas",
+      "feeRate": "Tasa de comision",
+      "feeRateDesc": "Comision de factoraje actual",
+      "sectionPerToken": "Desglose por token",
+      "tableToken": "Token",
+      "tableCumulative": "Comisiones acumuladas",
+      "tablePending": "Pendiente",
+      "tableTreasury": "Saldo de tesoreria",
+      "sectionTreasury": "Estado de la tesoreria",
+      "treasuryBalances": "Saldos de tesoreria",
+      "treasuryNotConfigured": "Aun no hay una direccion de tesoreria configurada en el contrato del pool.",
+      "noTreasuryData": "Aun no hay datos de tesoreria disponibles.",
+      "treasuryAddressLabel": "Tesoreria:",
+      "withdrawals": "Retiros de comisiones",
+      "lastWithdrawal": "Ultimo retiro",
+      "lastWithdrawalDate": "Fecha",
+      "toTreasury": "A la tesoreria",
+      "noWithdrawals": "Aun no se han registrado retiros de comisiones.",
+      "treasuryPollNote": "Los saldos de tesoreria se actualizan automaticamente cada 30 segundos.",
+      "monthlyRevenueTitle": "Ingresos mensuales por comisiones",
+      "weeklyRevenueTitle": "Ingresos semanales por comisiones",
+      "sectionVolume": "Metricas de volumen",
+      "totalFundedVolume": "Volumen total financiado",
+      "totalFundedVolumeDesc": "Volumen historico de facturas financiadas",
+      "activeToday": "Activo hoy",
+      "activeTodayDesc": "Financiado en las ultimas 24 horas",
+      "activeWeek": "Activo esta semana",
+      "activeWeekDesc": "Financiado en los ultimos 7 dias",
+      "activeMonth": "Activo este mes",
+      "activeMonthDesc": "Financiado en los ultimos 30 dias",
+      "uniqueBorrowers": "Prestatarios unicos",
+      "uniqueBorrowersDesc": "PyMEs con facturas financiadas",
+      "uniqueLenders": "Prestamistas unicos",
+      "uniqueLendersDesc": "Direcciones con depositos en el pool",
+      "dataNote": "Las cifras de ingresos reflejan el estado on-chain y los eventos del pool. Las series historicas de los graficos se derivan de los totales acumulados actuales, y las cifras derivadas de eventos (ultimo retiro, prestamistas unicos) cubren los ultimos 30 dias de actividad; un almacen completo de series temporales llegara con el indexador de eventos."
     }
   }
 }
