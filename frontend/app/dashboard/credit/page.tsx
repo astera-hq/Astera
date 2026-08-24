@@ -5,7 +5,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import { parseStellarAddress } from '@/lib/types';
-import type { Attestation, FullCreditScore } from '@/lib/types';
+import type { Attestation, FullCreditScore, RiskSignal } from '@/lib/types';
 import {
   getFullCreditScore,
   listSmeAttestations,
@@ -14,6 +14,8 @@ import {
   submitTx,
   getContractErrorMessage,
 } from '@/lib/contracts';
+
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
 
 const STATUS_STYLES: Record<Attestation['status'], string> = {
   Active: 'bg-green-500/20 text-green-400 border-green-500/30',
@@ -26,6 +28,7 @@ export default function CreditProfilePage() {
   const { wallet } = useStore();
   const [score, setScore] = useState<FullCreditScore | null>(null);
   const [attestations, setAttestations] = useState<Attestation[]>([]);
+  const [riskSignal, setRiskSignal] = useState<RiskSignal | null>(null);
   const [loading, setLoading] = useState(true);
   const [txLoading, setTxLoading] = useState(false);
 
@@ -52,6 +55,16 @@ export default function CreditProfilePage() {
       ]);
       setScore(scoreData);
       setAttestations(attestationData);
+
+      // Fetch risk signals from indexer (non-blocking)
+      try {
+        const res = await fetch(`${INDEXER_URL}/credit-score/${wallet.address}/risk-signals`);
+        if (res.ok) {
+          setRiskSignal(await res.json());
+        }
+      } catch {
+        // Indexer may be unavailable — risk signals are supplementary
+      }
     } catch (e) {
       console.error(e);
       toast.error('Failed to load credit profile.');
@@ -231,6 +244,61 @@ export default function CreditProfilePage() {
           </div>
         )}
       </div>
+
+      {/* Risk Signals */}
+      {score && (
+        <div className="space-y-4">
+          <h2 className="text-xl font-bold">Risk Signals</h2>
+          <p className="text-brand-muted text-sm">
+            Risk signals adjust your blended score based on debtor concentration and invoice-size
+            risk. These are submitted by administrators after reviewing your portfolio.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
+              <p className="text-xs text-brand-muted mb-1">Risk Adjustment</p>
+              <p className={`text-3xl font-bold ${score.riskAdjustmentPts >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {score.riskAdjustmentPts >= 0 ? '+' : ''}{score.riskAdjustmentPts}
+              </p>
+              <p className="text-xs text-brand-muted mt-1">Points from risk signals</p>
+            </div>
+            <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
+              <p className="text-xs text-brand-muted mb-1">Trend Adjustment</p>
+              <p className={`text-3xl font-bold ${score.trendAdjustmentPts >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {score.trendAdjustmentPts >= 0 ? '+' : ''}{score.trendAdjustmentPts}
+              </p>
+              <p className="text-xs text-brand-muted mt-1">Points from repayment trend</p>
+            </div>
+            <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
+              <p className="text-xs text-brand-muted mb-1">Final Score</p>
+              <p className="text-3xl font-bold gradient-text">{score.finalScore}</p>
+              <p className="text-xs text-brand-muted mt-1">After all adjustments</p>
+            </div>
+          </div>
+          {riskSignal && (
+            <div className="p-6 bg-brand-card border border-brand-border rounded-2xl space-y-3">
+              <h3 className="font-semibold text-sm">Detailed Breakdown</h3>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+                <div>
+                  <p className="text-xs text-brand-muted">Debtor Concentration</p>
+                  <p className="font-semibold">{(riskSignal.debtorConcentrationBps / 100).toFixed(2)}%</p>
+                </div>
+                <div>
+                  <p className="text-xs text-brand-muted">Invoice Size Risk</p>
+                  <p className="font-semibold">{(riskSignal.invoiceSizeRiskBps / 100).toFixed(2)}%</p>
+                </div>
+                <div>
+                  <p className="text-xs text-brand-muted">Total Volume</p>
+                  <p className="font-semibold">{Number(riskSignal.totalVolume).toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-brand-muted">Last Updated</p>
+                  <p className="font-semibold">{new Date(riskSignal.updatedAt * 1000).toLocaleDateString()}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Dispute form */}
       {disputeTarget !== null && (

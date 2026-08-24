@@ -72,6 +72,11 @@ const adminLinks = [
     icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
   },
   {
+    href: '/admin/risk-signals',
+    labelKey: 'riskSignals',
+    icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z',
+  },
+  {
     href: '/admin/insurance',
     labelKey: 'insurance',
     icon: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4l5 2.18V11c0 3.61-2.44 6.99-5 8.13C9.44 17.99 7 14.61 7 11V7.18L12 5zm-1 4h2v2h-2V9zm0 4h2v4h-2v-4z',
