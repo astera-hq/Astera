@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { Keypair, TransactionBuilder } from '@stellar/stellar-sdk';
 import { AsteraClient, OracleRegistryErrors } from 'astera-sdk';
 import { OracleConfig } from './types';
@@ -195,18 +196,50 @@ export class Verifier {
   }
 
   private async verifyDocument(uri: string, expectedHash?: string): Promise<boolean> {
-    // In a real implementation, this would:
-    // 1. Download the document from the URI
-    // 2. Compute its hash
-    // 3. Compare with expectedHash
-    // 4. Return true if match, false if mismatch
-    // 5. Throw if document not found or unreachable
-
     if (!uri) {
       throw new Error('Document URI is empty');
     }
 
-    // Mock: simulate successful verification
-    return true;
+    // Fetch the document with a timeout and size limit
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+
+    let response: Response;
+    try {
+      response = await fetch(uri, {
+        signal: controller.signal,
+        headers: { Accept: '*/*' },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to fetch document from ${uri}: ${msg}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Document fetch failed with HTTP ${response.status}: ${uri}`);
+    }
+
+    // Enforce a 10 MB size limit to prevent abuse
+    const contentLength = response.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > 10 * 1024 * 1024) {
+      throw new Error(`Document exceeds 10 MB size limit: ${uri}`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length === 0) {
+      throw new Error(`Document is empty: ${uri}`);
+    }
+
+    // Compute SHA-256 hash of the document bytes
+    const computedHash = createHash('sha256').update(buffer).digest('hex');
+
+    // If no expected hash was provided, we cannot verify — reject to be safe
+    if (!expectedHash) {
+      throw new Error('No verification hash provided for document verification');
+    }
+
+    return computedHash === expectedHash;
   }
 }

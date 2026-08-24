@@ -10,6 +10,7 @@ export type { TrancheInvestorPosition } from './clients/tranche';
 export { AccessControlClient } from './clients/access_control';
 export { AuctionClient } from './clients/auction';
 export { InsuranceClient } from './clients/insurance';
+export { GovernanceClient } from './clients/governance';
 export { AsteraClient } from './astera-client';
 export * from './types';
 export * from './stellar';

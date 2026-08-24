@@ -8,6 +8,7 @@ import { ComplianceClient } from './clients/compliance';
 import { TrancheClient, type TrancheInvestorPosition } from './clients/tranche';
 import { AccessControlClient } from './clients/access_control';
 import { InsuranceClient } from './clients/insurance';
+import { GovernanceClient } from './clients/governance';
 import type {
   TranchePool,
   TrancheConfig,
@@ -46,6 +47,10 @@ import type {
   ComplianceRecord,
   ScreeningHistoryEntry,
   Role,
+  GovernanceProposal,
+  GovernanceProposalStatus,
+  ProposalCategory,
+  GovernanceConfig,
   MultiSigConfig,
   Proposal,
   ActionPayload,
@@ -68,6 +73,7 @@ export class AsteraClient {
   private trancheClient: TrancheClient;
   private accessControlClient: AccessControlClient;
   private insuranceClient: InsuranceClient;
+  private governanceClient: GovernanceClient;
 
   constructor(config: AsteraConfig) {
     this.invoiceClient = new InvoiceClient({
@@ -119,6 +125,11 @@ export class AsteraClient {
       rpcUrl: config.rpcUrl,
       network: config.network,
       contractId: config.insuranceContractId ?? '',
+    });
+    this.governanceClient = new GovernanceClient({
+      rpcUrl: config.rpcUrl,
+      network: config.network,
+      contractId: config.governanceContractId ?? '',
     });
   }
 
@@ -749,5 +760,104 @@ export class AsteraClient {
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
       this.insuranceClient.setCreditScoreContract(params),
+  };
+
+  /** #1196: on-chain governance — proposals, voting, execution. */
+  public readonly governance = {
+    getConfig: (): Promise<GovernanceConfig> =>
+      this.governanceClient.getConfig(),
+
+    getProposal: (proposalId: bigint | number): Promise<GovernanceProposal | null> =>
+      this.governanceClient.getProposal(proposalId),
+
+    listProposals: (): Promise<GovernanceProposal[]> =>
+      this.governanceClient.listProposals(),
+
+    getVotingPower: (proposalId: bigint | number, voter: string): Promise<bigint> =>
+      this.governanceClient.getVotingPower(proposalId, voter),
+
+    hasVoted: (proposalId: bigint | number, voter: string): Promise<boolean> =>
+      this.governanceClient.hasVoted(proposalId, voter),
+
+    getCategoryQuorum: (category: ProposalCategory): Promise<number> =>
+      this.governanceClient.getCategoryQuorum(category),
+
+    getAccessControl: (): Promise<string | null> =>
+      this.governanceClient.getAccessControl(),
+
+    initialize: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      shareToken: string;
+      votingPeriodSecs: bigint | number;
+      quorumBps: number;
+      passBps: number;
+      executionDelaySecs: bigint | number;
+      minShareBalance: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.governanceClient.initialize(params),
+
+    createProposal: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      proposer: string;
+      description: string;
+      targetContract: string;
+      functionName: string;
+      calldata: string;
+      category: ProposalCategory;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<bigint> =>
+      this.governanceClient.createProposal(params),
+
+    vote: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      proposalId: bigint | number;
+      voter: string;
+      inFavor: boolean;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.governanceClient.vote(params),
+
+    executeProposal: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      proposalId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.governanceClient.executeProposal(params),
+
+    cancelProposal: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      proposalId: bigint | number;
+      caller: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.governanceClient.cancelProposal(params),
+
+    updateConfig: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      quorumBps: number;
+      passBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.governanceClient.updateConfig(params),
+
+    setCategoryQuorum: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      category: ProposalCategory;
+      quorumBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.governanceClient.setCategoryQuorum(params),
+
+    setAccessControl: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      accessControl: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.governanceClient.setAccessControl(params),
   };
 }
