@@ -42,6 +42,9 @@ target/
 # Upgrade dry-run build artifacts
 .upgrade-dry-run/
 
+# Stale /sdk/ directory left behind after SDK consolidation (#1207)
+/sdk/
+
 # Contract test snapshots (generated)
 contracts/**/test_snapshots/
 
