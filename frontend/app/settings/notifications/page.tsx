@@ -43,6 +43,7 @@ function Toggle({
         type="button"
         onClick={() => onChange(!checked)}
         aria-pressed={checked}
+        aria-label={`${label} toggle, currently ${checked ? 'enabled' : 'disabled'}`}
         className={`relative inline-flex h-6 w-11 items-center rounded-full border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold ${
           checked ? 'bg-brand-gold/20 border-brand-gold' : 'bg-brand-dark border-brand-border'
         }`}
