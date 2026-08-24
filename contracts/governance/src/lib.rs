@@ -597,6 +597,15 @@ impl Governance {
         Ok(weight)
     }
 
+    /// Returns whether `voter` has already voted on the given proposal.
+    /// This is a read-only view of the persistent storage flag that `vote()`
+    /// sets; callers do not need to submit a transaction.
+    pub fn has_voted(env: Env, proposal_id: u64, voter: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::Vote(proposal_id, voter))
+    }
+
     /// Updates the default (ParameterChange) quorum and pass-threshold.
     /// Gated to `config.admin`. Does not rewrite snapshotted values on
     /// already-created proposals.

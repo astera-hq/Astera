@@ -9,4 +9,7 @@ export enum GovernanceError {
   QuorumNotMet = 8,
   InvalidProposalState = 9,
   Unauthorized = 10,
+  ProposalExpired = 11,
+  InvalidConfig = 12,
+  AccessControlNotConfigured = 13,
 }
