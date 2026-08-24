@@ -17,7 +17,7 @@ import {
   buildExpireOrderTx,
 } from '@/lib/contracts';
 import { useOpenListings, useMyListings, useOrderBook, useMyOrders } from '@/lib/cache';
-import { UseTrackTransaction } from '@/hooks/useTrackTransaction';
+import { useTrackTransaction } from '@/hooks/useTrackTransaction';
 
 const ORDER_STATUS_STYLES: Record<Order['status'], string> = {
   Open: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
@@ -46,7 +46,7 @@ const KIND_LABEL: Record<ListingKind, string> = {
 export default function SecondaryMarketPage() {
   const { wallet } = useStore();
   const [txLoading, setTxLoading] = useState(false);
-  const trackedSubmit = UseTrackTransaction('Secondary Market');
+  const trackedSubmit = useTrackTransaction('Secondary Market');
 
   const { data: openListings = [], isLoading: openLoading } = useOpenListings();
   const { data: myListings = [], isLoading: myListingsLoading } = useMyListings(
@@ -82,7 +82,7 @@ export default function SecondaryMarketPage() {
       address: wallet.address!,
     });
     if (signError) throw new Error(signError.message || 'Signing rejected.');
-    const submitter = label ? UseTrackTransaction(label) : trackedSubmit;
+    const submitter = label ? useTrackTransaction(label) : trackedSubmit;
     await submitter(signedTxXdr);
   }
 
