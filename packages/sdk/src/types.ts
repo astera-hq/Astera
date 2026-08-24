@@ -234,6 +234,8 @@ export interface AsteraConfig {
   accessControlContractId?: string;
   /** #1055: default-insurance reserve contract, if deployed. */
   insuranceContractId?: string;
+  /** Share-token contract, if deployed. */
+  shareContractId?: string;
 }
 
 // ─── #864: role-based multisig access control ──────────────────────────────

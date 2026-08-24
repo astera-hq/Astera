@@ -8,6 +8,7 @@ import { ComplianceClient } from './clients/compliance';
 import { TrancheClient, type TrancheInvestorPosition } from './clients/tranche';
 import { AccessControlClient } from './clients/access_control';
 import { InsuranceClient } from './clients/insurance';
+import { ShareClient } from './clients/share';
 import type {
   TranchePool,
   TrancheConfig,
@@ -68,6 +69,7 @@ export class AsteraClient {
   private trancheClient: TrancheClient;
   private accessControlClient: AccessControlClient;
   private insuranceClient: InsuranceClient;
+  private shareClient: ShareClient | null;
 
   constructor(config: AsteraConfig) {
     this.invoiceClient = new InvoiceClient({
@@ -120,6 +122,13 @@ export class AsteraClient {
       network: config.network,
       contractId: config.insuranceContractId ?? '',
     });
+    this.shareClient = config.shareContractId
+      ? new ShareClient({
+          rpcUrl: config.rpcUrl,
+          network: config.network,
+          contractId: config.shareContractId,
+        })
+      : null;
   }
 
   public readonly invoice = {
@@ -749,5 +758,74 @@ export class AsteraClient {
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
       this.insuranceClient.setCreditScoreContract(params),
+  };
+
+  public readonly share = {
+    balance: (id: string): Promise<bigint> =>
+      this.shareClient!.balance(id),
+
+    balanceAt: (id: string, timestamp: number): Promise<bigint> =>
+      this.shareClient!.balanceAt(id, timestamp),
+
+    totalSupply: (): Promise<bigint> =>
+      this.shareClient!.totalSupply(),
+
+    allowance: (owner: string, spender: string): Promise<bigint> =>
+      this.shareClient!.allowance(owner, spender),
+
+    decimals: (): Promise<number> =>
+      this.shareClient!.decimals(),
+
+    name: (): Promise<string> =>
+      this.shareClient!.name(),
+
+    symbol: (): Promise<string> =>
+      this.shareClient!.symbol(),
+
+    mint: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      to: string;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.shareClient!.mint(params),
+
+    burn: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      from: string;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.shareClient!.burn(params),
+
+    transfer: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      from: string;
+      to: string;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.shareClient!.transfer(params),
+
+    approve: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      owner: string;
+      spender: string;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.shareClient!.approve(params),
+
+    transferFrom: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      spender: string;
+      from: string;
+      to: string;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.shareClient!.transferFrom(params),
   };
 }

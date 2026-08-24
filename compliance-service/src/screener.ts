@@ -7,6 +7,49 @@
 
 import type { RiskTier, ScreenDecision, ScreenResult } from './types';
 
+const VALID_STATUSES: readonly ScreenDecision[] = [
+  'Unscreened', 'Cleared', 'Flagged', 'Blocked', 'PendingReview',
+];
+const VALID_RISK_TIERS: readonly RiskTier[] = ['Low', 'Medium', 'High'];
+
+function validateScreenResult(body: unknown): ScreenResult {
+  if (body === null || typeof body !== 'object') {
+    throw new Error('upstream screening provider returned non-object response');
+  }
+  const obj = body as Record<string, unknown>;
+
+  if (typeof obj.address !== 'string' || obj.address.length === 0) {
+    throw new Error('upstream screening provider returned invalid or missing "address"');
+  }
+  if (!VALID_STATUSES.includes(obj.status as ScreenDecision)) {
+    throw new Error(
+      `upstream screening provider returned invalid "status": ${JSON.stringify(obj.status)}`,
+    );
+  }
+  if (typeof obj.reasonCode !== 'number' || !Number.isFinite(obj.reasonCode)) {
+    throw new Error(
+      `upstream screening provider returned invalid "reasonCode": ${JSON.stringify(obj.reasonCode)}`,
+    );
+  }
+  if (!VALID_RISK_TIERS.includes(obj.riskTier as RiskTier)) {
+    throw new Error(
+      `upstream screening provider returned invalid "riskTier": ${JSON.stringify(obj.riskTier)}`,
+    );
+  }
+  if (typeof obj.notes !== 'string') {
+    throw new Error('upstream screening provider returned invalid or missing "notes"');
+  }
+
+  return {
+    address: obj.address,
+    status: obj.status as ScreenDecision,
+    reasonCode: obj.reasonCode,
+    riskTier: obj.riskTier as RiskTier,
+    matchedList: typeof obj.matchedList === 'string' ? obj.matchedList : undefined,
+    notes: obj.notes,
+  };
+}
+
 /** Demo fixture — Stellar-like public keys used only for local testing. */
 export const SANCTIONS_FIXTURE: ReadonlyArray<{ id: string; note: string }> = [
   { id: 'SANCTIONED_ENTITY_ALPHA', note: 'Demo SDN entry A' },
@@ -59,7 +102,8 @@ export class HttpScreenerProvider implements ScreenerProvider {
       if (!res.ok) {
         throw new Error(`upstream screening provider returned ${res.status}`);
       }
-      return (await res.json()) as ScreenResult;
+      const body = await res.json();
+      return validateScreenResult(body);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error(`upstream screening provider timed out after ${this.timeoutMs}ms`);
