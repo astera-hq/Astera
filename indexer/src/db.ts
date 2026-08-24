@@ -324,16 +324,12 @@ function toBigInt(v: unknown): bigint {
 /**
  * Recompute the tranche_apy table from scratch off the indexed tranche event
  * stream. Idempotent: safe to call after every ingest batch.
+ * #1171: paginate through all events, not just the first 100k.
  */
 export async function recomputeTrancheApy(
   pool: Pool,
   updatedAt: string,
 ): Promise<void> {
-  const { rows } = await pool.query(
-    `SELECT * FROM events WHERE contract_type = 'tranche' ORDER BY ledger_sequence ASC LIMIT 100000`,
-  );
-  const ordered = rows.map(rowToEvent);
-
   // token -> tranche -> accumulator
   type Acc = { principal: bigint; ret: bigint; closed: number };
   const agg = new Map<string, { Senior: Acc; Junior: Acc }>();
@@ -356,51 +352,67 @@ export async function recomputeTrancheApy(
     { token: string; senior: bigint; junior: bigint }
   >();
 
-  for (const evt of ordered) {
-    const v = evt.value;
-    if (!Array.isArray(v) || v.length < 4) continue;
-    const invoiceId = String(v[0]);
-    const token = typeof v[1] === "string" ? v[1] : String(v[1]);
+  // Paginate through all tranche events in chronological order
+  const pageSize = 10000;
+  let offset = 0;
+  let hasMoreEvents = true;
 
-    switch (evt.eventType) {
-      case "fund": {
-        deployed.set(invoiceId, {
-          token,
-          senior: toBigInt(v[2]),
-          junior: toBigInt(v[3]),
-        });
-        break;
+  while (hasMoreEvents) {
+    const { rows } = await pool.query(
+      `SELECT * FROM events WHERE contract_type = 'tranche' ORDER BY ledger_sequence ASC LIMIT $1 OFFSET $2`,
+      [pageSize, offset],
+    );
+    hasMoreEvents = rows.length === pageSize;
+    offset += pageSize;
+
+    const ordered = rows.map(rowToEvent);
+
+    for (const evt of ordered) {
+      const v = evt.value;
+      if (!Array.isArray(v) || v.length < 4) continue;
+      const invoiceId = String(v[0]);
+      const token = typeof v[1] === "string" ? v[1] : String(v[1]);
+
+      switch (evt.eventType) {
+        case "fund": {
+          deployed.set(invoiceId, {
+            token,
+            senior: toBigInt(v[2]),
+            junior: toBigInt(v[3]),
+          });
+          break;
+        }
+        case "repay": {
+          const dep = deployed.get(invoiceId);
+          if (!dep) break;
+          const b = bucket(token);
+          b.Senior.principal += dep.senior;
+          b.Senior.ret += toBigInt(v[2]) - dep.senior;
+          b.Senior.closed += 1;
+          b.Junior.principal += dep.junior;
+          b.Junior.ret += toBigInt(v[3]) - dep.junior;
+          b.Junior.closed += 1;
+          deployed.delete(invoiceId);
+          break;
+        }
+        case "default": {
+          const dep = deployed.get(invoiceId);
+          const b = bucket(token);
+          // default value tuple is (invoice_id, token, junior_loss, senior_loss)
+          const juniorLoss = toBigInt(v[2]);
+          const seniorLoss = toBigInt(v[3]);
+          b.Junior.principal += dep ? dep.junior : juniorLoss;
+          b.Junior.ret += -juniorLoss;
+          b.Junior.closed += 1;
+          b.Senior.principal += dep ? dep.senior : seniorLoss;
+          b.Senior.ret += -seniorLoss;
+          b.Senior.closed += 1;
+          deployed.delete(invoiceId);
+          break;
+        }
+        default:
+          break;
       }
-      case "repay": {
-        const dep = deployed.get(invoiceId);
-        if (!dep) break;
-        const b = bucket(token);
-        b.Senior.principal += dep.senior;
-        b.Senior.ret += toBigInt(v[2]) - dep.senior;
-        b.Senior.closed += 1;
-        b.Junior.principal += dep.junior;
-        b.Junior.ret += toBigInt(v[3]) - dep.junior;
-        b.Junior.closed += 1;
-        deployed.delete(invoiceId);
-        break;
-      }
-      case "default": {
-        const dep = deployed.get(invoiceId);
-        const b = bucket(token);
-        // default value tuple is (invoice_id, token, junior_loss, senior_loss)
-        const juniorLoss = toBigInt(v[2]);
-        const seniorLoss = toBigInt(v[3]);
-        b.Junior.principal += dep ? dep.junior : juniorLoss;
-        b.Junior.ret += -juniorLoss;
-        b.Junior.closed += 1;
-        b.Senior.principal += dep ? dep.senior : seniorLoss;
-        b.Senior.ret += -seniorLoss;
-        b.Senior.closed += 1;
-        deployed.delete(invoiceId);
-        break;
-      }
-      default:
-        break;
     }
   }
 
@@ -488,35 +500,47 @@ export interface SmeRiskSignalRow {
  * debtor's share of an SME's total created volume; `invoice_size_risk_bps`
  * is the share of volume sitting in invoices at least 3x the SME's own mean
  * invoice size.
+ * #1171: paginate through all events, not just the first 100k.
  */
 export async function recomputeSmeRiskSignals(
   pool: Pool,
   updatedAt: string,
 ): Promise<void> {
-  const { rows } = await pool.query(
-    `SELECT * FROM events WHERE contract_type = 'invoice' AND event_type = 'created' ORDER BY ledger_sequence ASC LIMIT 100000`,
-  );
-  const ordered = rows.map(rowToEvent);
-
   type Acc = { total: bigint; amounts: bigint[]; byDebtor: Map<string, bigint> };
   const bySme = new Map<string, Acc>();
 
-  for (const evt of ordered) {
-    const v = evt.value;
-    if (!Array.isArray(v) || v.length < 2) continue;
-    const owner = String(v[1] ?? "");
-    if (!owner) continue;
-    const amount = toBigInt(v[2]);
-    const debtor = v.length > 5 ? String(v[5] ?? "unknown") : "unknown";
+  // Paginate through all invoice created events in chronological order
+  const pageSize = 10000;
+  let offset = 0;
+  let hasMoreEvents = true;
 
-    let acc = bySme.get(owner);
-    if (!acc) {
-      acc = { total: 0n, amounts: [], byDebtor: new Map() };
-      bySme.set(owner, acc);
+  while (hasMoreEvents) {
+    const { rows } = await pool.query(
+      `SELECT * FROM events WHERE contract_type = 'invoice' AND event_type = 'created' ORDER BY ledger_sequence ASC LIMIT $1 OFFSET $2`,
+      [pageSize, offset],
+    );
+    hasMoreEvents = rows.length === pageSize;
+    offset += pageSize;
+
+    const ordered = rows.map(rowToEvent);
+
+    for (const evt of ordered) {
+      const v = evt.value;
+      if (!Array.isArray(v) || v.length < 2) continue;
+      const owner = String(v[1] ?? "");
+      if (!owner) continue;
+      const amount = toBigInt(v[2]);
+      const debtor = v.length > 5 ? String(v[5] ?? "unknown") : "unknown";
+
+      let acc = bySme.get(owner);
+      if (!acc) {
+        acc = { total: 0n, amounts: [], byDebtor: new Map() };
+        bySme.set(owner, acc);
+      }
+      acc.total += amount;
+      acc.amounts.push(amount);
+      acc.byDebtor.set(debtor, (acc.byDebtor.get(debtor) ?? 0n) + amount);
     }
-    acc.total += amount;
-    acc.amounts.push(amount);
-    acc.byDebtor.set(debtor, (acc.byDebtor.get(debtor) ?? 0n) + amount);
   }
 
   const client = await pool.connect();

@@ -198,6 +198,7 @@ async function pollLoop(pool: Pool, state: { lastProcessedLedger: string }) {
 
         // #1039: reorg detection — check the highest ledger in this batch
         // against the hash chain we've recorded so far.
+        // #1170: record hashes for all ledgers in the batch to avoid gaps in the chain.
         const ledgersInBatch = Array.from(
           new Set(events.map((e) => e.ledgerSequence)),
         ).sort((a, b) => a - b);
@@ -223,7 +224,17 @@ async function pollLoop(pool: Pool, state: { lastProcessedLedger: string }) {
             cursor = ledgerToCursor(rollbackPoint);
             state.lastProcessedLedger = rollbackPoint.toString();
           } else {
+            // Record hash for the tip ledger first
             await recordLedgerHash(pool, meta);
+            // Then record hashes for any earlier ledgers in this batch that aren't yet recorded
+            for (const ledgerSeq of ledgersInBatch) {
+              if (ledgerSeq < tipLedger) {
+                const ledgerMeta = await fetchLedgerMeta(horizon, ledgerSeq);
+                if (ledgerMeta) {
+                  await recordLedgerHash(pool, ledgerMeta);
+                }
+              }
+            }
           }
         }
 
@@ -261,9 +272,12 @@ async function pollLoop(pool: Pool, state: { lastProcessedLedger: string }) {
       // detected: `cursor` has already been rewound to the rollback point
       // above, and this batch's paging_token belongs to the discarded,
       // now-orphaned chain — advancing past it would undo the rewind.
+      // #1168: only sleep after draining all available pages from Horizon.
+      let hasMorePages = false;
       if (!reorgDetected && response.records && response.records.length > 0) {
         const lastRecord = response.records[response.records.length - 1];
         cursor = lastRecord.paging_token || cursor;
+        hasMorePages = true; // Continue immediately to fetch next page
       }
 
       // #1039: lag metric — how far behind the chain tip we are.
@@ -283,7 +297,10 @@ async function pollLoop(pool: Pool, state: { lastProcessedLedger: string }) {
 
       consecutiveFailures = 0;
 
-      await new Promise((resolve) => setTimeout(resolve, POLLING_INTERVAL_MS));
+      // Only sleep when we've drained all pages; continue immediately if more are available
+      if (!hasMorePages) {
+        await new Promise((resolve) => setTimeout(resolve, POLLING_INTERVAL_MS));
+      }
     } catch (error) {
       consecutiveFailures++;
       pollErrorsTotal.inc();

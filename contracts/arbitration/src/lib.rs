@@ -132,9 +132,8 @@ pub enum ArbitrationError {
     /// `select_jurors` called again on a case whose re-draws are already
     /// exhausted — `admin_resolve_no_quorum` should be used instead.
     RetriesExhausted = 26,
-    DuplicateOpenCase = 27,
-    EvidenceLimitReached = 28,
-    EvidenceHashTooLong = 29,
+    /// `open_case` called with the same address as both claimant and respondent.
+    ClaimantCannotBeRespondent = 27,
 }
 
 #[contracttype]
@@ -600,20 +599,8 @@ impl ArbitrationContract {
         if amount <= 0 {
             return Err(ArbitrationError::InvalidAmount);
         }
-        if let Some(existing_case_id) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, u64>(&DataKey::InvoiceCase(invoice_id))
-        {
-            if let Some(existing_case) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, DisputeCase>(&DataKey::Case(existing_case_id))
-            {
-                if existing_case.status != CaseStatus::Resolved {
-                    return Err(ArbitrationError::DuplicateOpenCase);
-                }
-            }
+        if claimant == respondent {
+            return Err(ArbitrationError::ClaimantCannotBeRespondent);
         }
 
         let config = Self::load_config(&env)?;
