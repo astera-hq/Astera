@@ -121,6 +121,17 @@ export class CreditScoreClient extends BaseClient {
     return creditScoreResponseFromScVal(raw);
   }
 
+  /**
+   * #1201 — batch-read helper that fetches credit scores for multiple SMEs
+   * in parallel. Unlike InvoiceClient/PoolClient which have on-chain
+   * get_multiple_* methods, the credit_score contract only exposes
+   * get_credit_score(sme). This helper issues concurrent RPC calls and
+   * returns results in the same order as `smes`.
+   */
+  async getMultipleCreditScores(smes: string[]): Promise<CreditScoreResponse[]> {
+    return Promise.all(smes.map((sme) => this.getCreditScore(sme)));
+  }
+
   async simulateScoreWithAttestations(
     sme: string,
     hypothetical: Array<{ weightBps: number; scoreContribution: number }>,
