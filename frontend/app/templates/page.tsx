@@ -47,7 +47,7 @@ export default function TemplatesPage() {
                 <div>
                   <h2 className="font-semibold">{template.name}</h2>
                   <p className="text-sm text-brand-muted">
-                    ${template.amount.toLocaleString()} {template.token} · due in {template.dueDays}{' '}
+                    {template.amount.toLocaleString()} {template.token} · due in {template.dueDays}{' '}
                     days
                   </p>
                   <p className="text-sm text-brand-muted">
