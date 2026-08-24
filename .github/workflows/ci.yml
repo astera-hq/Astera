@@ -38,7 +38,7 @@ jobs:
         timeout-minutes: 10
       - name: Run fuzz tests (short)
         timeout-minutes: 10
-        run: cargo test --locked -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
+        run: cargo test --locked -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests -p tranche --test fuzz_tests
       - name: Run integration tests
         timeout-minutes: 15
         run: cargo test --locked -p integration-tests --test integration_tests

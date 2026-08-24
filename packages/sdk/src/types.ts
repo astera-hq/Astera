@@ -542,3 +542,48 @@ export interface ArbitrationConfig {
   lopsidedConfidenceBps: number;
   maxRetries: number;
 }
+
+// ─── #1196: governance contract ─────────────────────────────────────────────
+// Mirrors contracts/governance/src/lib.rs's public types.
+
+export type GovernanceProposalStatus =
+  | 'Active'
+  | 'Passed'
+  | 'Rejected'
+  | 'Executed'
+  | 'Cancelled'
+  | 'Expired';
+
+export type ProposalCategory = 'ParameterChange' | 'Treasury' | 'Critical';
+
+export interface GovernanceProposal {
+  id: bigint;
+  proposer: string;
+  description: string;
+  targetContract: string;
+  functionName: string;
+  calldata: string;
+  votesFor: bigint;
+  votesAgainst: bigint;
+  status: GovernanceProposalStatus;
+  createdAt: bigint;
+  votingEndsAt: bigint;
+  executionDelay: bigint;
+  snapshotSupply: bigint;
+  passedAt: bigint;
+  category: ProposalCategory;
+  quorumBps: number;
+  passBps: number;
+}
+
+export interface GovernanceConfig {
+  admin: string;
+  shareToken: string;
+  votingPeriodSecs: bigint;
+  quorumBps: number;
+  passBps: number;
+  executionDelaySecs: bigint;
+  minShareBalance: bigint;
+  treasuryQuorumBps: number;
+  criticalQuorumBps: number;
+}
