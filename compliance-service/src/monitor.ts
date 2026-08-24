@@ -14,6 +14,9 @@ interface DepositTick {
 /** #982: called when a tracked subject's clearance has reached its rescreening interval. */
 export type RescreenHandler = (address: string) => Promise<void>;
 
+/** Maximum number of alerts retained in memory. */
+const MAX_ALERTS = 1_000;
+
 export class Monitor {
   private readonly config: ComplianceConfig;
   private readonly keypair: Keypair;
@@ -146,18 +149,20 @@ export class Monitor {
   }
 
   private async handleRecord(rec: Record<string, unknown>): Promise<void> {
-    // Best-effort: look for invoke_host_function ops that touch the pool.
     const type = String(rec.type ?? '');
     if (type !== 'invoke_host_function') return;
 
     const functionName = String(rec.function ?? '');
-    if (!functionName.includes('HostFunction')) {
-      // Horizon may expose different shapes; still try topic-like fields.
-    }
+    const sourceAccount = String(rec.source_account ?? '');
 
-    // Parse a lightweight "deposit" signal from transaction memo / envelope is
-    // unreliable without full event decoding. For the demo service we also
-    // expose recordDeposit() for the REST surface / tests.
+    // Best-effort heuristic: if the function name contains "withdraw", treat
+    // this as a withdrawal event.  Amount is not reliably available from the
+    // Horizon operation summary alone (would require full event decoding), so
+    // we pass 0 — the rapid-cycle check only needs the *timing* of the
+    // withdrawal, not its size.
+    if (functionName.toLowerCase().includes('withdraw') && sourceAccount) {
+      await this.recordWithdraw(sourceAccount, 0n);
+    }
   }
 
   /** Called by REST or internal hooks when a deposit is observed. */
@@ -205,6 +210,9 @@ export class Monitor {
       pattern,
     };
     this.alerts.push(alert);
+    if (this.alerts.length > MAX_ALERTS) {
+      this.alerts.splice(0, this.alerts.length - MAX_ALERTS);
+    }
     console.log(`[monitor] alert ${pattern} for ${address}: ${reason}`);
 
     try {
