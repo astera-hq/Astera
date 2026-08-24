@@ -19,8 +19,16 @@ export async function computeCommitHash(vote: boolean, salt: Uint8Array): Promis
   const preimage = new Uint8Array(1 + salt.length);
   preimage[0] = vote ? 1 : 0;
   preimage.set(salt, 1);
-  const digest = await crypto.subtle.digest('SHA-256', preimage);
-  return new Uint8Array(digest);
+
+  // #1200: Fall back to Node's crypto module when Web Crypto APIs are unavailable
+  // (older Node runtimes, test environments, etc.).
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    const digest = await crypto.subtle.digest('SHA-256', preimage);
+    return new Uint8Array(digest);
+  }
+  const nodeCrypto = await import('node:crypto');
+  const hash = nodeCrypto.createHash('sha256').update(Buffer.from(preimage)).digest();
+  return new Uint8Array(hash);
 }
 
 /// Generates a fresh random 32-byte salt for a commit-reveal vote. Callers
@@ -29,7 +37,16 @@ export async function computeCommitHash(vote: boolean, salt: Uint8Array): Promis
 /// revealed and correctly counted.
 export function generateSalt(): Uint8Array {
   const salt = new Uint8Array(32);
-  crypto.getRandomValues(salt);
+
+  // #1200: Fall back to Node's crypto module when Web Crypto APIs are unavailable.
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(salt);
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const nodeCrypto = require('node:crypto');
+    const bytes = nodeCrypto.randomBytes(32);
+    salt.set(bytes);
+  }
   return salt;
 }
 

@@ -8,7 +8,7 @@ import { submitTx, type TransactionProgress } from '@/lib/stellar';
  *
  * @param label - Human-readable label shown in the status tracker (e.g. "Deposit 100 USDC")
  */
-export function UseTrackTransaction(label: string) {
+export function useTrackTransaction(label: string) {
   const addTracked = useStore((s) => s.addTrackedTransaction);
   const updateTracked = useStore((s) => s.updateTrackedTransaction);
 
