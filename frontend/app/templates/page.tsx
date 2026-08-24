@@ -7,13 +7,23 @@ import {
   loadInvoiceTemplates,
   type InvoiceTemplate,
 } from '@/lib/invoiceTemplates';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
 
 export default function TemplatesPage() {
   const [templates, setTemplates] = useState<InvoiceTemplate[]>([]);
-  useEffect(() => setTemplates(loadInvoiceTemplates()), []);
-  const remove = (id: string) => {
-    deleteInvoiceTemplate(id);
+  const [templateToDelete, setTemplateToDelete] = useState<string | null>(null);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setTemplates(loadInvoiceTemplates());
+  }, []);
+
+  const confirmDelete = () => {
+    if (templateToDelete) {
+      deleteInvoiceTemplate(templateToDelete);
+      setTemplates(loadInvoiceTemplates());
+      setTemplateToDelete(null);
+    }
   };
   return (
     <main className="min-h-screen px-6 pb-16 pt-24">
@@ -59,7 +69,7 @@ export default function TemplatesPage() {
                     Use template
                   </Link>
                   <button
-                    onClick={() => remove(template.id)}
+                    onClick={() => setTemplateToDelete(template.id)}
                     className="text-red-400 hover:underline"
                   >
                     Delete
@@ -69,6 +79,16 @@ export default function TemplatesPage() {
             ))}
           </div>
         )}
+
+        <ConfirmActionModal
+          isOpen={!!templateToDelete}
+          title="Delete Template"
+          description="Are you sure you want to delete this invoice template? This action cannot be undone."
+          confirmLabel="Delete Template"
+          onConfirm={confirmDelete}
+          onCancel={() => setTemplateToDelete(null)}
+          variant="destructive"
+        />
       </div>
     </main>
   );

@@ -670,10 +670,10 @@ export default function InvoiceDetailPage() {
     setActionLoading(true);
     try {
       const xdr = await buildRaiseDisputeTx({
-        borrower: wallet.address,
+        borrower: wallet.address as any,
         invoiceId: invoice.id,
         evidenceHash: defaultDisputeEvidence,
-        respondent,
+        respondent: respondent as any,
       });
       const freighter = await import('@stellar/freighter-api');
       const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
@@ -702,7 +702,7 @@ export default function InvoiceDetailPage() {
     setActionLoading(true);
     try {
       const xdr = await buildSubmitEvidenceTx({
-        submitter: wallet.address,
+        submitter: wallet.address as any,
         caseId: arbitrationCase.id,
         evidenceHash: newEvidenceHash,
       });

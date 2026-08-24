@@ -141,7 +141,7 @@ export default function AdminNav() {
             <Link
               key={link.href}
               href={link.href}
-              title={t(link.labelKey)}
+              title={t(link.labelKey as string)}
               onClick={() => setOpen(false)}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200
                 md:justify-center md:px-2
@@ -159,7 +159,7 @@ export default function AdminNav() {
               >
                 <path d={link.icon} />
               </svg>
-              <span className="md:hidden lg:block">{t(link.labelKey)}</span>
+              <span className="md:hidden lg:block">{t(link.labelKey as string)}</span>
             </Link>
           );
         })}
