@@ -345,6 +345,15 @@ export interface Attestation {
   status: AttestationStatus;
 }
 
+/** Indexer risk signal data from GET /credit-score/:sme/risk-signals. */
+export interface RiskSignal {
+  sme: StellarAddress;
+  debtorConcentrationBps: number;
+  invoiceSizeRiskBps: number;
+  totalVolume: string;
+  updatedAt: number;
+}
+
 /** Full `get_credit_score` response, including the #868 internal/external blend. */
 export interface FullCreditScore {
   sme: StellarAddress;

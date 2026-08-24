@@ -2706,6 +2706,35 @@ export async function buildResolveAttestationDisputeTx(params: {
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
 }
 
+export async function buildSubmitRiskSignalTx(params: {
+  admin: string;
+  sme: string;
+  debtorConcentrationBps: number;
+  invoiceSizeRiskBps: number;
+}): Promise<string> {
+  const account = await getRpcAccount(params.admin);
+  const contract = new Contract(CREDIT_SCORE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(
+      contract.call(
+        'submit_risk_signal',
+        new Address(params.admin).toScVal(),
+        new Address(params.sme).toScVal(),
+        nativeToScVal(params.debtorConcentrationBps, { type: 'u32' }),
+        nativeToScVal(params.invoiceSizeRiskBps, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+  return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
 // ---- Governance ----
 
 export async function getGovernanceConfig(): Promise<GovernanceConfig | null> {
