@@ -223,6 +223,13 @@ export class InsuranceClient extends BaseClient {
     return raw ? premiumConfigFromRaw(raw as Record<string, unknown>) : null;
   }
 
+  async getCreditScoreContract(): Promise<string | null> {
+    const sim = await this.simulate('get_credit_score_contract', []);
+    if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+    const raw = scValToNative(sim.result!.retval);
+    return raw ? String(raw) : null;
+  }
+
   async getMinReserveAmount(token: string): Promise<bigint> {
     const sim = await this.simulate('get_min_reserve_amount', [new Address(token).toScVal()]);
     if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
