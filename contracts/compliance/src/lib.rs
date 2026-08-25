@@ -56,6 +56,8 @@ pub enum ComplianceError {
     // #1042: a `*_via_ac` entrypoint was called but no `access_control`
     // contract has been configured via `set_access_control` yet.
     AccessControlNotConfigured = 15,
+    // #1038: governance contract not configured
+    GovernanceNotConfigured = 16,
 }
 
 #[contracttype]
@@ -144,6 +146,8 @@ pub enum DataKey {
     // #1042: multisig trust anchor. Additive — untouched, this stays unset
     // and every admin-gated entrypoint above works exactly as before.
     AccessControl,
+    // #1038: governance contract address for governance-gated parameter changes
+    Governance,
 }
 
 const EVT: Symbol = symbol_short!("COMPLY");
@@ -764,6 +768,34 @@ impl ComplianceContract {
         env.storage().instance().get(&DataKey::AccessControl)
     }
 
+    // #1038: Bootstrap the governance contract address. Admin-gated one-time setup.
+    pub fn set_governance_address(
+        env: Env,
+        admin: Address,
+        governance: Address,
+    ) -> Result<(), ComplianceError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ComplianceError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(ComplianceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Governance, &governance);
+        env.events()
+            .publish((EVT, symbol_short!("set_gov")), (admin, governance));
+        Ok(())
+    }
+
+    // #1038: Get the configured governance contract address.
+    pub fn get_governance_address(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Governance)
+    }
+
     /// #1042: rotates the trust anchor itself through the currently
     /// configured `access_control` contract rather than the legacy admin
     /// key.
@@ -794,6 +826,46 @@ impl ComplianceContract {
         env.storage().instance().set(&DataKey::Paused, &paused);
         env.events()
             .publish((EVT, symbol_short!("ac_pause")), (access_control, paused));
+        Ok(())
+    }
+
+    // ---- #1038: Governance-gated parameter changes ----
+
+    // #1038: Set rescreening interval via governance proposal.
+    pub fn set_rescreening_interval_via_governance(
+        env: Env,
+        governance: Address,
+        secs: u64,
+    ) -> Result<(), ComplianceError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        if secs < 86_400 {
+            return Err(ComplianceError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RescreeningInterval, &secs);
+        env.events()
+            .publish((EVT, symbol_short!("gov_rescreen")), (governance, secs));
+        Ok(())
+    }
+
+    // #1038: Set screener timelock via governance proposal.
+    pub fn set_screener_timelock_via_governance(
+        env: Env,
+        governance: Address,
+        secs: u64,
+    ) -> Result<(), ComplianceError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        if secs < 3_600 {
+            return Err(ComplianceError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ScreenerTimelockSecs, &secs);
+        env.events()
+            .publish((EVT, symbol_short!("gov_timelock")), (governance, secs));
         Ok(())
     }
 
@@ -880,6 +952,19 @@ impl ComplianceContract {
             .instance()
             .get(&DataKey::AccessControl)
             .ok_or(ComplianceError::AccessControlNotConfigured)?;
+        if caller != &configured {
+            return Err(ComplianceError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    // #1038: Helper function to verify the caller is the configured governance contract
+    fn require_governance(env: &Env, caller: &Address) -> Result<(), ComplianceError> {
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Governance)
+            .ok_or(ComplianceError::GovernanceNotConfigured)?;
         if caller != &configured {
             return Err(ComplianceError::Unauthorized);
         }

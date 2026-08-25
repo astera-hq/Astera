@@ -22,3 +22,6 @@ path = "tests/lib.rs"
 name = "access_control_tests"
 path = "tests/access_control_tests.rs"
 
+[[test]]
+name = "governance_flow_tests"
+path = "tests/governance_flow_tests.rs"

@@ -80,8 +80,8 @@ pub enum OracleRegistryError {
     // #1042: a `*_via_ac` entrypoint was called but no `access_control`
     // contract has been configured via `set_access_control` yet.
     AccessControlNotConfigured = 25,
-    // #1143: withdraw_slashed_funds requires treasury to be unconfigured.
-    TreasuryAlreadyConfigured = 26,
+    // #1038: governance contract not configured
+    GovernanceNotConfigured = 26,
 }
 
 #[contracttype]
@@ -180,6 +180,8 @@ pub enum DataKey {
     // #1042: multisig trust anchor. Additive — untouched, this stays unset
     // and every admin-gated entrypoint above works exactly as before.
     AccessControl,
+    // #1038: governance contract address for governance-gated parameter changes
+    Governance,
 }
 
 const EVT: Symbol = symbol_short!("ORACLE");
@@ -1019,6 +1021,27 @@ impl OracleRegistryContract {
         env.storage().instance().get(&DataKey::AccessControl)
     }
 
+     // #1038: Bootstrap the governance contract address. Admin-gated one-time setup.
+    pub fn set_governance_address(
+        env: Env,
+        admin: Address,
+        governance: Address,
+    ) -> Result<(), OracleRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::Governance, &governance);
+        env.events()
+            .publish((EVT, symbol_short!("set_gov")), (admin, governance));
+        Ok(())
+    }
+
+    // #1038: Get the configured governance contract address.
+    pub fn get_governance_address(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Governance)
+    }
+
     /// #1042: rotates the trust anchor itself through the currently
     /// configured `access_control` contract rather than the legacy admin
     /// key, so a compromised admin key alone can no longer repoint or strip
@@ -1138,6 +1161,103 @@ impl OracleRegistryContract {
         Self::admin_resolve_round_internal(&env, invoice_id, approved, reason, access_control)
     }
 
+    // ---- #1038: Governance-gated parameter changes ----
+
+    // #1038: Set invoice contract via governance proposal.
+    pub fn set_invoice_contract_via_governance(
+        env: Env,
+        governance: Address,
+        invoice_contract: Address,
+    ) -> Result<(), OracleRegistryError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &invoice_contract);
+        env.events()
+            .publish((EVT, symbol_short!("gov_inv")), (governance, invoice_contract));
+        Ok(())
+    }
+
+    // #1038: Set treasury via governance proposal.
+    pub fn set_treasury_via_governance(
+        env: Env,
+        governance: Address,
+        treasury: Option<Address>,
+    ) -> Result<(), OracleRegistryError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        let mut config = Self::load_config(&env)?;
+        config.treasury = treasury;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("gov_treas")), (governance, treasury));
+        Ok(())
+    }
+
+    // #1038: Set registry config via governance proposal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_registry_config_via_governance(
+        env: Env,
+        governance: Address,
+        min_stake: i128,
+        required_votes: u32,
+        quorum_bps: u32,
+        round_duration_secs: u64,
+        deregister_cooldown_secs: u64,
+    ) -> Result<(), OracleRegistryError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        if min_stake <= 0
+            || required_votes == 0
+            || quorum_bps == 0
+            || quorum_bps > 10_000
+            || round_duration_secs == 0
+        {
+            return Err(OracleRegistryError::InvalidConfig);
+        }
+        let mut config = Self::load_config(&env)?;
+        config.min_stake = min_stake;
+        config.required_votes = required_votes;
+        config.quorum_bps = quorum_bps;
+        config.round_duration_secs = round_duration_secs;
+        config.deregister_cooldown_secs = deregister_cooldown_secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("gov_cfg")), governance);
+        Ok(())
+    }
+
+    // #1038: Set quorum tiers via governance proposal.
+    pub fn set_quorum_tiers_via_governance(
+        env: Env,
+        governance: Address,
+        tiers: Vec<QuorumTier>,
+    ) -> Result<(), OracleRegistryError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        if tiers.is_empty() {
+            return Err(OracleRegistryError::InvalidQuorumTiers);
+        }
+        let mut prev_threshold: Option<i128> = None;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if tier.quorum_bps == 0 || tier.quorum_bps > 10_000 {
+                return Err(OracleRegistryError::InvalidQuorumTiers);
+            }
+            if let Some(prev) = prev_threshold {
+                if tier.min_invoice_amount <= prev {
+                    return Err(OracleRegistryError::InvalidQuorumTiers);
+                }
+            }
+            prev_threshold = Some(tier.min_invoice_amount);
+        }
+        env.storage().instance().set(&DataKey::QuorumTiers, &tiers);
+        env.events()
+            .publish((EVT, symbol_short!("gov_quorum")), (governance, tiers.len()));
+        Ok(())
+    }
+
     fn require_admin(env: &Env, admin: &Address) -> Result<(), OracleRegistryError> {
         let stored: Address = env
             .storage()
@@ -1156,6 +1276,19 @@ impl OracleRegistryContract {
             .instance()
             .get(&DataKey::AccessControl)
             .ok_or(OracleRegistryError::AccessControlNotConfigured)?;
+        if caller != &configured {
+            return Err(OracleRegistryError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    // #1038: Helper function to verify the caller is the configured governance contract
+    fn require_governance(env: &Env, caller: &Address) -> Result<(), OracleRegistryError> {
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Governance)
+            .ok_or(OracleRegistryError::GovernanceNotConfigured)?;
         if caller != &configured {
             return Err(OracleRegistryError::Unauthorized);
         }
