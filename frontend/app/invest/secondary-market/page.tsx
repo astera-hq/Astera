@@ -602,8 +602,8 @@ export default function SecondaryMarketPage() {
                             <td className="px-4 py-2">{formatOrderPrice(o.price)}</td>
                             <td className="px-4 py-2">
                               {bookKind === 'CoFunding'
-                                ? `${(Number(o.remaining) / 100).toFixed(2)}%`
-                                : formatUSDC(o.remaining)}
+                                ? `${(Number(o.quantity) / 100).toFixed(2)}%`
+                                : formatUSDC(o.quantity)}
                             </td>
                           </tr>
                         ))}
@@ -627,8 +627,8 @@ export default function SecondaryMarketPage() {
                             <td className="px-4 py-2">{formatOrderPrice(o.price)}</td>
                             <td className="px-4 py-2">
                               {bookKind === 'CoFunding'
-                                ? `${(Number(o.remaining) / 100).toFixed(2)}%`
-                                : formatUSDC(o.remaining)}
+                                ? `${(Number(o.quantity) / 100).toFixed(2)}%`
+                                : formatUSDC(o.quantity)}
                             </td>
                           </tr>
                         ))}

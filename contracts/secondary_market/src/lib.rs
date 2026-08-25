@@ -205,6 +205,19 @@ pub struct Order {
     pub status: OrderStatus,
 }
 
+/// One resting order in `get_order_book`'s depth view (#1133): its id,
+/// per-unit price (scaled by `PRICE_SCALE`, same units as `Order.price`),
+/// and remaining quantity (bps of CoFundShare for `CoFunding` books, raw
+/// token amount for `SingleFunded` books). Lets callers render a real book
+/// without a follow-up `get_order` call per id.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrderBookLevel {
+    pub order_id: u64,
+    pub price: i128,
+    pub quantity: u64,
+}
+
 // Bundles `place_order`'s params (matches `OpenCoFundingRequest`'s existing
 // role of keeping multi-field contract entrypoints under clippy's
 // too-many-arguments threshold). `owner` stays a separate top-level param
@@ -1108,10 +1121,16 @@ impl SecondaryMarket {
         load_order(&env, order_id)
     }
 
-    /// Current resting order IDs for an invoice's order book, as
-    /// `(bid_ids, ask_ids)` in insertion (time-priority) order. Bounded to
-    /// `MAX_ORDERS_PER_BOOK_SIDE` per side.
-    pub fn get_order_book(env: Env, invoice_id: u64, kind: ListingKind) -> (Vec<u64>, Vec<u64>) {
+    /// Current resting depth for an invoice's order book, as
+    /// `(bid_levels, ask_levels)` in insertion (time-priority) order. Each
+    /// level carries the order's id, price, and remaining quantity so callers
+    /// can render a real book without a follow-up `get_order` per id (#1133).
+    /// Bounded to `MAX_ORDERS_PER_BOOK_SIDE` per side.
+    pub fn get_order_book(
+        env: Env,
+        invoice_id: u64,
+        kind: ListingKind,
+    ) -> (Vec<OrderBookLevel>, Vec<OrderBookLevel>) {
         let key = book_key(invoice_id, &kind);
         let bids: Map<u64, Vec<u64>> = env
             .storage()
@@ -1123,9 +1142,22 @@ impl SecondaryMarket {
             .instance()
             .get(&BOOK_ASKS)
             .unwrap_or_else(|| Map::new(&env));
+        let to_levels = |ids: Vec<u64>| -> Vec<OrderBookLevel> {
+            let mut levels = Vec::new(&env);
+            for id in ids.iter() {
+                if let Some(order) = load_order(&env, id) {
+                    levels.push_back(OrderBookLevel {
+                        order_id: order.order_id,
+                        price: order.price,
+                        quantity: order.remaining,
+                    });
+                }
+            }
+            levels
+        };
         (
-            bids.get(key).unwrap_or_else(|| Vec::new(&env)),
-            asks.get(key).unwrap_or_else(|| Vec::new(&env)),
+            to_levels(bids.get(key).unwrap_or_else(|| Vec::new(&env))),
+            to_levels(asks.get(key).unwrap_or_else(|| Vec::new(&env))),
         )
     }
 
