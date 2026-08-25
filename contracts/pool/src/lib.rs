@@ -178,6 +178,8 @@ pub enum PoolError {
     ListingPriceMismatch = 95,
     // #789: invoice contract declined the Funded -> Cancelled transition
     InvoiceNotCancelled = 96,
+    // #1038: governance contract not configured
+    GovernanceNotConfigured = 97,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -683,6 +685,8 @@ const INSURANCE_CFG: Symbol = symbol_short!("ins_cfg");
 // key, not a DataKey variant — DataKey is already at Soroban's 50-variant
 // ceiling (see #867/#777/#866/#799/#869 above).
 const ACCESS_CONTROL: Symbol = symbol_short!("ac_addr");
+// #1038: governance contract address for governance-gated parameter changes
+const GOVERNANCE: Symbol = symbol_short!("gov_addr");
 const ORACLE_STALE_SECS: Symbol = symbol_short!("o_stale");
 // #777: per-token admin fallback price, stored as a single Map so it
 // doesn't need its own DataKey variant either.
@@ -4582,6 +4586,28 @@ impl FundingPool {
         env.storage().instance().get(&ACCESS_CONTROL)
     }
 
+    // #1038: Bootstrap the governance contract address. Admin-gated one-time setup.
+    pub fn set_governance_address(
+        env: Env,
+        admin: Address,
+        governance: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&GOVERNANCE, &governance);
+        env.events()
+            .publish((EVT, symbol_short!("set_gov")), (admin, governance));
+        Ok(())
+    }
+
+    // #1038: Get the configured governance contract address.
+    pub fn get_governance_address(env: Env) -> Option<Address> {
+        env.storage().instance().get(&GOVERNANCE)
+    }
+
     pub fn set_paused_via_ac(
         env: Env,
         access_control: Address,
@@ -4777,6 +4803,661 @@ impl FundingPool {
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("ac_util")), max_bps);
+        Ok(())
+    }
+
+    // ---- #1038: Governance-gated parameter changes ----
+
+    // #1038: Set yield via governance proposal. Bypasses yield change cooldown
+    // since governance already provides timelock protection.
+    pub fn set_yield_via_governance(
+        env: Env,
+        governance: Address,
+        new_yield_bps: u32,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        if new_yield_bps > 5_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let current = config.yield_bps;
+        config.yield_bps = new_yield_bps;
+        config.last_yield_change_at = env.ledger().timestamp();
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("gov_yield")),
+            (governance, current, new_yield_bps),
+        );
+        Ok(())
+    }
+
+    // #1038: Set treasury via governance proposal.
+    pub fn set_treasury_via_governance(
+        env: Env,
+        governance: Address,
+        treasury: Address,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+        env.events()
+            .publish((EVT, symbol_short!("gov_treas")), (governance, treasury));
+        Ok(())
+    }
+
+    // #1038: Set max utilization via governance proposal.
+    pub fn set_max_utilization_via_governance(
+        env: Env,
+        governance: Address,
+        max_bps: u32,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if max_bps > 10_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.max_utilization_bps = max_bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("gov_util")), (governance, max_bps));
+        Ok(())
+    }
+
+    // #1038: Set oracle contract via governance proposal.
+    pub fn set_oracle_contract_via_governance(
+        env: Env,
+        governance: Address,
+        oracle: Address,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        env.storage().instance().set(&REFLECTOR_ORACLE, &oracle);
+        env.events()
+            .publish((EVT, symbol_short!("gov_orcl")), (governance, oracle));
+        Ok(())
+    }
+
+    // #1038: Set KYC required via governance proposal.
+    pub fn set_kyc_required_via_governance(
+        env: Env,
+        governance: Address,
+        required: bool,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::KycRequired, &required);
+        env.events().publish(
+            (EVT, symbol_short!("gov_kycreq")),
+            (governance, required),
+        );
+        Ok(())
+    }
+
+    // #1038: Set compliance registry via governance proposal.
+    pub fn set_compliance_registry_via_governance(
+        env: Env,
+        governance: Address,
+        registry: Address,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        let mut gate: ComplianceGateConfig = env
+            .storage()
+            .instance()
+            .get(&COMPLIANCE_CFG)
+            .unwrap_or(ComplianceGateConfig {
+                registry: registry.clone(),
+                required: false,
+            });
+        gate.registry = registry;
+        env.storage().instance().set(&COMPLIANCE_CFG, &gate);
+        env.events().publish(
+            (EVT, symbol_short!("gov_comp")),
+            (governance, registry),
+        );
+        Ok(())
+    }
+
+    // #1038: Set require compliance check via governance proposal.
+    pub fn set_require_compliance_check_via_governance(
+        env: Env,
+        governance: Address,
+        required: bool,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        let mut gate: ComplianceGateConfig = env
+            .storage()
+            .instance()
+            .get(&COMPLIANCE_CFG)
+            .unwrap_or(ComplianceGateConfig {
+                registry: Address::generate(&env),
+                required: false,
+            });
+        gate.required = required;
+        env.storage().instance().set(&COMPLIANCE_CFG, &gate);
+        env.events().publish(
+            (EVT, symbol_short!("gov_comp_req")),
+            (governance, required),
+        );
+        Ok(())
+    }
+
+    // #1038: Set referral registry via governance proposal.
+    pub fn set_referral_registry_via_governance(
+        env: Env,
+        governance: Address,
+        registry: Address,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage().instance().set(&REFERRAL_CFG, &registry);
+        env.events().publish(
+            (EVT, symbol_short!("gov_ref")),
+            (governance, registry),
+        );
+        Ok(())
+    }
+
+    // #1038: Set credit score contract via governance proposal.
+    pub fn set_credit_score_contract_via_governance(
+        env: Env,
+        governance: Address,
+        credit_score_contract: Address,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::CreditScoreContract, &credit_score_contract);
+        env.events().publish(
+            (EVT, symbol_short!("gov_cs")),
+            (governance, credit_score_contract),
+        );
+        Ok(())
+    }
+
+    // #1038: Set insurance contract via governance proposal.
+    pub fn set_insurance_contract_via_governance(
+        env: Env,
+        governance: Address,
+        insurance_contract: Address,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .set(&INSURANCE_CFG, &insurance_contract);
+        env.events().publish(
+            (EVT, symbol_short!("gov_ins")),
+            (governance, insurance_contract),
+        );
+        Ok(())
+    }
+
+    // #1038: Set compound interest via governance proposal.
+    pub fn set_compound_interest_via_governance(
+        env: Env,
+        governance: Address,
+        compound: bool,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.compound_interest = compound;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("gov_comp_int")),
+            (governance, compound),
+        );
+        Ok(())
+    }
+
+    // #1038: Set secondary market contract via governance proposal.
+    pub fn set_secondary_market_contract_via_governance(
+        env: Env,
+        governance: Address,
+        secondary_market_contract: Address,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .set(&SECONDARY_MARKET, &secondary_market_contract);
+        env.events().publish(
+            (EVT, symbol_short!("gov_sm")),
+            (governance, secondary_market_contract),
+        );
+        Ok(())
+    }
+
+    // #1038: Set risk contract via governance proposal.
+    pub fn set_risk_contract_via_governance(
+        env: Env,
+        governance: Address,
+        risk_contract: Address,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .set(&RISK_CONTRACT, &risk_contract);
+        env.events().publish(
+            (EVT, symbol_short!("gov_risk")),
+            (governance, risk_contract),
+        );
+        Ok(())
+    }
+
+    // #1038: Set min deposit via governance proposal.
+    pub fn set_min_deposit_via_governance(
+        env: Env,
+        governance: Address,
+        min_amount: i128,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_admin(&env, &governance)?;
+        if min_amount <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDeposit, &min_amount);
+        env.events()
+            .publish((EVT, symbol_short!("gov_min_dep")), (governance, min_amount));
+        Ok(())
+    }
+
+    // #1038: Set max investor concentration via governance proposal.
+    pub fn set_max_investor_concentration_via_governance(
+        env: Env,
+        governance: Address,
+        max_bps: u32,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        if max_bps > 10_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxInvestorConcentration, &max_bps);
+        env.events().publish(
+            (EVT, symbol_short!("gov_max_conc")),
+            (governance, max_bps),
+        );
+        Ok(())
+    }
+
+    // #1038: Set upgrade timelock via governance proposal.
+    pub fn set_upgrade_timelock_via_governance(
+        env: Env,
+        governance: Address,
+        secs: u64,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_admin(&env, &governance)?;
+        if secs < 86_400 {
+            return Err(PoolError::InvalidUpgradeTimelock);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeTimelock, &secs);
+        env.events()
+            .publish((EVT, symbol_short!("gov_up_tl")), (governance, secs));
+        Ok(())
+    }
+
+    // #1038: Set operation delay via governance proposal.
+    pub fn set_operation_delay_via_governance(
+        env: Env,
+        governance: Address,
+        secs: u64,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_admin(&env, &governance)?;
+        if secs < 3_600 {
+            return Err(PoolError::InvalidOperationDelay);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::OperationDelay, &secs);
+        env.events()
+            .publish((EVT, symbol_short!("gov_op_del")), (governance, secs));
+        Ok(())
+    }
+
+    // #1038: Set yield change policy via governance proposal.
+    pub fn set_yield_change_policy_via_governance(
+        env: Env,
+        governance: Address,
+        cooldown_secs: u64,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.yield_change_cooldown_secs = cooldown_secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("gov_yield_pol")),
+            (governance, cooldown_secs),
+        );
+        Ok(())
+    }
+
+    // #1038: Set factoring fee via governance proposal.
+    pub fn set_factoring_fee_via_governance(
+        env: Env,
+        governance: Address,
+        factoring_fee_bps: u32,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        if factoring_fee_bps > 5_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::FactoringFeeBps, &factoring_fee_bps);
+        env.events().publish(
+            (EVT, symbol_short!("gov_fact")),
+            (governance, factoring_fee_bps),
+        );
+        Ok(())
+    }
+
+    // #1038: Set withdrawal limits via governance proposal.
+    pub fn set_withdrawal_limits_via_governance(
+        env: Env,
+        governance: Address,
+        max_bps: u32,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        if max_bps > 10_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalLimitBps, &max_bps);
+        env.events().publish(
+            (EVT, symbol_short!("gov_wd_lim")),
+            (governance, max_bps),
+        );
+        Ok(())
+    }
+
+    // #1038: Set max withdrawal queue age via governance proposal.
+    pub fn set_max_withdrawal_queue_age_via_governance(
+        env: Env,
+        governance: Address,
+        days: u32,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxWithdrawalQueueAge, &days);
+        env.events().publish(
+            (EVT, symbol_short!("gov_wd_age")),
+            (governance, days),
+        );
+        Ok(())
+    }
+
+    // #1038: Set max withdrawal queue depth via governance proposal.
+    pub fn set_max_withdrawal_queue_depth_via_governance(
+        env: Env,
+        governance: Address,
+        depth: u32,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxWithdrawalQueueDepth, &depth);
+        env.events().publish(
+            (EVT, symbol_short!("gov_wd_dep")),
+            (governance, depth),
+        );
+        Ok(())
+    }
+
+    // #1038: Set oracle stale threshold via governance proposal.
+    pub fn set_oracle_stale_threshold_via_governance(
+        env: Env,
+        governance: Address,
+        threshold_secs: u64,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if threshold_secs == 0 || threshold_secs > MAX_ORACLE_STALE_SECS {
+            return Err(PoolError::InvalidAmount);
+        }
+        let current = env
+            .storage()
+            .instance()
+            .get(&ORACLE_STALE_SECS)
+            .unwrap_or(DEFAULT_ORACLE_STALE_SECS);
+        env.storage()
+            .instance()
+            .set(&ORACLE_STALE_SECS, &threshold_secs);
+        env.events().publish(
+            (EVT, symbol_short!("gov_orc_stale")),
+            (governance, current, threshold_secs),
+        );
+        Ok(())
+    }
+
+    // #1038: Set fee tier via governance proposal.
+    pub fn set_fee_tier_via_governance(
+        env: Env,
+        governance: Address,
+        tier_id: u32,
+        tier: FeeTier,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if tier.min_amount < 0 || tier.max_amount < tier.min_amount || tier.fee_bps > BPS_DENOM {
+            return Err(PoolError::InvalidFeeTier);
+        }
+
+        let mut tier_ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeTierIds)
+            .unwrap_or(Vec::new(&env));
+        let mut found = false;
+        for i in 0..tier_ids.len() {
+            let existing_id = tier_ids.get(i).expect("storage corrupted");
+            if existing_id == tier_id {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            tier_ids.push_back(tier_id);
+            env.storage()
+                .instance()
+                .set(&DataKey::FeeTierIds, &tier_ids);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeTier(tier_id), &tier);
+        env.events()
+            .publish((EVT, symbol_short!("gov_fee")), (governance, tier_id));
+        Ok(())
+    }
+
+    // #1038: Set loyalty tiers via governance proposal.
+    pub fn set_loyalty_tiers_via_governance(
+        env: Env,
+        governance: Address,
+        tiers: Vec<LoyaltyTier>,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        if tiers.is_empty() {
+            return Err(PoolError::InvalidLoyaltyTiers);
+        }
+        let mut prev_min_days: Option<u32> = None;
+        for i in 0..tiers.len() {
+            let tier = tiers.get(i).unwrap();
+            if tier.bonus_bps > MAX_LOYALTY_BONUS_BPS {
+                return Err(PoolError::InvalidLoyaltyTiers);
+            }
+            if let Some(prev) = prev_min_days {
+                if tier.min_days <= prev {
+                    return Err(PoolError::InvalidLoyaltyTiers);
+                }
+            }
+            prev_min_days = Some(tier.min_days);
+        }
+        env.storage().instance().set(&LOYALTY_TIERS, &tiers);
+        env.events()
+            .publish((EVT, symbol_short!("gov_loy")), (governance, tiers.len()));
+        Ok(())
+    }
+
+    // #1038: Set fallback price via governance proposal.
+    pub fn set_fallback_price_via_governance(
+        env: Env,
+        governance: Address,
+        token: Address,
+        price: i128,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if price <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::FallbackPrice(token), &price);
+        env.events()
+            .publish((EVT, symbol_short!("gov_fallback")), (governance, token, price));
+        Ok(())
+    }
+
+    // #1038: Set rate bounds via governance proposal.
+    pub fn set_rate_bounds_via_governance(
+        env: Env,
+        governance: Address,
+        token: Address,
+        min_rate: i128,
+        max_rate: i128,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if min_rate < 0 || max_rate <= min_rate {
+            return Err(PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RateBounds(token), &(min_rate, max_rate));
+        env.events()
+            .publish((EVT, symbol_short!("gov_rate")), (governance, token, min_rate, max_rate));
+        Ok(())
+    }
+
+    // #1038: Set exchange rate via governance proposal.
+    pub fn set_exchange_rate_via_governance(
+        env: Env,
+        governance: Address,
+        token: Address,
+        rate: i128,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if rate <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ExchangeRate(token), &rate);
+        env.events()
+            .publish((EVT, symbol_short!("gov_exch")), (governance, token, rate));
+        Ok(())
+    }
+
+    // #1038: Set collateral config via governance proposal.
+    pub fn set_collateral_config_via_governance(
+        env: Env,
+        governance: Address,
+        config: CollateralConfig,
+    ) -> Result<(), PoolError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        if config.threshold <= 0 || config.collateral_bps > 10_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CollateralConfig, &config);
+        env.events()
+            .publish((EVT, symbol_short!("gov_coll")), (governance, config.threshold, config.collateral_bps));
         Ok(())
     }
 
@@ -5995,6 +6676,19 @@ impl FundingPool {
             .instance()
             .get(&ACCESS_CONTROL)
             .ok_or(PoolError::AccessControlNotConfigured)?;
+        if caller != &configured {
+            return Err(PoolError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    // #1038: Helper function to verify the caller is the configured governance contract
+    fn require_governance(env: &Env, caller: &Address) -> PoolResult<()> {
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&GOVERNANCE)
+            .ok_or(PoolError::GovernanceNotConfigured)?;
         if caller != &configured {
             return Err(PoolError::Unauthorized);
         }
