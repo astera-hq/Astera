@@ -146,6 +146,18 @@ export interface Order {
   status: OrderStatus;
 }
 
+/**
+ * One resting order in an order book's depth view (#1133) — lets callers
+ * render a real book without a follow-up `getOrder` call per id.
+ */
+export interface OrderBookLevel {
+  orderId: number;
+  /** Per-unit price, scaled by 1e7. */
+  price: bigint;
+  /** Remaining quantity (bps of CoFundShare or raw token amount). */
+  quantity: bigint;
+}
+
 // ── #863: utilization-driven kinked interest-rate model ─────────────────────
 
 /** Curve parameters for one token, as returned by `get_rate_model_config`. */

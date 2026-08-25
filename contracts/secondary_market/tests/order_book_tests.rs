@@ -316,7 +316,7 @@ fn test_marketable_bid_partially_fills_two_asks_price_time_priority() {
     let (bids, asks) = market_client.get_order_book(&invoice_id, &ListingKind::CoFunding);
     assert!(bids.is_empty());
     assert_eq!(asks.len(), 1);
-    assert_eq!(asks.get(0).unwrap(), ask2_id);
+    assert_eq!(asks.get(0).unwrap().order_id, ask2_id);
 }
 
 #[test]
@@ -623,9 +623,17 @@ fn test_get_order_book_reflects_resting_orders_on_both_sides() {
 
     let (bids, asks) = market_client.get_order_book(&invoice_id, &ListingKind::CoFunding);
     assert_eq!(bids.len(), 1);
-    assert_eq!(bids.get(0).unwrap(), bid_id);
+    assert_eq!(bids.get(0).unwrap().order_id, bid_id);
     assert_eq!(asks.len(), 1);
-    assert_eq!(asks.get(0).unwrap(), ask_id);
+    assert_eq!(asks.get(0).unwrap().order_id, ask_id);
+
+    // #1133: each level carries its price and remaining quantity directly.
+    let bid_level = bids.get(0).unwrap();
+    assert_eq!(bid_level.price, PRICE_SCALE);
+    assert_eq!(bid_level.quantity, bps as u64);
+    let ask_level = asks.get(0).unwrap();
+    assert_eq!(ask_level.price, PRICE_SCALE * 5);
+    assert_eq!(ask_level.quantity, bps as u64);
 }
 
 #[test]

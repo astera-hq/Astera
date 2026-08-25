@@ -549,7 +549,7 @@ proptest! {
 
         // The resting bid must appear in the book.
         let (bids, _asks) = market.get_order_book(&shared_invoice, &ListingKind::CoFunding);
-        let bid_in_book = bids.iter().any(|id| id == bid_id);
+        let bid_in_book = bids.iter().any(|level| level.order_id == bid_id);
         prop_assert!(bid_in_book, "PartiallyFilled bid must appear in the order book");
     }
 
@@ -811,8 +811,14 @@ proptest! {
 
         // Both sides appear in the book.
         let (bids, asks) = market.get_order_book(&shared_invoice, &ListingKind::CoFunding);
-        prop_assert!(bids.iter().any(|id| id == bid_id), "resting bid must be in book");
-        prop_assert!(asks.iter().any(|id| id == ask_id), "resting ask must be in book");
+        prop_assert!(
+            bids.iter().any(|level| level.order_id == bid_id),
+            "resting bid must be in book"
+        );
+        prop_assert!(
+            asks.iter().any(|level| level.order_id == ask_id),
+            "resting ask must be in book"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

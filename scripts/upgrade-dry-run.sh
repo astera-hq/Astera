@@ -231,7 +231,7 @@ cat > "$STATE_FILE_PRE" <<'EOF'
       "config_keys": ["ORDERS", "MATCHES", "ASSETS"],
       "example_queries": {
         "get_order": "Returns order details",
-        "get_order_book": "Returns active orders for asset"
+        "get_order_book": "Returns resting bid/ask depth (id, price, quantity) for asset"
       }
     },
     "auction": {
@@ -409,7 +409,7 @@ cat > "$STATE_FILE_POST" <<'EOF'
       "config_keys": ["ORDERS", "MATCHES", "ASSETS"],
       "example_queries": {
         "get_order": "Returns order details",
-        "get_order_book": "Returns active orders for asset"
+        "get_order_book": "Returns resting bid/ask depth (id, price, quantity) for asset"
       }
     },
     "auction": {
