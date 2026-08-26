@@ -13,6 +13,7 @@ soroban-sdk = { workspace = true }
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 share = { path = "../share" }
 access_control = { path = "../access_control" }
+proptest = "1.4"
 
 [[test]]
 name = "lib"
@@ -25,3 +26,7 @@ path = "tests/access_control_tests.rs"
 [[test]]
 name = "governance_flow_tests"
 path = "tests/governance_flow_tests.rs"
+
+[[test]]
+name = "finalize_proposal_proptest"
+path = "tests/finalize_proposal_proptest.rs"
