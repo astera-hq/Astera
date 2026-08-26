@@ -6,9 +6,32 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import pinoHttp from "pino-http";
 import { Pool } from "pg";
-import { getEvents, getLatestLedger, getTrancheApy, getSmeRiskSignals } from "./db";
+import {
+  getEvents,
+  getLatestLedger,
+  getTrancheApy,
+  getSmeRiskSignals,
+} from "./db";
+import type { GetEventsOptions } from "./db";
+import type { IndexedEvent } from "./parser";
 import { logger } from "./logger";
 import { register } from "./metrics";
+
+async function getAllEvents(
+  pool: Pool,
+  options: GetEventsOptions,
+): Promise<IndexedEvent[]> {
+  const pageSize = 500;
+  const events: IndexedEvent[] = [];
+  let offset = 0;
+
+  while (true) {
+    const page = await getEvents(pool, { ...options, limit: pageSize, offset });
+    events.push(...page);
+    if (page.length < pageSize) return events;
+    offset += page.length;
+  }
+}
 
 export function startApiServer(
   pool: Pool,
@@ -250,10 +273,8 @@ export function startApiServer(
 
   app.get("/co-funding/rounds", async (_req, res) => {
     try {
-      const events = await getEvents(pool, {
+      const events = await getAllEvents(pool, {
         contractType: "pool",
-        limit: 2000,
-        offset: 0,
       });
       const invoiceIds = new Set<string>();
       for (const evt of events) {
@@ -276,10 +297,8 @@ export function startApiServer(
           .json({ error: "invoiceId path param is required" });
       }
 
-      const events = await getEvents(pool, {
+      const events = await getAllEvents(pool, {
         contractType: "pool",
-        limit: 2000,
-        offset: 0,
       });
       const matches = events
         .filter(
@@ -347,11 +366,9 @@ export function startApiServer(
       }
       const addressLower = address.toLowerCase();
 
-      const events = await getEvents(pool, {
+      const events = await getAllEvents(pool, {
         contractType: "pool",
         eventType: "cf_commit",
-        limit: 2000,
-        offset: 0,
       });
 
       const invoiceIds = new Set<string>();
@@ -543,10 +560,8 @@ export function startApiServer(
           .json({ error: "invoiceId path param is required" });
       }
 
-      const events = await getEvents(pool, {
+      const events = await getAllEvents(pool, {
         contractType: "oracle_registry",
-        limit: 1000,
-        offset: 0,
       });
 
       const matches = events
@@ -611,10 +626,8 @@ export function startApiServer(
       }
       const smeLower = sme.toLowerCase();
 
-      const events = await getEvents(pool, {
+      const events = await getAllEvents(pool, {
         contractType: "credit_score",
-        limit: 5000,
-        offset: 0,
       });
 
       const attestationIds = new Set<string>();
