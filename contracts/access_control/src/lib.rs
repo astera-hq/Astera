@@ -172,6 +172,9 @@ pub enum ActionPayload {
     AddSigner(Role, Address),
     RemoveSigner(Role, Address),
     SetThreshold(Role, u32),
+    /// Update the global proposal expiry window (in seconds). Must be > 0.
+    /// Gated under `Role::SuperAdmin` — same bar as signer/threshold changes.
+    SetProposalExpiry(u64),
 }
 
 #[contracttype]
@@ -231,11 +234,14 @@ pub enum AccessControlError {
     SignerNotFound = 14,
     NoApprovalToRevoke = 15,
     /// The `action` payload and `target` address are incoherent: self-management
-    /// payloads (AddSigner / RemoveSigner / SetThreshold) must be proposed with
-    /// `target == this_contract`, and every cross-contract payload must be
-    /// proposed with `target != this_contract`.  A mismatched proposal would
-    /// silently no-op on execution, so it is rejected at creation time instead.
+    /// payloads (AddSigner / RemoveSigner / SetThreshold / SetProposalExpiry)
+    /// must be proposed with `target == this_contract`, and every cross-contract
+    /// payload must be proposed with `target != this_contract`.  A mismatched
+    /// proposal would silently no-op on execution, so it is rejected at
+    /// creation time instead.
     IncoherentProposal = 16,
+    /// The signer set for a role has reached MAX_SIGNERS_PER_ROLE.
+    MaxSignersExceeded = 17,
 }
 
 type Result_ = Result<(), AccessControlError>;
@@ -417,6 +423,14 @@ impl AccessControlContract {
         env.events()
             .publish((EVT, symbol_short!("init")), super_admin_threshold);
         Ok(())
+    }
+
+    /// Read-only accessor for the current proposal expiry window in seconds.
+    pub fn get_proposal_expiry_secs(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProposalExpirySecs)
+            .unwrap_or(DEFAULT_PROPOSAL_EXPIRY_SECS)
     }
 
     /// Read-only accessor for a role's current signer set / threshold.
@@ -904,7 +918,8 @@ impl AccessControlContract {
             }
             ActionPayload::AddSigner(_, _)
             | ActionPayload::RemoveSigner(_, _)
-            | ActionPayload::SetThreshold(_, _) => {
+            | ActionPayload::SetThreshold(_, _)
+            | ActionPayload::SetProposalExpiry(_) => {
                 // Self-management actions never reach here: execute_action
                 // routes them to execute_self_management() based on
                 // `target == this_contract`, which is enforced at
@@ -963,6 +978,15 @@ impl AccessControlContract {
                     .set(&DataKey::RoleConfig(*role), &config);
                 Ok(())
             }
+            ActionPayload::SetProposalExpiry(new_secs) => {
+                if *new_secs == 0 {
+                    return Err(AccessControlError::InvalidExpiryWindow);
+                }
+                env.storage()
+                    .instance()
+                    .set(&DataKey::ProposalExpirySecs, new_secs);
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -983,14 +1007,15 @@ impl AccessControlContract {
             ActionPayload::AddSigner(_, _)
                 | ActionPayload::RemoveSigner(_, _)
                 | ActionPayload::SetThreshold(_, _)
+                | ActionPayload::SetProposalExpiry(_)
         )
     }
 
-    /// Self-management actions (this contract's own role config) and
-    /// access-control-rotation actions (repointing a target contract's
-    /// trust anchor) both bypass every other role's threshold entirely if
-    /// left ungated — so both are restricted to `Role::SuperAdmin`, the
-    /// role with the highest bar to reconfigure.
+    /// Self-management actions (this contract's own role config / expiry
+    /// window) and access-control-rotation actions (repointing a target
+    /// contract's trust anchor) both bypass every other role's threshold
+    /// entirely if left ungated — so both are restricted to
+    /// `Role::SuperAdmin`, the role with the highest bar to reconfigure.
     fn requires_super_admin(action: &ActionPayload) -> bool {
         Self::is_self_management(action)
             || matches!(

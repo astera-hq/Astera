@@ -582,3 +582,119 @@ fn test_coherent_cross_contract_proposal_is_accepted() {
         ProposalStatus::Pending
     );
 }
+
+// ── #1136: update proposal_expiry_secs after initialize ───────────────────
+
+/// SuperAdmin can update the expiry window via the multisig lifecycle, and
+/// newly created proposals use the new window immediately.
+#[test]
+fn test_super_admin_can_update_proposal_expiry_secs() {
+    let f = setup();
+    assert_eq!(f.client.get_proposal_expiry_secs(), 604_800);
+
+    // Propose + approve + execute a new 7-day window of 3600s (1 hour).
+    let new_expiry: u64 = 3_600;
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(new_expiry),
+    );
+    let _ = f.client.approve_action(&f.s2, &proposal_id);
+    let _ = f.client.execute_action(&f.s1, &proposal_id);
+
+    // Accessor reflects the new value.
+    assert_eq!(f.client.get_proposal_expiry_secs(), new_expiry);
+
+    // A proposal created after the change uses the new window.
+    let target = Address::generate(&f.env);
+    let pid2 = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::OracleManager, target.clone()),
+    );
+    let proposal = f.client.get_proposal(&pid2).unwrap();
+    // expires_at should be approximately created_at + 3600, not + 604800.
+    assert_eq!(proposal.expires_at, proposal.created_at + new_expiry);
+}
+
+/// SetProposalExpiry(0) must be rejected at execution time — zero is not a
+/// valid expiry window (mirrors the check in `initialize`).
+#[test]
+fn test_set_proposal_expiry_rejects_zero() {
+    let f = setup();
+
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(0),
+    );
+    let _ = f.client.approve_action(&f.s2, &proposal_id);
+
+    let result = f.client.try_execute_action(&f.s1, &proposal_id);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::InvalidExpiryWindow.into()
+    );
+    // Value must be unchanged after a failed execution.
+    assert_eq!(f.client.get_proposal_expiry_secs(), 604_800);
+}
+
+/// SetProposalExpiry proposed under a non-SuperAdmin role must be rejected —
+/// same SuperAdmin-only gate that protects AddSigner / SetThreshold.
+#[test]
+fn test_set_proposal_expiry_requires_super_admin() {
+    let f = setup();
+
+    // Bootstrap a RiskManager with threshold 1 so it can propose.
+    let risk1 = Address::generate(&f.env);
+    let add = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::RiskManager, risk1.clone()),
+    );
+    let _ = f.client.approve_action(&f.s2, &add);
+    let _ = f.client.execute_action(&f.s1, &add);
+    let set_t = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetThreshold(Role::RiskManager, 1),
+    );
+    let _ = f.client.approve_action(&f.s2, &set_t);
+    let _ = f.client.execute_action(&f.s1, &set_t);
+
+    // RiskManager must not be able to change the expiry window.
+    let result = f.client.try_propose_action(
+        &Role::RiskManager,
+        &risk1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(1_800),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::SelfManagementRequiresSuperAdmin
+    );
+}
+
+/// SetProposalExpiry proposed with an external target must be rejected —
+/// same coherence check that protects AddSigner / SetThreshold.
+#[test]
+fn test_set_proposal_expiry_with_external_target_is_rejected() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external, // wrong: must target this_contract
+        &ActionPayload::SetProposalExpiry(3_600),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
