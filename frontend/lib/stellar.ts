@@ -55,6 +55,13 @@ export const REFERRAL_CONTRACT_ID = process.env.NEXT_PUBLIC_REFERRAL_CONTRACT_ID
 // #864: role-based multisig access-control registry — optional, unset until deployed.
 export const ACCESS_CONTROL_CONTRACT_ID = process.env.NEXT_PUBLIC_ACCESS_CONTROL_CONTRACT_ID ?? '';
 
+export type AccessControlRole =
+  | 'SuperAdmin'
+  | 'RiskManager'
+  | 'TreasuryManager'
+  | 'ComplianceOfficer'
+  | 'OracleManager';
+
 // #1043: structured multi-party dispute arbitration — optional, unset until deployed.
 export const ARBITRATION_CONTRACT_ID = process.env.NEXT_PUBLIC_ARBITRATION_CONTRACT_ID ?? '';
 // #1036: collateral-liquidation Dutch auction + oracle-priced, multi-asset
@@ -516,6 +523,24 @@ export async function simulateTx(
 
     return server.simulateTransaction(tx);
   });
+}
+
+export async function isAccessControlSigner(
+  address: string,
+  role: AccessControlRole,
+): Promise<boolean> {
+  if (!ACCESS_CONTROL_CONTRACT_ID) return false;
+
+  const roleArg = xdr.ScVal.scvVec([nativeToScVal(role, { type: 'symbol' })]);
+  const result = await simulateTx(
+    ACCESS_CONTROL_CONTRACT_ID,
+    'is_signer',
+    [roleArg, new Address(address).toScVal()],
+    address,
+  );
+
+  if (StellarRpc.Api.isSimulationError(result) || !result.result) return false;
+  return Boolean(scValToNative(result.result.retval));
 }
 
 /** Submit a signed XDR transaction */
