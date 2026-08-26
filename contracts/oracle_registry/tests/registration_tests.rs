@@ -139,6 +139,44 @@ fn test_deregister_requires_cooldown_before_returning_stake() {
 }
 
 #[test]
+fn test_deregister_requested_oracle_cannot_resume_active_status() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, stake_token, min_stake) = setup(&env);
+    let operator = Address::generate(&env);
+    mint(&env, &stake_token, &operator, min_stake * 2);
+    client.register_oracle(&operator, &min_stake);
+
+    // Requesting deregistration starts the cooldown and immediately drops
+    // the oracle from the active set.
+    client.deregister_oracle(&operator);
+    let info = client.get_oracle_info(&operator).unwrap();
+    assert!(!info.is_active);
+    assert!(info.deregister_requested_at.is_some());
+    assert_eq!(client.list_active_oracles().len(), 0);
+
+    // Changing its mind mid-cooldown and trying to register again (the only
+    // way to become active) is rejected — the record still exists, so this
+    // is not a fresh registration. There is no other entrypoint that clears
+    // `deregister_requested_at` or flips `is_active` back to true.
+    mint(&env, &stake_token, &operator, min_stake);
+    let resume_attempt = client.try_register_oracle(&operator, &min_stake);
+    assert_eq!(resume_attempt, Err(Ok(OracleRegistryError::AlreadyRegistered)));
+
+    // State is untouched by the failed attempt: still mid-cooldown, still
+    // inactive, stake still held by the contract.
+    let info_after = client.get_oracle_info(&operator).unwrap();
+    assert_eq!(info_after, info);
+    assert_eq!(client.list_active_oracles().len(), 0);
+
+    // The only path forward is waiting out the cooldown to fully exit.
+    env.ledger()
+        .with_mut(|l| l.timestamp += 7 * 24 * 60 * 60 + 1);
+    client.deregister_oracle(&operator);
+    assert!(client.get_oracle_info(&operator).is_none());
+}
+
+#[test]
 fn test_deregister_blocked_while_vote_pending_on_open_round() {
     let env = Env::default();
     env.mock_all_auths();
