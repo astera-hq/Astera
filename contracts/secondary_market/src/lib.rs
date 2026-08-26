@@ -332,6 +332,15 @@ fn load_order(env: &Env, order_id: u64) -> Option<Order> {
     all.get(order_id)
 }
 
+fn load_listing(env: &Env, listing_id: u64) -> Option<Listing> {
+    let all: Map<u64, Listing> = env
+        .storage()
+        .persistent()
+        .get(&LISTING_DATA)
+        .unwrap_or_else(|| Map::new(env));
+    all.get(listing_id)
+}
+
 fn save_order(env: &Env, order: &Order) {
     let mut all: Map<u64, Order> = env
         .storage()
@@ -340,6 +349,70 @@ fn save_order(env: &Env, order: &Order) {
         .unwrap_or_else(|| Map::new(env));
     all.set(order.order_id, order.clone());
     env.storage().persistent().set(&ORDER_DATA, &all);
+}
+
+fn available_commitment_capacity(
+    env: &Env,
+    invoice_id: u64,
+    owner: &Address,
+    kind: &ListingKind,
+    owned_amount_or_bps: u64,
+) -> Option<u64> {
+    let mut committed = 0u64;
+
+    let seller_map: Map<Address, Vec<u64>> = env
+        .storage()
+        .instance()
+        .get(&LISTING_IDS_SELLER)
+        .unwrap_or_else(|| Map::new(env));
+    let listing_ids = seller_map
+        .get(owner.clone())
+        .unwrap_or_else(|| Vec::new(env));
+    for listing_id in listing_ids.iter() {
+        let Some(listing) = load_listing(env, listing_id) else {
+            continue;
+        };
+        if listing.invoice_id != invoice_id
+            || listing.seller != *owner
+            || listing.kind != *kind
+            || listing.status != ListingStatus::Open
+        {
+            continue;
+        }
+        committed = committed.checked_add(listing.amount_or_bps)?;
+    }
+
+    let owner_map: Map<Address, Vec<u64>> = env
+        .storage()
+        .instance()
+        .get(&ORDER_IDS_OWNER)
+        .unwrap_or_else(|| Map::new(env));
+    let order_ids = owner_map
+        .get(owner.clone())
+        .unwrap_or_else(|| Vec::new(env));
+    for order_id in order_ids.iter() {
+        let Some(order) = load_order(env, order_id) else {
+            continue;
+        };
+        if order.invoice_id != invoice_id
+            || order.owner != *owner
+            || order.kind != *kind
+            || order.side != OrderSide::Ask
+            || (order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled)
+        {
+            continue;
+        }
+        committed = committed.checked_add(order.remaining)?;
+    }
+
+    owned_amount_or_bps.checked_sub(committed)
+}
+
+fn fill_total_price(price_per_unit: i128, fill_qty: u64) -> Option<i128> {
+    let numerator = price_per_unit.checked_mul(fill_qty as i128)?;
+    numerator
+        .checked_add(PRICE_SCALE - 1)
+        .and_then(|value| value.checked_div(PRICE_SCALE))
 }
 
 fn index_order_for_owner(env: &Env, owner: &Address, order_id: u64) {
@@ -553,11 +626,7 @@ fn match_order(env: &Env, pool_id: &Address, taker: &mut Order, now: u64) {
 
         matches_made = matches_made.saturating_add(1);
         let fill_qty = taker.remaining.min(maker.remaining);
-        let Some(total_price) = maker
-            .price
-            .checked_mul(fill_qty as i128)
-            .and_then(|v| v.checked_div(PRICE_SCALE))
-        else {
+        let Some(total_price) = fill_total_price(maker.price, fill_qty) else {
             // Price*qty doesn't fit an i128 — can't represent this fill.
             // Stop matching rather than erroring out the whole call.
             break;
@@ -701,7 +770,16 @@ impl SecondaryMarket {
                     &Symbol::new(&env, "get_co_fund_share"),
                     Vec::from_array(&env, [invoice_id.into_val(&env), seller.into_val(&env)]),
                 );
-                if amount_or_bps as u32 > seller_bps || seller_bps == 0 {
+                let Some(available_bps) = available_commitment_capacity(
+                    &env,
+                    invoice_id,
+                    &seller,
+                    &kind,
+                    seller_bps as u64,
+                ) else {
+                    return Err(MarketError::InvalidAmount);
+                };
+                if amount_or_bps as u32 > seller_bps || available_bps < amount_or_bps {
                     return Err(MarketError::InvalidAmount);
                 }
             }
@@ -715,6 +793,18 @@ impl SecondaryMarket {
                     Vec::from_array(&env, [seller.into_val(&env), token.into_val(&env)]),
                 );
                 if (amount_or_bps as i128) > deployed || deployed == 0 {
+                    return Err(MarketError::InvalidAmount);
+                }
+                let Some(available_amount) = available_commitment_capacity(
+                    &env,
+                    invoice_id,
+                    &seller,
+                    &kind,
+                    deployed as u64,
+                ) else {
+                    return Err(MarketError::InvalidAmount);
+                };
+                if available_amount < amount_or_bps {
                     return Err(MarketError::InvalidAmount);
                 }
             }
@@ -990,7 +1080,16 @@ impl SecondaryMarket {
                         &Symbol::new(&env, "get_co_fund_share"),
                         Vec::from_array(&env, [invoice_id.into_val(&env), owner.into_val(&env)]),
                     );
-                    if amount_or_bps as u32 > owner_bps || owner_bps == 0 {
+                    let Some(available_bps) = available_commitment_capacity(
+                        &env,
+                        invoice_id,
+                        &owner,
+                        &kind,
+                        owner_bps as u64,
+                    ) else {
+                        return Err(MarketError::InvalidAmount);
+                    };
+                    if amount_or_bps as u32 > owner_bps || available_bps < amount_or_bps {
                         return Err(MarketError::InvalidAmount);
                     }
                 }
@@ -1004,6 +1103,18 @@ impl SecondaryMarket {
                         Vec::from_array(&env, [owner.into_val(&env), token.into_val(&env)]),
                     );
                     if (amount_or_bps as i128) > deployed || deployed == 0 {
+                        return Err(MarketError::InvalidAmount);
+                    }
+                    let Some(available_amount) = available_commitment_capacity(
+                        &env,
+                        invoice_id,
+                        &owner,
+                        &kind,
+                        deployed as u64,
+                    ) else {
+                        return Err(MarketError::InvalidAmount);
+                    };
+                    if available_amount < amount_or_bps {
                         return Err(MarketError::InvalidAmount);
                     }
                 }
@@ -1175,12 +1286,16 @@ impl SecondaryMarket {
     /// request will take to clear, based on the pool's current withdrawal
     /// queue, its trailing deposit-inflow rate, and the nearest due date
     /// among its open invoices for `token`.
-    pub fn estimate_withdrawal_wait(env: Env, investor: Address, token: Address) -> WaitEstimate {
+    pub fn estimate_withdrawal_wait(
+        env: Env,
+        investor: Address,
+        token: Address,
+    ) -> Result<WaitEstimate, MarketError> {
         let pool_id: Address = env
             .storage()
             .instance()
             .get(&DataKey::PoolContract)
-            .expect("not initialized");
+            .ok_or(MarketError::NotInitialized)?;
 
         let queue: Vec<WithdrawalRequestView> = env.invoke_contract(
             &pool_id,
@@ -1264,12 +1379,12 @@ impl SecondaryMarket {
         }
         .clamp(MIN_WAIT_ESTIMATE_SECS, MAX_WAIT_ESTIMATE_SECS);
 
-        WaitEstimate {
+        Ok(WaitEstimate {
             queue_position,
             capital_ahead,
             nearest_invoice_due_date,
             estimated_wait_secs,
-        }
+        })
     }
 
     /// #865: project available liquidity at up to `horizon_days` daily points, based on
@@ -1280,12 +1395,12 @@ impl SecondaryMarket {
         env: Env,
         token: Address,
         horizon_days: u32,
-    ) -> Vec<LiquidityForecastPoint> {
+    ) -> Result<Vec<LiquidityForecastPoint>, MarketError> {
         let pool_id: Address = env
             .storage()
             .instance()
             .get(&DataKey::PoolContract)
-            .expect("not initialized");
+            .ok_or(MarketError::NotInitialized)?;
 
         let horizon = horizon_days.clamp(1, MAX_FORECAST_HORIZON_DAYS);
         let tt: TokenTotalsView = env.invoke_contract(
@@ -1325,6 +1440,6 @@ impl SecondaryMarket {
                 projected_available,
             });
         }
-        points
+        Ok(points)
     }
 }

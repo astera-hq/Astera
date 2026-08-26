@@ -410,6 +410,50 @@ fn test_match_skips_buyer_without_kyc_approval() {
 }
 
 #[test]
+fn test_partial_fill_rounds_total_price_up_from_fractional_unit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, seller) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
+    let buyer = fund_buyer(&env, &pool_client, &usdc, 10);
+
+    let seller_available_before = available_of(&env, &pool_client.address, &seller, &usdc);
+    let buyer_available_before = available_of(&env, &pool_client.address, &buyer, &usdc);
+
+    let ask_id = place(
+        &market_client,
+        &seller,
+        invoice_id,
+        ListingKind::CoFunding,
+        OrderSide::Ask,
+        1u64,
+        1i128,
+        0u64,
+    );
+    let bid_id = place(
+        &market_client,
+        &buyer,
+        invoice_id,
+        ListingKind::CoFunding,
+        OrderSide::Bid,
+        1u64,
+        1i128,
+        0u64,
+    );
+
+    let ask = market_client.get_order(&ask_id).unwrap();
+    let bid = market_client.get_order(&bid_id).unwrap();
+    assert_eq!(ask.status, OrderStatus::Filled);
+    assert_eq!(bid.status, OrderStatus::Filled);
+    assert_eq!(pool_client.get_co_fund_share(&invoice_id, &buyer), 1);
+
+    let seller_available_after = available_of(&env, &pool_client.address, &seller, &usdc);
+    let buyer_available_after = available_of(&env, &pool_client.address, &buyer, &usdc);
+    assert_eq!(seller_available_after, seller_available_before + 1);
+    assert_eq!(buyer_available_after, buyer_available_before - 1);
+}
+
+#[test]
 fn test_place_order_zero_amount_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -473,6 +517,67 @@ fn test_place_order_past_expiry_rejected() {
         },
     );
     assert_eq!(result.unwrap_err().unwrap(), MarketError::InvalidExpiry);
+}
+
+#[test]
+fn test_place_order_rejects_ask_that_oversells_other_open_asks() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, seller) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
+
+    place(
+        &market_client,
+        &seller,
+        invoice_id,
+        ListingKind::CoFunding,
+        OrderSide::Ask,
+        6_000u64,
+        PRICE_SCALE,
+        0u64,
+    );
+
+    let result = market_client.try_place_order(
+        &seller,
+        &PlaceOrderRequest {
+            invoice_id,
+            kind: ListingKind::CoFunding,
+            side: OrderSide::Ask,
+            amount_or_bps: 5_000u64,
+            price: PRICE_SCALE,
+            expires_at: 0u64,
+        },
+    );
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::InvalidAmount);
+}
+
+#[test]
+fn test_place_order_rejects_ask_that_oversells_open_listings() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, seller) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
+
+    market_client.list_position(
+        &seller,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &6_000u64,
+        &1_000i128,
+    );
+
+    let result = market_client.try_place_order(
+        &seller,
+        &PlaceOrderRequest {
+            invoice_id,
+            kind: ListingKind::CoFunding,
+            side: OrderSide::Ask,
+            amount_or_bps: 5_000u64,
+            price: PRICE_SCALE,
+            expires_at: 0u64,
+        },
+    );
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::InvalidAmount);
 }
 
 // ── cancel_order ─────────────────────────────────────────────────────────────
