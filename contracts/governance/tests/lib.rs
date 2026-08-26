@@ -1,6 +1,12 @@
 #![cfg(test)]
 
-use governance::{Governance, GovernanceClient, GovernanceError, ProposalCategory, ProposalStatus};
+mod common;
+
+use common::MockTarget;
+use governance::{
+    Governance, GovernanceAction, GovernanceClient, GovernanceError, PoolAction, ProposalCategory,
+    ProposalStatus,
+};
 use share::{ShareToken, ShareTokenClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -26,7 +32,15 @@ fn setup_share(env: &Env) -> (ShareTokenClient<'_>, Address, Address) {
     (client, contract_id, share_admin)
 }
 
-fn setup_governance<'a>(env: &'a Env, share_id: &Address) -> (GovernanceClient<'a>, Address) {
+/// Registers governance plus a real (minimal) target contract, so tests
+/// exercising `execute_proposal` have something governance can actually
+/// invoke — execution now performs a real cross-contract call rather than
+/// only emitting an event (#1119), so a placeholder / non-contract address
+/// as the proposal target would trap.
+fn setup_governance<'a>(
+    env: &'a Env,
+    share_id: &Address,
+) -> (GovernanceClient<'a>, Address, Address) {
     let gov_admin = Address::generate(env);
     let gov_id = env.register(Governance, ());
     let client = GovernanceClient::new(env, &gov_id);
@@ -39,7 +53,14 @@ fn setup_governance<'a>(env: &'a Env, share_id: &Address) -> (GovernanceClient<'
         &EXEC_DELAY,
         &MIN_SHARE_BALANCE,
     );
-    (client, gov_admin)
+
+    let target_id = env.register(MockTarget, ());
+
+    (client, gov_admin, target_id)
+}
+
+fn placeholder_action() -> GovernanceAction {
+    GovernanceAction::Pool(PoolAction::SetPoolYield(1500))
 }
 
 fn make_proposal(env: &Env, gov: &GovernanceClient, proposer: &Address, target: &Address) -> u64 {
@@ -47,8 +68,7 @@ fn make_proposal(env: &Env, gov: &GovernanceClient, proposer: &Address, target: 
         proposer,
         &String::from_str(env, "Test proposal"),
         target,
-        &String::from_str(env, "no_op"),
-        &String::from_str(env, "{}"),
+        &placeholder_action(),
         &ProposalCategory::ParameterChange,
     )
 }
@@ -64,8 +84,7 @@ fn make_proposal_with_category(
         proposer,
         &String::from_str(env, "Test proposal"),
         target,
-        &String::from_str(env, "no_op"),
-        &String::from_str(env, "{}"),
+        &placeholder_action(),
         category,
     )
 }
@@ -78,13 +97,13 @@ fn test_snapshot_supply_recorded_at_creation() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     share.mint(&proposer, &1_000_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     let proposal = gov.get_proposal(&id).unwrap();
 
     assert_eq!(proposal.snapshot_supply, 1_000_000i128);
@@ -96,13 +115,13 @@ fn test_snapshot_supply_does_not_reflect_later_mints() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     share.mint(&proposer, &500_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
 
     // Mint more shares after proposal creation
     share.mint(&proposer, &4_500_000i128);
@@ -130,7 +149,7 @@ fn test_post_creation_minting_cannot_suppress_passing_proposal() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     // Mint initial supply and distribute voting power
     let proposer = Address::generate(&env);
@@ -143,7 +162,7 @@ fn test_post_creation_minting_cannot_suppress_passing_proposal() {
     // Total supply at creation = 1_000 + 80_000 + 25_000 = 106_000
     // Quorum (10%) = 10_600
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
 
     // Both voters vote YES (105_000 total > quorum of 10_600)
     gov.vote(&id, &voter_a, &true);
@@ -172,8 +191,8 @@ fn test_post_creation_minting_cannot_manufacture_quorum() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     // Large initial supply so the two voter balances are well below quorum
     let proposer = Address::generate(&env);
@@ -184,7 +203,7 @@ fn test_post_creation_minting_cannot_manufacture_quorum() {
     // Supply at creation = 1_050_000; quorum (10%) = 105_000
     // voter only has 50_000 — below quorum
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
 
     gov.vote(&id, &voter, &true);
 
@@ -212,8 +231,8 @@ fn test_proposal_passes_when_quorum_and_threshold_met() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
@@ -222,7 +241,7 @@ fn test_proposal_passes_when_quorum_and_threshold_met() {
     share.mint(&voter, &200_000i128);
     // Supply = 201_000; quorum (10%) = 20_100; voter has 200_000 > 20_100
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     gov.vote(&id, &voter, &true);
 
     env.ledger()
@@ -239,8 +258,8 @@ fn test_proposal_rejected_when_quorum_not_met() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let small_voter = Address::generate(&env);
@@ -249,7 +268,7 @@ fn test_proposal_rejected_when_quorum_not_met() {
     share.mint(&small_voter, &1_000i128);
     // Supply = 901_000; quorum = 90_100; small_voter has 1_000 — way below
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     gov.vote(&id, &small_voter, &true);
 
     env.ledger()
@@ -269,8 +288,8 @@ fn test_proposal_rejected_when_pass_threshold_not_met() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let yes_voter = Address::generate(&env);
@@ -282,7 +301,7 @@ fn test_proposal_rejected_when_pass_threshold_not_met() {
     // Quorum (10%) = 20_100; total votes cast = 200_000 ✓
     // YES = 100_000, NO = 100_000 → 50% YES < 60% threshold → Rejected
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     gov.vote(&id, &yes_voter, &true);
     gov.vote(&id, &no_voter, &false);
 
@@ -300,28 +319,13 @@ fn test_proposal_rejected_when_pass_threshold_not_met() {
 // ── edge cases ────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_zero_snapshot_supply_rejects_proposal_immediately() {
+fn test_zero_quorum_supply_of_one_still_passes() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (_gov, _) = setup_governance(&env, &share_id);
-
-    // Nobody holds shares yet — total supply is 0 at proposal creation
-    let proposer = Address::generate(&env);
-    share.mint(&proposer, &MIN_SHARE_BALANCE); // just enough to create proposal
-
-    // Burn back down to 1 so snapshot_supply = 1, quorum = 0 → edge: passes quorum trivially
-    // Instead mint AFTER creation to test zero-snapshot path
-    // Simplest zero-snapshot: use a fresh share contract with supply = 0... but proposer needs
-    // min_share_balance. Use MIN_SHARE_BALANCE = 1 so 1 share exists at creation.
-    // quorum = 1 * 1000 / 10000 = 0 → total_votes(0) >= 0 → passes quorum, but 0 YES / 0 total
-    // would divide by zero. Let's instead verify with large supply and zero votes the rejection.
-
-    // Separate sub-scenario using a fresh environment
-    let (share2, share_id2, share_admin2) = setup_share(&env);
-    let (gov2, _) = setup_governance(&env, &share_id2);
+    let (share2, share_id2, _share_admin2) = setup_share(&env);
+    let (gov2, _, target_id2) = setup_governance(&env, &share_id2);
 
     // Mint a share AFTER governance is initialised but BEFORE creating proposal — supply = 0 at
     // proposal creation time is impossible because proposer needs min_share_balance ≥ 1.
@@ -332,9 +336,8 @@ fn test_zero_snapshot_supply_rejects_proposal_immediately() {
     let id = gov2.create_proposal(
         &proposer2,
         &String::from_str(&env, "zero-quorum proposal"),
-        &share_admin2,
-        &String::from_str(&env, "no_op"),
-        &String::from_str(&env, "{}"),
+        &target_id2,
+        &placeholder_action(),
         &ProposalCategory::ParameterChange,
     );
     // No votes cast → total_votes = 0. quorum = 0 so 0 >= 0 passes quorum check.
@@ -345,7 +348,6 @@ fn test_zero_snapshot_supply_rejects_proposal_immediately() {
     let p = gov2.get_proposal(&id).unwrap();
     assert_eq!(p.snapshot_supply, 1i128);
     assert_eq!(p.status, ProposalStatus::Executed);
-    let _ = (share, share_id, share_admin, proposer); // silence unused warnings
 }
 
 #[test]
@@ -354,15 +356,15 @@ fn test_cannot_vote_after_voting_period_ends() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
     share.mint(&proposer, &1_000i128);
     share.mint(&voter, &100_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
 
     // Advance past voting window before voting
     env.ledger().with_mut(|l| l.timestamp += VOTING_PERIOD + 1);
@@ -377,38 +379,109 @@ fn test_cannot_vote_twice() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
     share.mint(&proposer, &1_000i128);
     share.mint(&voter, &100_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
 
     gov.vote(&id, &voter, &true);
     let result = gov.try_vote(&id, &voter, &false);
     assert!(result.is_err(), "double vote must fail");
 }
 
+// ── cancel_proposal (#1118: proposer must not be able to veto a Passed
+//    proposal unilaterally — only Active proposals are proposer-cancellable) ─
+
 #[test]
-fn test_cancel_proposal_by_proposer() {
+fn test_cancel_proposal_by_proposer_while_active() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     share.mint(&proposer, &10_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &share_admin);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     gov.cancel_proposal(&id, &proposer);
 
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Cancelled);
+}
+
+#[test]
+fn test_proposer_cannot_cancel_passed_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
+    gov.vote(&id, &voter, &true);
+
+    // Advance past the voting period so the proposal finalizes to Passed
+    // (finalization happens lazily on the next touch), then attempt an
+    // early proposer cancellation before execution/timelock.
+    env.ledger().with_mut(|l| l.timestamp += VOTING_PERIOD + 1);
+    gov.list_proposals();
+    let proposal = gov.get_proposal(&id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Passed);
+
+    // The original proposer alone must not be able to veto a Passed proposal
+    // — that would let a single voter unilaterally block an approved change
+    // during the timelock window.
+    let result = gov.try_cancel_proposal(&id, &proposer);
+    assert_eq!(result, Err(Ok(GovernanceError::Unauthorized)));
+
+    let proposal = gov.get_proposal(&id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Passed);
+}
+
+#[test]
+fn test_admin_can_cancel_passed_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, gov_admin, target_id) = setup_governance(&env, &share_id);
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
+    gov.vote(&id, &voter, &true);
+
+    env.ledger().with_mut(|l| l.timestamp += VOTING_PERIOD + 1);
+    gov.list_proposals();
+    assert_eq!(
+        gov.get_proposal(&id).unwrap().status,
+        ProposalStatus::Passed
+    );
+
+    // The admin retains the ability to cancel a Passed proposal (e.g. to halt
+    // an exploit discovered during the timelock window).
+    gov.cancel_proposal(&id, &gov_admin);
+    assert_eq!(
+        gov.get_proposal(&id).unwrap().status,
+        ProposalStatus::Cancelled
+    );
 }
 
 // ── vote weight is snapshotted at proposal creation ──────────────────────────
@@ -420,13 +493,13 @@ fn test_vote_weight_ignores_shares_acquired_after_proposal_creation() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let latecomer = Address::generate(&env);
     share.mint(&proposer, &1_000_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
 
     // latecomer acquires a large share balance only after the proposal was
     // created (in a later ledger) — this must not count toward voting weight.
@@ -446,7 +519,7 @@ fn test_vote_weight_uses_balance_at_creation_not_at_vote_time() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
@@ -454,7 +527,7 @@ fn test_vote_weight_uses_balance_at_creation_not_at_vote_time() {
     share.mint(&voter, &50_000i128);
     // Supply at creation = 51_000; quorum (10%) = 5_100
 
-    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
 
     // Voter transfers away most of their shares after the snapshot (in a
     // later ledger) but before voting — their voting weight must still
@@ -485,7 +558,7 @@ fn test_update_config_by_admin_changes_quorum_and_threshold() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (_share, share_id, _share_admin) = setup_share(&env);
-    let (gov, gov_admin) = setup_governance(&env, &share_id);
+    let (gov, gov_admin, _target_id) = setup_governance(&env, &share_id);
 
     gov.update_config(&gov_admin, &2_000u32, &5_500u32);
 
@@ -501,7 +574,7 @@ fn test_update_config_rejects_non_admin_caller() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (_share, share_id, _share_admin) = setup_share(&env);
-    let (gov, _gov_admin) = setup_governance(&env, &share_id);
+    let (gov, _gov_admin, _target_id) = setup_governance(&env, &share_id);
 
     let impostor = Address::generate(&env);
     let result = gov.try_update_config(&impostor, &2_000u32, &5_500u32);
@@ -515,11 +588,68 @@ fn test_update_config_rejects_invalid_threshold() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (_share, share_id, _share_admin) = setup_share(&env);
-    let (gov, gov_admin) = setup_governance(&env, &share_id);
+    let (gov, gov_admin, _target_id) = setup_governance(&env, &share_id);
 
     // pass_bps must be > 5_000
     let result = gov.try_update_config(&gov_admin, &2_000u32, &5_000u32);
     assert!(result.is_err());
+}
+
+// ── #1121: min_share_balance is updatable after initialize ──────────────────
+
+#[test]
+fn test_update_min_share_balance_by_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (share, share_id, _share_admin) = setup_share(&env);
+    let (gov, gov_admin, target_id) = setup_governance(&env, &share_id);
+
+    gov.update_min_share_balance(&gov_admin, &10_000i128);
+    assert_eq!(gov.get_config().min_share_balance, 10_000i128);
+
+    // The new threshold is enforced immediately for subsequent proposals.
+    let proposer = Address::generate(&env);
+    share.mint(&proposer, &9_999i128);
+    let result = gov.try_create_proposal(
+        &proposer,
+        &String::from_str(&env, "under new threshold"),
+        &target_id,
+        &placeholder_action(),
+        &ProposalCategory::ParameterChange,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::InsufficientShareBalance)));
+}
+
+#[test]
+fn test_update_min_share_balance_rejects_non_admin_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (_share, share_id, _share_admin) = setup_share(&env);
+    let (gov, _gov_admin, _target_id) = setup_governance(&env, &share_id);
+
+    let impostor = Address::generate(&env);
+    let result = gov.try_update_min_share_balance(&impostor, &10_000i128);
+    assert_eq!(result, Err(Ok(GovernanceError::Unauthorized)));
+}
+
+#[test]
+fn test_update_min_share_balance_rejects_non_positive_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let (_share, share_id, _share_admin) = setup_share(&env);
+    let (gov, gov_admin, _target_id) = setup_governance(&env, &share_id);
+
+    let result = gov.try_update_min_share_balance(&gov_admin, &0i128);
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidConfig)));
+
+    let result = gov.try_update_min_share_balance(&gov_admin, &-1i128);
+    assert_eq!(result, Err(Ok(GovernanceError::InvalidConfig)));
 }
 
 // ── passed proposals expire if not executed in time ──────────────────────────
@@ -531,14 +661,14 @@ fn test_passed_proposal_expires_if_not_executed_within_seven_days() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
     share.mint(&proposer, &1_000i128);
     share.mint(&voter, &200_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     gov.vote(&id, &voter, &true);
 
     // Past voting period + execution delay, proposal is Passed but not yet executed.
@@ -566,14 +696,14 @@ fn test_passed_proposal_executes_within_expiry_window() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _share_admin) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
     share.mint(&proposer, &1_000i128);
     share.mint(&voter, &200_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     gov.vote(&id, &voter, &true);
 
     env.ledger()
@@ -596,14 +726,14 @@ fn test_execute_rejected_at_exact_voting_ends_at() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
     share.mint(&proposer, &1_000i128);
     share.mint(&voter, &200_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     gov.vote(&id, &voter, &true);
 
     let proposal = gov.get_proposal(&id).unwrap();
@@ -632,14 +762,14 @@ fn test_execute_requires_voting_period_elapsed_before_timelock() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
     share.mint(&proposer, &1_000i128);
     share.mint(&voter, &200_000i128);
 
-    let id = make_proposal(&env, &gov, &proposer, &proposer);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
     gov.vote(&id, &voter, &true);
 
     // Still inside voting window.
@@ -664,7 +794,7 @@ fn test_create_proposal_rejects_zero_balance() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     // Ensure supply is non-zero via another holder, but proposer has nothing.
     let holder = Address::generate(&env);
@@ -674,9 +804,8 @@ fn test_create_proposal_rejects_zero_balance() {
     let result = gov.try_create_proposal(
         &poor,
         &String::from_str(&env, "spam"),
-        &holder,
-        &String::from_str(&env, "no_op"),
-        &String::from_str(&env, "{}"),
+        &target_id,
+        &placeholder_action(),
         &ProposalCategory::ParameterChange,
     );
     assert_eq!(result, Err(Ok(GovernanceError::InsufficientShareBalance)));
@@ -688,7 +817,7 @@ fn test_create_proposal_rejects_below_min_share_balance() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
-    let (share, share_id, share_admin) = setup_share(&env);
+    let (share, share_id, _share_admin) = setup_share(&env);
     let gov_admin = Address::generate(&env);
     let gov_id = env.register(Governance, ());
     let gov = GovernanceClient::new(&env, &gov_id);
@@ -703,15 +832,16 @@ fn test_create_proposal_rejects_below_min_share_balance() {
         &10_000i128,
     );
 
+    let target_id = env.register(MockTarget, ());
+
     let proposer = Address::generate(&env);
     share.mint(&proposer, &9_999i128);
 
     let result = gov.try_create_proposal(
         &proposer,
         &String::from_str(&env, "under threshold"),
-        &share_admin,
-        &String::from_str(&env, "no_op"),
-        &String::from_str(&env, "{}"),
+        &target_id,
+        &placeholder_action(),
         &ProposalCategory::ParameterChange,
     );
     assert_eq!(result, Err(Ok(GovernanceError::InsufficientShareBalance)));
@@ -720,9 +850,8 @@ fn test_create_proposal_rejects_below_min_share_balance() {
     let id = gov.create_proposal(
         &proposer,
         &String::from_str(&env, "at threshold"),
-        &share_admin,
-        &String::from_str(&env, "no_op"),
-        &String::from_str(&env, "{}"),
+        &target_id,
+        &placeholder_action(),
         &ProposalCategory::ParameterChange,
     );
     assert_eq!(id, 1u64);
@@ -737,7 +866,7 @@ fn test_category_quorum_defaults_and_snapshot() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _) = setup_share(&env);
-    let (gov, gov_admin) = setup_governance(&env, &share_id);
+    let (gov, gov_admin, target_id) = setup_governance(&env, &share_id);
 
     assert_eq!(
         gov.get_category_quorum(&ProposalCategory::ParameterChange),
@@ -753,21 +882,21 @@ fn test_category_quorum_defaults_and_snapshot() {
         &env,
         &gov,
         &proposer,
-        &proposer,
+        &target_id,
         &ProposalCategory::ParameterChange,
     );
     let treasury_id = make_proposal_with_category(
         &env,
         &gov,
         &proposer,
-        &proposer,
+        &target_id,
         &ProposalCategory::Treasury,
     );
     let critical_id = make_proposal_with_category(
         &env,
         &gov,
         &proposer,
-        &proposer,
+        &target_id,
         &ProposalCategory::Critical,
     );
 
@@ -792,7 +921,7 @@ fn test_category_quorum_defaults_and_snapshot() {
         &env,
         &gov,
         &proposer,
-        &proposer,
+        &target_id,
         &ProposalCategory::Critical,
     );
     assert_eq!(gov.get_proposal(&new_critical).unwrap().quorum_bps, 8_000);
@@ -805,7 +934,7 @@ fn test_critical_category_requires_higher_quorum() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (share, share_id, _) = setup_share(&env);
-    let (gov, _) = setup_governance(&env, &share_id);
+    let (gov, _, target_id) = setup_governance(&env, &share_id);
 
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
@@ -817,14 +946,14 @@ fn test_critical_category_requires_higher_quorum() {
         &env,
         &gov,
         &proposer,
-        &proposer,
+        &target_id,
         &ProposalCategory::ParameterChange,
     );
     let critical_id = make_proposal_with_category(
         &env,
         &gov,
         &proposer,
-        &proposer,
+        &target_id,
         &ProposalCategory::Critical,
     );
 
@@ -857,7 +986,7 @@ fn test_set_category_quorum_rejects_non_admin_and_invalid() {
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
     let (_share, share_id, _) = setup_share(&env);
-    let (gov, gov_admin) = setup_governance(&env, &share_id);
+    let (gov, gov_admin, _target_id) = setup_governance(&env, &share_id);
 
     let impostor = Address::generate(&env);
     assert!(gov
