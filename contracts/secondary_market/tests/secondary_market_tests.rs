@@ -232,6 +232,62 @@ fn test_list_position_exceeds_share_rejected() {
     assert_eq!(result.unwrap_err().unwrap(), MarketError::InvalidAmount);
 }
 
+#[test]
+fn test_list_position_rejects_amount_reserved_in_other_open_listings() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
+
+    let bps = pool_client.get_co_fund_share(&invoice_id, &investor) as u64;
+    market_client.list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &6_000u64,
+        &1_000i128,
+    );
+
+    let result = market_client.try_list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &5_000u64,
+        &1_000i128,
+    );
+    assert_eq!(bps, 10_000);
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::InvalidAmount);
+}
+
+#[test]
+fn test_list_position_rejects_amount_reserved_in_open_ask_orders() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, investor) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
+
+    market_client.place_order(
+        &investor,
+        &secondary_market::PlaceOrderRequest {
+            invoice_id,
+            kind: ListingKind::CoFunding,
+            side: secondary_market::OrderSide::Ask,
+            amount_or_bps: 6_000u64,
+            price: 10_000_000i128,
+            expires_at: 0u64,
+        },
+    );
+
+    let result = market_client.try_list_position(
+        &investor,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &5_000u64,
+        &1_000i128,
+    );
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::InvalidAmount);
+}
+
 // ── cancel_listing ───────────────────────────────────────────────────────────
 
 #[test]

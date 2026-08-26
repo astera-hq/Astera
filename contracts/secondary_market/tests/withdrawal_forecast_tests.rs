@@ -6,7 +6,7 @@
 // during the pool-split (pool.wasm exceeded Soroban's 200KB limit).
 
 use pool::FundingPoolClient;
-use secondary_market::SecondaryMarketClient;
+use secondary_market::{MarketError, SecondaryMarket, SecondaryMarketClient};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
@@ -241,4 +241,29 @@ fn test_liquidity_forecast_clamps_horizon() {
             .len(),
         365
     );
+}
+
+#[test]
+fn test_estimate_withdrawal_wait_returns_typed_not_initialized_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let market_id = env.register(SecondaryMarket, ());
+    let market_client = SecondaryMarketClient::new(&env, &market_id);
+    let investor = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let result = market_client.try_estimate_withdrawal_wait(&investor, &token);
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::NotInitialized);
+}
+
+#[test]
+fn test_get_liquidity_forecast_returns_typed_not_initialized_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let market_id = env.register(SecondaryMarket, ());
+    let market_client = SecondaryMarketClient::new(&env, &market_id);
+    let token = Address::generate(&env);
+
+    let result = market_client.try_get_liquidity_forecast(&token, &30u32);
+    assert_eq!(result.unwrap_err().unwrap(), MarketError::NotInitialized);
 }
