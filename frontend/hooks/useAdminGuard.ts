@@ -73,23 +73,23 @@ export function useAdminGuard(options: AdminGuardOptions = {}): AdminGuardResult
           authorized =
             (verified?.authenticated && verified?.account === config.admin) ||
             wallet.address === config.admin;
-
-          if (!authorized) {
-            const roleChecks = [
-              'SuperAdmin',
-              'RiskManager',
-              'TreasuryManager',
-              'ComplianceOfficer',
-              'OracleManager',
-            ] as const;
-            const roleResults = await Promise.all(
-              roleChecks.map((role) => isAccessControlSigner(wallet.address!, role)),
-            );
-            authorized = roleResults.some(Boolean);
-          }
         } catch {
           // Fall back to a raw address match if verification is unavailable.
           authorized = wallet.address === config.admin;
+        }
+
+        if (!authorized) {
+          const roleChecks = [
+            'SuperAdmin',
+            'RiskManager',
+            'TreasuryManager',
+            'ComplianceOfficer',
+            'OracleManager',
+          ] as const;
+          const roleResults = await Promise.all(
+            roleChecks.map((role) => isAccessControlSigner(wallet.address!, role)),
+          );
+          authorized = roleResults.some(Boolean);
         }
 
         if (cancelled) return;
