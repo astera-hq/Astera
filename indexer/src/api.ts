@@ -175,6 +175,44 @@ export function startApiServer(
     }
   });
 
+  app.get("/api/invoices/search", async (req, res) => {
+    try {
+      const query = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
+      const status = typeof req.query.status === "string" ? req.query.status.toLowerCase() : "";
+      const page = Math.max(0, Number.parseInt(String(req.query.page ?? "0"), 10) || 0);
+      const pageSize = Math.min(
+        100,
+        Math.max(1, Number.parseInt(String(req.query.pageSize ?? "20"), 10) || 20),
+      );
+      const events = await getAllEvents(pool, { contractType: "invoice" });
+      const invoicesById = new Map<string, { latest: IndexedEvent; searchable: string }>();
+
+      for (const event of events) {
+        const invoiceId = extractInvoiceId(event.value);
+        if (invoiceId === null) continue;
+        const existing = invoicesById.get(invoiceId);
+        invoicesById.set(invoiceId, {
+          latest: existing?.latest ?? event,
+          searchable: `${existing?.searchable ?? ""} ${JSON.stringify(event.value)}`.toLowerCase(),
+        });
+      }
+
+      const matches = Array.from(invoicesById.entries())
+        .filter(([invoiceId, invoice]) => {
+          const matchesQuery = !query || invoiceId.includes(query) || invoice.searchable.includes(query);
+          const matchesStatus = !status || invoice.latest.eventType.toLowerCase() === status || invoice.searchable.includes(status);
+          return matchesQuery && matchesStatus;
+        })
+        .sort(([, left], [, right]) => right.latest.ledgerSequence - left.latest.ledgerSequence);
+      const start = page * pageSize;
+      const results = matches.slice(start, start + pageSize).map(([invoiceId]) => Number(invoiceId));
+
+      return res.json({ invoiceIds: results, page, pageSize, total: matches.length });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // #702: Get all invoice events for a specific SME owner address.
   // Supports an optional ?status= filter (e.g. Funded) which matches against
   // either the indexed event_type (lowercased) or a status field embedded in
