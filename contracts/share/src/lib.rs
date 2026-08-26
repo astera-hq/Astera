@@ -5,6 +5,14 @@ use soroban_sdk::{
 
 const EVT: Symbol = symbol_short!("share");
 
+/// Maximum number of balance checkpoints retained per holder.
+/// Once the list is full the oldest entry is dropped before a new one is
+/// appended, giving a bounded rolling window (≈ 1 checkpoint / ledger-second
+/// worst-case, or ~2.8 years of daily snapshots at the common 1-per-day rate).
+/// Governance's `balance_at` queries target recent proposal-creation timestamps,
+/// so pruning ancient history does not affect correctness in practice.
+pub const MAX_CHECKPOINTS: u32 = 1_024;
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -40,6 +48,10 @@ fn write_checkpoint(env: &Env, who: &Address, new_balance: i128) {
             env.storage().persistent().set(&key, &checkpoints);
             return;
         }
+    }
+    // Evict the oldest entry before appending so the Vec never exceeds the cap.
+    if checkpoints.len() >= MAX_CHECKPOINTS {
+        checkpoints.remove(0);
     }
     checkpoints.push_back((now, new_balance));
     env.storage().persistent().set(&key, &checkpoints);

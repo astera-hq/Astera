@@ -261,6 +261,50 @@ fn test_balance_at_handles_many_checkpoint_boundaries() {
     assert_eq!(client.balance_at(&alice, &u64::MAX), expected);
 }
 
+// ── Checkpoint cap enforcement ───────────────────────────────────────────────
+
+/// Mints 2 × MAX_CHECKPOINTS times, each at a distinct timestamp, to verify
+/// that the checkpoint Vec is bounded and old entries are pruned.
+/// Invariants checked:
+///   1. `balance_at` with a recent timestamp still returns the correct balance,
+///      confirming new entries are retained.
+///   2. `balance_at` with a timestamp from the very first mint returns 0 once
+///      those entries fall outside the rolling window, confirming pruning works.
+#[test]
+fn test_checkpoint_cap_is_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let alice = Address::generate(&env);
+
+    let cap = share::MAX_CHECKPOINTS;
+    let total_mints = cap * 2; // deliberately exceed the cap
+
+    // Each mint at a unique second so each gets its own checkpoint slot.
+    for i in 0..total_mints {
+        env.ledger().with_mut(|l| l.timestamp = 1_000 + i as u64);
+        client.mint(&alice, &1i128);
+    }
+
+    let final_balance = total_mints as i128;
+    assert_eq!(client.balance(&alice), final_balance);
+
+    // The most recent checkpoint window must return the full balance.
+    let recent_ts = 1_000 + (total_mints - 1) as u64;
+    assert_eq!(client.balance_at(&alice, &recent_ts), final_balance);
+
+    // A timestamp from the very first mint (ts = 1_000) is now outside the
+    // rolling window of `cap` entries; the oldest retained entry starts at
+    // ts = 1_000 + cap (the cap+1-th mint).  Querying before that must
+    // return 0 because no checkpoint exists that early anymore.
+    let evicted_ts = 1_000 + (cap - 1) as u64; // last evicted timestamp
+    assert_eq!(
+        client.balance_at(&alice, &evicted_ts),
+        0,
+        "entries older than the cap window must be pruned"
+    );
+}
+
 // ── Overflow safety ──────────────────────────────────────────────────────────
 
 #[test]
