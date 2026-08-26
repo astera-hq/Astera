@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
 import { getPoolConfig } from '@/lib/contracts';
+import { isAccessControlSigner } from '@/lib/stellar';
 
 /**
  * Result of the client-side admin role check.
@@ -75,6 +76,20 @@ export function useAdminGuard(options: AdminGuardOptions = {}): AdminGuardResult
         } catch {
           // Fall back to a raw address match if verification is unavailable.
           authorized = wallet.address === config.admin;
+        }
+
+        if (!authorized) {
+          const roleChecks = [
+            'SuperAdmin',
+            'RiskManager',
+            'TreasuryManager',
+            'ComplianceOfficer',
+            'OracleManager',
+          ] as const;
+          const roleResults = await Promise.all(
+            roleChecks.map((role) => isAccessControlSigner(wallet.address!, role)),
+          );
+          authorized = roleResults.some(Boolean);
         }
 
         if (cancelled) return;
