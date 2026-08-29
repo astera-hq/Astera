@@ -135,6 +135,8 @@ pub enum DataKey {
     Screener(Address),
     ScreenerIds,
     PendingScreener(Address),
+    // #1111: list of pending screener addresses for enumeration
+    PendingScreenerIds,
     FlaggedIds,
     PendingReviewIds,
     // #927: last request_review timestamp keyed by (caller, target address).
@@ -186,6 +188,9 @@ impl ComplianceContract {
         env.storage()
             .instance()
             .set(&DataKey::ScreenerIds, &Vec::<Address>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingScreenerIds, &Vec::<Address>::new(&env));
         env.storage()
             .instance()
             .set(&DataKey::FlaggedIds, &Vec::<Address>::new(&env));
@@ -278,6 +283,13 @@ impl ComplianceContract {
             env.storage()
                 .instance()
                 .set(&DataKey::PendingScreener(screener.clone()), &pending);
+            // #1111: track this pending screener for enumeration
+            Self::add_to_list(
+                env,
+                &DataKey::PendingScreenerIds,
+                &screener,
+                MAX_SCREENER_LIST,
+            );
             env.events().publish(
                 (EVT, symbol_short!("scr_prop")),
                 (caller, screener, pending.effective_at),
@@ -317,6 +329,8 @@ impl ComplianceContract {
         env.storage()
             .instance()
             .remove(&DataKey::PendingScreener(screener.clone()));
+        // #1111: remove from pending screener tracking list
+        Self::remove_from_list(env, &DataKey::PendingScreenerIds, &screener);
         Self::activate_screener(env, &screener)?;
         Ok(())
     }
@@ -352,6 +366,8 @@ impl ComplianceContract {
                 env.storage()
                     .instance()
                     .remove(&DataKey::PendingScreener(screener.clone()));
+                // #1111: remove from pending screener tracking list
+                Self::remove_from_list(env, &DataKey::PendingScreenerIds, &screener);
                 env.events()
                     .publish((EVT, symbol_short!("scr_can")), (caller, screener));
                 return Ok(());
@@ -377,6 +393,29 @@ impl ComplianceContract {
             .instance()
             .get(&DataKey::ScreenerIds)
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// #1111: List all pending screeners awaiting activation after their timelock.
+    pub fn list_pending_screeners(env: Env) -> Vec<PendingScreener> {
+        let pending_ids: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingScreenerIds)
+            .unwrap_or(Vec::new(&env));
+
+        let mut pending_screeners = Vec::new(&env);
+        for i in 0..pending_ids.len() {
+            if let Some(address) = pending_ids.get(i) {
+                if let Some(pending) = env
+                    .storage()
+                    .instance()
+                    .get::<DataKey, PendingScreener>(&DataKey::PendingScreener(address))
+                {
+                    pending_screeners.push_back(pending);
+                }
+            }
+        }
+        pending_screeners
     }
 
     pub fn set_rescreening_interval(
