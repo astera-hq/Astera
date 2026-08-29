@@ -250,6 +250,10 @@ pub fn clear_auction(
     for i in 0..bids.len() {
         let bid = bids.get(i).unwrap();
         let cs = credit_scores.get(bid.sme.clone()).unwrap_or(0);
+        // #1113: skip bids where credit score falls below the minimum priority threshold
+        if cs < bid.min_priority_score {
+            continue;
+        }
         let score = composite_score(bid.max_discount_bps, cs);
         scored.push_back((
             score,
