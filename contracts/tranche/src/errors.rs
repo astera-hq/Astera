@@ -15,4 +15,5 @@ pub enum TrancheError {
     WaterfallError = 9,
     LossAllocationError = 10,
     ReentrancyDetected = 11,
+    NotInitialized = 12,
 }

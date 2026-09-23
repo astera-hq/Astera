@@ -69,8 +69,11 @@ impl TrancheContract {
             .unwrap_or_else(|| panic_with_error!(&env, TrancheError::PoolNotFound))
     }
 
-    pub fn get_admin(env: Env) -> Address {
-        env.storage().instance().get(&DataKey::Admin).unwrap()
+    pub fn get_admin(env: Env) -> Result<Address, TrancheError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TrancheError::NotInitialized)
     }
 
     pub fn get_config(env: Env, token: Address) -> TrancheConfig {
@@ -116,11 +119,10 @@ impl TrancheContract {
         investor: Address,
         token: Address,
         tranche: TrancheClass,
-    ) -> state::InvestorPosition {
+    ) -> Option<state::InvestorPosition> {
         env.storage()
             .instance()
             .get(&DataKey::Investor(investor, token, tranche))
-            .unwrap_or_default()
     }
 
     /// Previews how much more the senior tranche can accept before a deposit
@@ -162,10 +164,10 @@ impl TrancheContract {
         senior_target_yield_bps: u32,
         senior_advance_rate_bps: u32,
         junior_first_loss_bps: u32,
-    ) {
+    ) -> Result<(), TrancheError> {
         admin.require_auth();
 
-        let stored_admin = Self::get_admin(env.clone());
+        let stored_admin = Self::get_admin(env.clone())?;
         if admin != stored_admin {
             panic_with_error!(&env, TrancheError::Unauthorized);
         }
@@ -193,6 +195,8 @@ impl TrancheContract {
                 junior_first_loss_bps,
             ),
         );
+
+        Ok(())
     }
 
     pub fn open_tranche_for_token(
@@ -202,10 +206,10 @@ impl TrancheContract {
         senior_share_token: Address,
         junior_share_token: Address,
         config: TrancheConfig,
-    ) {
+    ) -> Result<(), TrancheError> {
         admin.require_auth();
 
-        let stored_admin = Self::get_admin(env.clone());
+        let stored_admin = Self::get_admin(env.clone())?;
         if admin != stored_admin {
             panic_with_error!(&env, TrancheError::Unauthorized);
         }
@@ -245,6 +249,7 @@ impl TrancheContract {
                 config.junior_first_loss_bps,
             ),
         );
+        Ok(())
     }
 
     pub fn is_tranche_enabled(env: Env, token: Address) -> bool {
