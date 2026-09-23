@@ -10,10 +10,17 @@ import type { TransactionProgress } from './stellar';
 // See `safeSerialize` doc block in `lib/stellar.ts` for details.
 
 const WALLET_KEY = 'astera_wallet_address';
+const WALLET_CONNECTED_KEY = 'astera-wallet-connected';
+const WALLET_ADDRESS_KEY = 'astera-wallet-address';
 
 export function getStoredWalletAddress(): string | null {
   if (typeof window === 'undefined') return null;
-  return localStorage.getItem(WALLET_KEY);
+  return localStorage.getItem(WALLET_ADDRESS_KEY) ?? localStorage.getItem(WALLET_KEY);
+}
+
+export function wasWalletConnected(): boolean {
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem(WALLET_CONNECTED_KEY) === 'true' || Boolean(getStoredWalletAddress());
 }
 
 export interface TrackedTransaction {
@@ -103,8 +110,12 @@ export const useStore = create<AsteraStore>((set, get) => ({
     if (typeof window !== 'undefined') {
       if (wallet.connected && wallet.address) {
         localStorage.setItem(WALLET_KEY, wallet.address);
+        localStorage.setItem(WALLET_CONNECTED_KEY, 'true');
+        localStorage.setItem(WALLET_ADDRESS_KEY, wallet.address);
       } else {
         localStorage.removeItem(WALLET_KEY);
+        localStorage.removeItem(WALLET_CONNECTED_KEY);
+        localStorage.removeItem(WALLET_ADDRESS_KEY);
       }
     }
     set({ wallet });
@@ -122,6 +133,8 @@ export const useStore = create<AsteraStore>((set, get) => ({
   disconnect: () => {
     if (typeof window !== 'undefined') {
       localStorage.removeItem(WALLET_KEY);
+      localStorage.removeItem(WALLET_CONNECTED_KEY);
+      localStorage.removeItem(WALLET_ADDRESS_KEY);
     }
     set({
       wallet: { address: null, connected: false, network: 'testnet' },
