@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
 import WalletConnect from '@/components/WalletConnect';
@@ -72,6 +72,26 @@ describe('WalletConnect', () => {
       address: 'GTEST',
       connected: true,
     });
+    expect(localStorage.getItem('astera-wallet-connected')).toBe('true');
+    expect(localStorage.getItem('astera-wallet-address')).toBe('GTEST');
+  });
+
+  it('silently reconnects when a stored session is still allowed', async () => {
+    localStorage.setItem('astera-wallet-connected', 'true');
+    localStorage.setItem('astera-wallet-address', 'GRETURNING');
+    mockFreighter.isAllowed.mockResolvedValue({ isAllowed: true });
+    mockFreighter.getAddress.mockResolvedValue({ address: 'GRETURNING', error: undefined });
+
+    render(<WalletConnect />);
+
+    await waitFor(() => {
+      expect(useStore.getState().wallet).toMatchObject({
+        address: 'GRETURNING',
+        connected: true,
+      });
+    });
+    expect(mockFreighter.isAllowed).toHaveBeenCalled();
+    expect(mockFreighter.getAddress).toHaveBeenCalled();
   });
 
   it('reports a clear error when Freighter is not installed', async () => {
