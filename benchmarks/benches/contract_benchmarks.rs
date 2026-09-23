@@ -1,12 +1,16 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, Env, String as SorobanString,
+    token, Address, Env, String as SorobanString, Symbol, Vec,
 };
 
 // Import contract implementations
+use auction::{AuctionContract, AuctionContractClient, CollateralSaleParams};
+use credit_score::{CreditScoreContract, CreditScoreContractClient};
+use governance::{Governance, GovernanceAction, GovernanceClient, PoolAction, ProposalCategory};
 use invoice::{InvoiceContract, InvoiceContractClient};
 use pool::{FundingPool, FundingPoolClient, OpenCoFundingRequest};
+use referral::{ReferralContract, ReferralContractClient};
 use share::{ShareToken, ShareTokenClient};
 
 /// Setup helper for invoice contract benchmarks
@@ -282,12 +286,214 @@ fn bench_repay_invoice(c: &mut Criterion) {
     });
 }
 
+// #1413: previously only invoice/pool/share had any benchmark coverage.
+// These four cover the paths flagged as most likely to regress into a
+// resource-limit failure on-chain rather than a test failure: a ring-buffer
+// walk, two unbounded-iteration list entrypoints, and an O(n^2) re-sort.
+
+/// credit_score's `get_credit_score` walks the full payment-history ring
+/// buffer (up to MAX_PAYMENT_HISTORY records) to compute the trend
+/// adjustment once an SME has at least TREND_WINDOW payments. Benchmarked
+/// with the ring buffer completely full, its worst case.
+fn bench_get_credit_score_full_history(c: &mut Criterion) {
+    c.bench_function("credit_score_get_credit_score_full_history", |b| {
+        b.iter_batched(
+            || {
+                let env = Env::default();
+                env.mock_all_auths_allowing_non_root_auth();
+                env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+                let contract_id = env.register(CreditScoreContract, ());
+                let client = CreditScoreContractClient::new(&env, &contract_id);
+                let admin = Address::generate(&env);
+                let invoice_contract = Address::generate(&env);
+                let pool_contract = Address::generate(&env);
+                client.initialize(&admin, &invoice_contract, &pool_contract);
+
+                let sme = Address::generate(&env);
+                let max_history = client.get_max_payment_history();
+                for i in 1..=max_history as u64 {
+                    let due_date = 100_000u64;
+                    client.record_payment(
+                        &pool_contract,
+                        &i,
+                        &sme,
+                        &(200_000_000i128),
+                        &due_date,
+                        &due_date,
+                    );
+                }
+
+                (env, client, sme)
+            },
+            |(_env, client, sme)| client.get_credit_score(&black_box(sme)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+}
+
+/// governance's `list_proposals` iterates every proposal ever created,
+/// lazily finalizing any whose voting period has elapsed along the way —
+/// unbounded in the number of proposals, with no pagination.
+fn bench_governance_list_proposals(c: &mut Criterion) {
+    c.bench_function("governance_list_proposals", |b| {
+        b.iter_batched(
+            || {
+                let env = Env::default();
+                env.mock_all_auths_allowing_non_root_auth();
+                env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+                let share_token_id = env.register(ShareToken, ());
+                let share_client = ShareTokenClient::new(&env, &share_token_id);
+                let admin = Address::generate(&env);
+                share_client.initialize(
+                    &admin,
+                    &7u32,
+                    &SorobanString::from_str(&env, "Gov Shares"),
+                    &SorobanString::from_str(&env, "GOV"),
+                );
+                let proposer = Address::generate(&env);
+                share_client.mint(&proposer, &1_000_000_000i128);
+
+                let gov_id = env.register(Governance, ());
+                let gov = GovernanceClient::new(&env, &gov_id);
+                gov.initialize(
+                    &admin,
+                    &share_token_id,
+                    &0u64, // default voting period
+                    &1_000u32,
+                    &6_000u32,
+                    &0u64,
+                    &1i128,
+                );
+
+                let target = Address::generate(&env);
+                for _ in 0..50 {
+                    gov.create_proposal(
+                        &proposer,
+                        &SorobanString::from_str(&env, "Adjust pool yield"),
+                        &target,
+                        &GovernanceAction::Pool(PoolAction::SetPoolYield(500)),
+                        &ProposalCategory::ParameterChange,
+                    );
+                }
+
+                (env, gov)
+            },
+            |(_env, gov)| gov.list_proposals(),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+}
+
+/// auction's `list_open_sales` iterates every sale id ever opened, filtering
+/// for `Open` status — unbounded in the number of sales ever created, not
+/// just currently-open ones.
+fn bench_auction_list_open_sales(c: &mut Criterion) {
+    c.bench_function("auction_list_open_sales", |b| {
+        b.iter_batched(
+            || {
+                let env = Env::default();
+                env.mock_all_auths_allowing_non_root_auth();
+                env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+                let auction_id = env.register(AuctionContract, ());
+                let auction = AuctionContractClient::new(&env, &auction_id);
+
+                let seller = Address::generate(&env);
+                let token_admin = Address::generate(&env);
+                let token_id = env
+                    .register_stellar_asset_contract_v2(token_admin)
+                    .address();
+                token::StellarAssetClient::new(&env, &token_id).mint(&seller, &1_000_000_000_000);
+                let proceeds_recipient = Address::generate(&env);
+
+                for _ in 0..50 {
+                    auction.open_collateral_sale(&CollateralSaleParams {
+                        seller: seller.clone(),
+                        token: token_id.clone(),
+                        amount: 1_000_000,
+                        proceeds_token: token_id.clone(),
+                        proceeds_recipient: proceeds_recipient.clone(),
+                        start_price: 1_000_000,
+                        floor_price: 500_000,
+                        duration_secs: 3_600,
+                    });
+                }
+
+                (env, auction)
+            },
+            |(_env, auction)| auction.list_open_sales(),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+}
+
+/// referral's `update_leaderboard` (called from `record_activity` on a
+/// referee's first qualifying action) re-sorts a Vec-backed leaderboard
+/// capped at MAX_LEADERBOARD_SIZE (25) — O(n^2) in the worst case across
+/// repeated insertions. Benchmarked with the leaderboard already full, so
+/// every measured call exercises a full insertion pass.
+fn bench_referral_leaderboard_insert_when_full(c: &mut Criterion) {
+    c.bench_function("referral_update_leaderboard_when_full", |b| {
+        b.iter_batched(
+            || {
+                let env = Env::default();
+                env.mock_all_auths_allowing_non_root_auth();
+                env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+                let referral_id = env.register(ReferralContract, ());
+                let referral = ReferralContractClient::new(&env, &referral_id);
+                let admin = Address::generate(&env);
+                let pool = Address::generate(&env);
+                referral.initialize(&admin, &pool);
+
+                let token = Address::generate(&env);
+                let kind = Symbol::new(&env, "deposit");
+
+                // Fill the leaderboard to capacity (25 distinct referrers,
+                // each activated with an increasing referral count so the
+                // insert-and-resort path is fully exercised).
+                for i in 0..25u32 {
+                    let referrer = Address::generate(&env);
+                    for j in 0..=i {
+                        let referee = Address::generate(&env);
+                        referral.register(&referee, &referrer);
+                        referral.record_activity(&pool, &referee, &kind, &(1_000_000i128), &token);
+                        let _ = j;
+                    }
+                }
+
+                let new_referrer = Address::generate(&env);
+                let new_referee = Address::generate(&env);
+                referral.register(&new_referee, &new_referrer);
+
+                (env, referral, pool, new_referee, kind, token)
+            },
+            |(_env, referral, pool, referee, kind, token)| {
+                referral.record_activity(
+                    &black_box(pool),
+                    &black_box(referee),
+                    &kind,
+                    &1_000_000i128,
+                    &token,
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+}
+
 criterion_group!(
     contract_benchmarks,
     bench_create_invoice,
     bench_mark_paid,
     bench_deposit,
     bench_commit_to_invoice,
-    bench_repay_invoice
+    bench_repay_invoice,
+    bench_get_credit_score_full_history,
+    bench_governance_list_proposals,
+    bench_auction_list_open_sales,
+    bench_referral_leaderboard_insert_when_full
 );
 criterion_main!(contract_benchmarks);
