@@ -242,6 +242,9 @@ pub enum AccessControlError {
     IncoherentProposal = 16,
     /// The signer set for a role has reached MAX_SIGNERS_PER_ROLE.
     MaxSignersExceeded = 17,
+    /// A signer removal would invalidate the current threshold. Lower the
+    /// threshold in a preceding proposal before removing the signer.
+    ThresholdMustBeLoweredBeforeSignerRemoval = 18,
 }
 
 type Result_ = Result<(), AccessControlError>;
@@ -962,7 +965,7 @@ impl AccessControlContract {
                     .ok_or(AccessControlError::SignerNotFound)?;
                 config.signers.remove(idx as u32);
                 if config.signers.len() < config.threshold {
-                    return Err(AccessControlError::InvalidThreshold);
+                    return Err(AccessControlError::ThresholdMustBeLoweredBeforeSignerRemoval);
                 }
                 env.storage()
                     .instance()

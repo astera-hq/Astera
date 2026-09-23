@@ -235,7 +235,7 @@ fn test_remove_signer_rejects_dropping_below_threshold() {
     let result = f.client.try_execute_action(&f.s1, &remove_s2);
     assert_eq!(
         result.unwrap_err().unwrap(),
-        AccessControlError::InvalidThreshold.into()
+        AccessControlError::ThresholdMustBeLoweredBeforeSignerRemoval.into()
     );
 }
 
