@@ -121,7 +121,8 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
     // === Entrypoints that DO call `require_not_paused` — must be refused ===
 
     assert_eq!(
-        f.client.try_register_oracle(&Address::generate(&env), &1_000),
+        f.client
+            .try_register_oracle(&Address::generate(&env), &1_000),
         Err(Ok(OracleRegistryError::ContractPaused)),
         "register_oracle is guarded and must be refused while paused"
     );
@@ -139,12 +140,8 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
     );
 
     assert_eq!(
-        f.client.try_submit_vote(
-            &oracle,
-            &7u64,
-            &true,
-            &String::from_str(&env, "e"),
-        ),
+        f.client
+            .try_submit_vote(&oracle, &7u64, &true, &String::from_str(&env, "e"),),
         Err(Ok(OracleRegistryError::ContractPaused)),
         "submit_vote is guarded and must be refused while paused"
     );
@@ -171,20 +168,17 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
         "slash_oracle is guarded and must be refused while paused"
     );
 
+    // #1370: expire_round moves a round to a terminal state, so it must be
+    // refused while paused.
+    assert_eq!(
+        f.client.try_expire_round(&7u64),
+        Err(Ok(OracleRegistryError::ContractPaused)),
+        "expire_round is guarded and must be refused while paused"
+    );
+
     // === Entrypoints that do NOT call `require_not_paused` — currently pass
     // === through while paused. This is the exact gap #1409 asks us to
     // === surface, not paper over; each is annotated with why.
-
-    // #1409: expire_round has no require_not_paused guard yet (tracked
-    // separately) — this call currently succeeds while paused, which is the
-    // exact gap this test surfaces. (Round 7 hasn't reached its deadline yet,
-    // so the *specific* error we'd expect from an unguarded-but-otherwise-valid
-    // call is RoundNotExpired, not ContractPaused — proving pause had no effect.)
-    assert_eq!(
-        f.client.try_expire_round(&7u64),
-        Err(Ok(OracleRegistryError::RoundNotExpired)),
-        "expire_round has no pause guard (#1409 gap) and runs its normal logic while paused"
-    );
 
     // #1371: slash_oracle is now pause-guarded (asserted in the guarded
     // section above), so it no longer appears here as an unguarded gap.
@@ -393,5 +387,41 @@ fn test_slash_oracle_refused_while_paused() {
     assert_eq!(
         f.client.get_oracle_info(&oracle).unwrap().stake_amount,
         stake_before - 100
+    );
+}
+
+/// #1370: `expire_round` must not move a past-deadline round to `Expired`
+/// while the registry is paused; once unpaused the same call succeeds.
+#[test]
+fn test_expire_round_refused_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    let caller = Address::generate(&env);
+    f.client
+        .open_verification_round(&caller, &7u64, &String::from_str(&env, "h1"));
+    let deadline = f.client.get_verification_round(&7u64).unwrap().deadline;
+
+    // Move past the deadline so the round is otherwise expirable.
+    env.ledger().with_mut(|l| l.timestamp = deadline + 1);
+
+    f.client.pause(&f.admin);
+    assert_eq!(
+        f.client.try_expire_round(&7u64),
+        Err(Ok(OracleRegistryError::ContractPaused)),
+        "expire_round must be refused while the registry is paused"
+    );
+    assert_eq!(
+        f.client.get_verification_round(&7u64).unwrap().status,
+        oracle_registry::RoundStatus::Open,
+        "a refused expire_round must leave the round open"
+    );
+
+    f.client.unpause(&f.admin);
+    f.client.expire_round(&7u64);
+    assert_eq!(
+        f.client.get_verification_round(&7u64).unwrap().status,
+        oracle_registry::RoundStatus::Expired
     );
 }

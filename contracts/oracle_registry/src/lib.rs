@@ -831,7 +831,11 @@ impl OracleRegistryContract {
     /// reaching quorum, moving it to `Expired` so `admin_resolve_round` (or a
     /// fresh `open_verification_round`) can take over. Also invoked lazily
     /// from `submit_vote` when a stale vote arrives after the deadline.
+    ///
+    /// #1370: refused while the registry is paused, so a round awaiting
+    /// consensus can't be moved to a terminal state during a pause.
     pub fn expire_round(env: Env, invoice_id: u64) -> Result<(), OracleRegistryError> {
+        require_not_paused(&env);
         let round_key = DataKey::Round(invoice_id);
         let mut round: VerificationRound = env
             .storage()
@@ -1031,7 +1035,7 @@ impl OracleRegistryContract {
         env.storage().instance().get(&DataKey::AccessControl)
     }
 
-     // #1038: Bootstrap the governance contract address. Admin-gated one-time setup.
+    // #1038: Bootstrap the governance contract address. Admin-gated one-time setup.
     pub fn set_governance_address(
         env: Env,
         admin: Address,
@@ -1184,8 +1188,10 @@ impl OracleRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::InvoiceContract, &invoice_contract);
-        env.events()
-            .publish((EVT, symbol_short!("gov_inv")), (governance, invoice_contract));
+        env.events().publish(
+            (EVT, symbol_short!("gov_inv")),
+            (governance, invoice_contract),
+        );
         Ok(())
     }
 
@@ -1263,8 +1269,10 @@ impl OracleRegistryContract {
             prev_threshold = Some(tier.min_invoice_amount);
         }
         env.storage().instance().set(&DataKey::QuorumTiers, &tiers);
-        env.events()
-            .publish((EVT, symbol_short!("gov_quorum")), (governance, tiers.len()));
+        env.events().publish(
+            (EVT, symbol_short!("gov_quorum")),
+            (governance, tiers.len()),
+        );
         Ok(())
     }
 
