@@ -13,7 +13,7 @@ pub fn calculate_waterfall_split(
         .saturating_mul(senior_target_yield_bps as u128)
         .saturating_mul(elapsed_secs as u128)
         .saturating_div(10_000)
-        .saturating_div(yearly) as i128;
+        .saturating_div(yearly as u128) as i128;
 
     let senior_cap = senior_principal + interest;
 

@@ -64,6 +64,17 @@ impl TrancheContract {
         admin.require_auth();
     }
 
+    fn require_not_paused(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            panic_with_error!(env, TrancheError::ContractPaused);
+        }
+    }
+
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -130,6 +141,7 @@ impl TrancheContract {
         amount: i128,
     ) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::non_reentrant_start(&env);
         deposit::deposit(&env, investor, token, tranche, amount);
         Self::non_reentrant_end(&env);
@@ -143,6 +155,7 @@ impl TrancheContract {
         amount: i128,
     ) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::non_reentrant_start(&env);
         withdraw::withdraw(&env, investor, token, tranche, amount);
         Self::non_reentrant_end(&env);
@@ -321,6 +334,7 @@ impl TrancheContract {
         total_amount: i128,
     ) -> (i128, i128) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         let result = funding::fund_invoice_from_tranches(&env, token, invoice_id, total_amount);
@@ -343,6 +357,7 @@ impl TrancheContract {
         elapsed_secs: u64,
     ) -> (i128, i128) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         let result = repayment::distribute_waterfall_repayment(
@@ -358,6 +373,7 @@ impl TrancheContract {
 
     pub fn allocate_loss(env: Env, token: Address, invoice_id: u64, shortfall: i128) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         repayment::allocate_loss(&env, token, invoice_id, shortfall);
@@ -411,5 +427,43 @@ impl TrancheContract {
         // Convert to basis points (lifetime, not annualized — see get_lifetime_return_bps).
         let return_bps = (total_return * 10_000) / accounting.deposited;
         return_bps.min(u32::MAX as i128) as u32
+    }
+
+    pub fn pause(env: Env, admin: Address) -> Result<(), TrancheError> {
+        Self::bump_instance(&env);
+        admin.require_auth();
+
+        let stored_admin = Self::get_admin(env.clone())?;
+        if admin != stored_admin {
+            panic_with_error!(&env, TrancheError::Unauthorized);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((EVT, PAUSED), (admin, env.ledger().timestamp()));
+        Ok(())
+    }
+
+    pub fn unpause(env: Env, admin: Address) -> Result<(), TrancheError> {
+        Self::bump_instance(&env);
+        admin.require_auth();
+
+        let stored_admin = Self::get_admin(env.clone())?;
+        if admin != stored_admin {
+            panic_with_error!(&env, TrancheError::Unauthorized);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((EVT, PAUSED), (admin, env.ledger().timestamp()));
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        Self::bump_instance(&env);
+        env.storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 }
