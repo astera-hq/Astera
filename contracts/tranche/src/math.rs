@@ -33,3 +33,19 @@ pub fn calculate_loss_allocation(shortfall: i128, junior_remaining: i128) -> (i1
         (junior_remaining, shortfall - junior_remaining)
     }
 }
+
+pub fn calculate_shares_to_mint(
+    amount: i128,
+    pool_value: i128,
+    total_shares: i128,
+) -> i128 {
+    if total_shares == 0 || pool_value == 0 {
+        return amount;
+    }
+    if pool_value <= 0 {
+        return amount;
+    }
+    (amount as u128)
+        .saturating_mul(total_shares as u128)
+        .saturating_div(pool_value as u128) as i128
+}

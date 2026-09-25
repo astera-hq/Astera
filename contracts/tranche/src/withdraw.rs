@@ -3,6 +3,7 @@ use soroban_sdk::{panic_with_error, token, Address, Env, IntoVal, Symbol, Vec};
 use crate::{
     errors::TrancheError,
     events::{EVT, WITHDRAW},
+    math::calculate_shares_to_mint,
     state::{DataKey, InvestorPosition, TrancheAccounting, TrancheClass, TranchePool},
 };
 
@@ -23,20 +24,47 @@ pub fn withdraw(env: &Env, investor: Address, token: Address, tranche: TrancheCl
 
     let mut position: InvestorPosition = env.storage().instance().get(&key).unwrap_or_default();
 
-    if position.shares < amount {
+    if position.deposited < amount {
+        panic_with_error!(env, TrancheError::InsufficientBalance);
+    }
+
+    let tranche_accounting = match tranche {
+        TrancheClass::Senior => &pool.senior,
+        TrancheClass::Junior => &pool.junior,
+    };
+
+    let pool_value = tranche_accounting.deposited
+        + tranche_accounting.earned
+        - tranche_accounting.losses;
+
+    let shares_to_burn = calculate_shares_to_mint(amount, pool_value, tranche_accounting.total_shares);
+
+    if position.shares < shares_to_burn {
         panic_with_error!(env, TrancheError::InsufficientBalance);
     }
 
     match tranche {
         TrancheClass::Senior => {
             update_accounting(env, &mut pool.senior, amount);
+            pool.senior.total_shares -= shares_to_burn;
         }
         TrancheClass::Junior => {
             update_accounting(env, &mut pool.junior, amount);
+            pool.junior.total_shares -= shares_to_burn;
+
+            // After junior withdrawal, validate that senior advance rate is not exceeded
+            let new_total_deposited = pool.junior.deposited + pool.senior.deposited;
+            if new_total_deposited > 0 {
+                let senior_target =
+                    pool.config.senior_advance_rate_bps as i128 * new_total_deposited / 10_000;
+                if pool.senior.deposited > senior_target {
+                    panic_with_error!(env, TrancheError::AdvanceRateExceeded);
+                }
+            }
         }
     }
 
-    position.shares -= amount;
+    position.shares -= shares_to_burn;
     position.deposited -= amount;
 
     let share_token = match tranche {
@@ -54,7 +82,7 @@ pub fn withdraw(env: &Env, investor: Address, token: Address, tranche: TrancheCl
 
     let mut burn_args = Vec::new(env);
     burn_args.push_back(investor.clone().into_val(env));
-    burn_args.push_back(amount.into_val(env));
+    burn_args.push_back(shares_to_burn.into_val(env));
     let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "burn"), burn_args);
 
     env.events()

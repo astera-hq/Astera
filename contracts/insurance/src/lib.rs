@@ -538,6 +538,29 @@ impl InsuranceReserve {
         Ok(())
     }
 
+    pub fn rotate_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), InsuranceError> {
+        current_admin.require_auth();
+        new_admin.require_auth();
+        Self::require_admin(&env, &current_admin)?;
+        bump_instance(&env);
+        let mut config: Config = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(InsuranceError::NotInitialized)?;
+        config.admin = new_admin.clone();
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events().publish(
+            (EVT, symbol_short!("adm_rot")),
+            (current_admin, new_admin),
+        );
+        Ok(())
+    }
+
     // ---- Core flows ----
 
     /// Called by the pool contract (or, in principle, the SME directly) at
