@@ -8311,6 +8311,7 @@ mod test {
         let referral_id = env.register(referral::ReferralContract, ());
         let referral_client = referral::ReferralContractClient::new(&env, &referral_id);
         referral_client.initialize(&admin, &client.address);
+        referral_client.set_lifetime_reward_cap(&admin, &usdc_id, &i128::MAX);
         referral_client.register(&sme, &referrer);
         client.set_referral_registry(&admin, &referral_id);
 

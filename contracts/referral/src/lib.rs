@@ -55,6 +55,8 @@ pub enum ReferralError {
     // #1042: a `*_via_ac` entrypoint was called but no `access_control`
     // contract has been configured via `set_access_control` yet.
     AccessControlNotConfigured = 6,
+    InvalidRewardCap = 7,
+    RewardOverflow = 8,
     ReferralCycle = 7,
     InvalidActivityKind = 8,
     NotInitialized = 9,
@@ -90,6 +92,10 @@ pub enum DataKey {
     Activated(Address),
     /// (referrer, token) -> unclaimed reward balance
     PendingReward(Address, Address),
+    /// Maximum lifetime reward for one referee, denominated in token base units.
+    LifetimeRewardCap(Address),
+    /// (referee, token) -> total reward credited over the referee's lifetime.
+    RefereeRewardAccrued(Address, Address),
     /// referrer -> number of referees who have completed a qualifying
     /// activity
     ReferralCount(Address),
@@ -290,6 +296,32 @@ impl ReferralContract {
         bump_instance(&env);
         env.events()
             .publish((EVT, symbol_short!("dep_bps")), (admin, bps));
+    }
+
+    /// Set the maximum lifetime reward credited for each referee in `token` units.
+    /// A zero cap disables referral rewards for that token. Caps are required
+    /// before rewards can accrue, so an unconfigured token cannot create an
+    /// unbounded referral liability.
+    pub fn set_lifetime_reward_cap(env: Env, admin: Address, token: Address, cap: i128) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if cap < 0 {
+            panic_with_error!(&env, ReferralError::InvalidRewardCap);
+        }
+        let key = DataKey::LifetimeRewardCap(token.clone());
+        env.storage().persistent().set(&key, &cap);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, REGISTRY_TTL, REGISTRY_TTL);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("rew_cap")), (token, cap));
+    }
+
+    pub fn get_lifetime_reward_cap(env: Env, token: Address) -> Option<i128> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LifetimeRewardCap(token))
     }
 
     // #1042: multisig admin path, additive to the legacy single-admin
@@ -517,16 +549,35 @@ impl ReferralContract {
         // #799: floor (not ceiling) — this is a payout carved out of an
         // already-collected fee, so rounding in the protocol's favor
         // (never overpaying the referrer) is the safe direction.
-        let reward = fee_amount.saturating_mul(bps as i128) / BPS_DENOM;
+        let calculated_reward = fee_amount.saturating_mul(bps as i128) / BPS_DENOM;
+        let cap_key = DataKey::LifetimeRewardCap(token.clone());
+        let Some(cap) = env.storage().persistent().get::<DataKey, i128>(&cap_key) else {
+            return 0;
+        };
+        let accrued_key = DataKey::RefereeRewardAccrued(referee, token.clone());
+        let accrued: i128 = env
+            .storage()
+            .persistent()
+            .get(&accrued_key)
+            .unwrap_or(0);
+        let remaining = cap.saturating_sub(accrued).max(0);
+        let reward = calculated_reward.min(remaining);
         if reward > 0 {
             let reward_key = DataKey::PendingReward(referrer.clone(), token);
             let pending: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
-            env.storage()
-                .persistent()
-                .set(&reward_key, &(pending + reward));
+            let new_pending = pending
+                .checked_add(reward)
+                .unwrap_or_else(|| panic_with_error!(&env, ReferralError::RewardOverflow));
+            env.storage().persistent().set(&reward_key, &new_pending);
             env.storage()
                 .persistent()
                 .extend_ttl(&reward_key, REGISTRY_TTL, REGISTRY_TTL);
+            env.storage()
+                .persistent()
+                .set(&accrued_key, &accrued.saturating_add(reward));
+            env.storage()
+                .persistent()
+                .extend_ttl(&accrued_key, REGISTRY_TTL, REGISTRY_TTL);
             bump_instance(&env);
             env.events()
                 .publish((EVT, symbol_short!("accrued")), (referrer, reward));
