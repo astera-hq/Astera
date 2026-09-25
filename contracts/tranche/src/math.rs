@@ -9,9 +9,11 @@ pub fn calculate_waterfall_split(
 ) -> (i128, i128) {
     let yearly = 365u64 * 24 * 60 * 60;
 
-    let interest = senior_principal * senior_target_yield_bps as i128 * elapsed_secs as i128
-        / 10_000
-        / yearly as i128;
+    let interest = (senior_principal as u128)
+        .saturating_mul(senior_target_yield_bps as u128)
+        .saturating_mul(elapsed_secs as u128)
+        .saturating_div(10_000)
+        .saturating_div(yearly) as i128;
 
     let senior_cap = senior_principal + interest;
 
