@@ -23,6 +23,7 @@ pub struct TrancheAccounting {
     pub deployed: i128,
     pub earned: i128,
     pub losses: i128,
+    pub total_shares: i128,
 }
 
 #[contracttype]
