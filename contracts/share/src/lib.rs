@@ -20,6 +20,13 @@ const MAX_DECIMALS: u32 = 18;
 pub const MAX_CHECKPOINTS: u32 = 1_024;
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AllowanceRecord {
+    pub amount: i128,
+    pub expiration_ledger: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
     Paused,
@@ -70,7 +77,7 @@ fn write_checkpoint(env: &Env, who: &Address, new_balance: i128) {
     }
 
     // Append or overwrite at ring buffer head if full
-    if len < MAX_CHECKPOINTS {
+    if checkpoints.len() < MAX_CHECKPOINTS as usize {
         checkpoints.push_back((now, new_balance));
     } else {
         checkpoints.set(head as usize, (now, new_balance));
@@ -117,7 +124,13 @@ impl ShareToken {
 
     pub fn pause(env: Env, admin: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|_| {
+                panic!("contract not initialized");
+            });
         if admin != stored_admin {
             panic!("unauthorized");
         }
@@ -127,7 +140,13 @@ impl ShareToken {
 
     pub fn unpause(env: Env, admin: Address) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|_| {
+                panic!("contract not initialized");
+            });
         if admin != stored_admin {
             panic!("unauthorized");
         }
@@ -140,12 +159,23 @@ impl ShareToken {
     }
 
     pub fn admin(env: Env) -> Address {
-        env.storage().instance().get(&DataKey::Admin).unwrap()
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|_| {
+                panic!("contract not initialized");
+            })
     }
 
     /// Rotates the admin to `new_admin`. Only the current admin may call this.
     pub fn set_admin(env: Env, new_admin: Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|_| {
+                panic!("contract not initialized");
+            });
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.events()
@@ -154,7 +184,13 @@ impl ShareToken {
 
     pub fn mint(env: Env, to: Address, amount: i128) {
         require_not_paused(&env);
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|_| {
+                panic!("contract not initialized");
+            });
         admin.require_auth();
         if amount <= 0 {
             panic!("amount must be positive");
@@ -168,7 +204,7 @@ impl ShareToken {
         env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &to, new_balance);
 
-        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         let new_total = total
             .checked_add(amount)
             .expect("total supply overflow");
@@ -197,7 +233,7 @@ impl ShareToken {
         env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &from, new_balance);
 
-        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         let new_total = total
             .checked_sub(amount)
             .expect("total supply underflow");
@@ -241,7 +277,7 @@ impl ShareToken {
         env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &from, new_balance);
 
-        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         let new_total = total
             .checked_sub(amount)
             .expect("total supply underflow");
@@ -301,13 +337,14 @@ impl ShareToken {
             panic!("amount must be non-negative");
         }
         let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
+        let record = AllowanceRecord {
+            amount,
+            expiration_ledger,
+        };
         env.storage()
             .persistent()
-            .set(&DataKey::Allowance(owner.clone(), spender.clone()), &amount);
-        env.storage().persistent().set(
-            &DataKey::AllowanceExpiration(owner.clone(), spender.clone()),
-            &expiration_ledger,
-        );
+            .set(&allowance_key, &record);
+        env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events()
             .publish((EVT, symbol_short!("approve")), (owner, spender, amount, expiration_ledger));
     }
@@ -329,7 +366,8 @@ impl ShareToken {
     pub fn get_allowance_expiration(env: Env, owner: Address, spender: Address) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::AllowanceExpiration(owner, spender))
+            .get::<DataKey, AllowanceRecord>(&DataKey::Allowance(owner, spender))
+            .map(|record| record.expiration_ledger)
             .unwrap_or(0)
     }
 
@@ -350,9 +388,13 @@ impl ShareToken {
             .checked_add(added_amount)
             .expect("allowance overflow");
         let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
+        let new_record = AllowanceRecord {
+            amount: new_amount,
+            expiration_ledger: record.expiration_ledger,
+        };
         env.storage().persistent().set(
             &allowance_key,
-            &new_allowance,
+            &new_record,
         );
         env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events().publish(
@@ -377,11 +419,15 @@ impl ShareToken {
         if record.amount < subtracted_amount {
             panic!("allowance underflow");
         }
-        let new_allowance = current - subtracted_amount;
+        let new_amount = record.amount - subtracted_amount;
         let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
+        let new_record = AllowanceRecord {
+            amount: new_amount,
+            expiration_ledger: record.expiration_ledger,
+        };
         env.storage().persistent().set(
             &allowance_key,
-            &new_allowance,
+            &new_record,
         );
         env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         env.events().publish(
@@ -493,7 +539,10 @@ impl ShareToken {
         }
 
         if lo == 0 {
-            0
+            // Query timestamp is before all surviving checkpoints.
+            // Return the balance at the oldest surviving checkpoint.
+            let oldest_idx = if is_full { head as usize } else { 0 };
+            checkpoints.get(oldest_idx).unwrap().1
         } else {
             let actual_idx = if is_full {
                 ((head + lo - 1) % MAX_CHECKPOINTS) as usize
@@ -512,15 +561,24 @@ impl ShareToken {
     }
 
     pub fn decimals(env: Env) -> u32 {
-        env.storage().instance().get(&DataKey::Decimals).unwrap()
+        env.storage()
+            .instance()
+            .get(&DataKey::Decimals)
+            .unwrap_or(0)
     }
 
     pub fn name(env: Env) -> String {
-        env.storage().instance().get(&DataKey::Name).unwrap()
+        env.storage()
+            .instance()
+            .get(&DataKey::Name)
+            .unwrap_or_else(|_| String::from_utf8(vec![]).unwrap())
     }
 
     pub fn symbol(env: Env) -> String {
-        env.storage().instance().get(&DataKey::Symbol).unwrap()
+        env.storage()
+            .instance()
+            .get(&DataKey::Symbol)
+            .unwrap_or_else(|_| String::from_utf8(vec![]).unwrap())
     }
 }
 
