@@ -41,6 +41,7 @@ fn setup() -> Fixture {
         &vec![&env, s1.clone(), s2.clone(), s3.clone()],
         &2,
         &604_800,
+        &0,
     );
 
     Fixture {
@@ -58,7 +59,7 @@ fn test_initialize_can_only_be_called_once() {
     let f = setup();
     let result = f
         .client
-        .try_initialize(&vec![&f.env, f.s1.clone()], &1, &604_800);
+        .try_initialize(&vec![&f.env, f.s1.clone()], &1, &604_800, &0);
     assert_eq!(
         result.unwrap_err().unwrap(),
         AccessControlError::AlreadyInitialized.into()
@@ -73,7 +74,7 @@ fn test_initialize_rejects_threshold_above_signer_count() {
     let client = AccessControlContractClient::new(&env, &contract_id);
     let s1 = Address::generate(&env);
 
-    let result = client.try_initialize(&vec![&env, s1], &2, &604_800);
+    let result = client.try_initialize(&vec![&env, s1], &2, &604_800, &0);
     assert_eq!(
         result.unwrap_err().unwrap(),
         AccessControlError::InvalidThreshold.into()
@@ -88,7 +89,7 @@ fn test_initialize_rejects_duplicate_signers() {
     let client = AccessControlContractClient::new(&env, &contract_id);
     let s1 = Address::generate(&env);
 
-    let result = client.try_initialize(&vec![&env, s1.clone(), s1], &1, &604_800);
+    let result = client.try_initialize(&vec![&env, s1.clone(), s1], &1, &604_800, &0);
     assert_eq!(
         result.unwrap_err().unwrap(),
         AccessControlError::DuplicateSigner.into()

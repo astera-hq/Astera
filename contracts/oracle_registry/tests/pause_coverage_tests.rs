@@ -218,16 +218,23 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
         .set_quorum_tiers(&f.admin, &soroban_sdk::Vec::new(&env));
 
     // set_access_control: admin-gated bootstrap setter, no pause guard.
-    f.client
-        .set_access_control(&f.admin, &Address::generate(&env));
+    // Use the pre-pause `access_control` anchor here rather than a fresh
+    // address: the `_via_ac` calls below authenticate against the *stored*
+    // anchor, and overwriting it with an unknown address would make those
+    // calls fail with Unauthorized instead of exercising their pause-surface
+    // behavior.
+    f.client.set_access_control(&f.admin, &access_control);
 
     // set_governance_address: admin-gated bootstrap setter, no pause guard.
-    f.client
-        .set_governance_address(&f.admin, &Address::generate(&env));
+    // Same anchor-preservation rationale as set_access_control above.
+    f.client.set_governance_address(&f.admin, &governance);
 
     // set_access_control_via_ac: access-control-gated, no pause guard.
+    // Re-anchor to the same address (a rotation to a fresh address would
+    // invalidate the anchor that every later `_via_ac` call authenticates
+    // against).
     f.client
-        .set_access_control_via_ac(&access_control, &Address::generate(&env));
+        .set_access_control_via_ac(&access_control, &access_control);
 
     // set_invoice_contract_via_ac: access-control-gated, no pause guard.
     f.client
@@ -275,15 +282,15 @@ fn test_pause_surface_across_all_state_changing_entrypoints() {
         "admin_resolve_round_via_ac has no pause guard (#1409 gap)"
     );
 
-    // set_invoice_contract_via_governance: governance-gated, no pause guard.
+    // set_invoice_contract_gov: governance-gated, no pause guard.
     f.client
-        .set_invoice_contract_via_governance(&governance, &Address::generate(&env));
+        .set_invoice_contract_gov(&governance, &Address::generate(&env));
 
     // set_treasury_via_governance: governance-gated, no pause guard.
     f.client.set_treasury_via_governance(&governance, &None);
 
-    // set_registry_config_via_governance: governance-gated, no pause guard.
-    f.client.set_registry_config_via_governance(
+    // set_registry_config_gov: governance-gated, no pause guard.
+    f.client.set_registry_config_gov(
         &governance,
         &1_000i128,
         &3u32,

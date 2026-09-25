@@ -10,15 +10,10 @@
 use oracle_registry::{OracleRegistryContract, OracleRegistryContractClient};
 use proptest::prelude::*;
 use soroban_sdk::{
-    contract, contractclient, contractimpl,
+    contract, contractimpl,
     testutils::{Address as _, Ledger},
     token, Address, Env, String, Symbol, Vec,
 };
-
-#[contractclient(name = "DummyInvoiceClient")]
-pub trait DummyInvoiceTrait {
-    fn set_invoice_amount(env: Env, id: u64, amount: i128);
-}
 
 #[contract]
 pub struct DummyInvoice;
@@ -228,9 +223,21 @@ proptest! {
             .register_stellar_asset_contract_v2(token_admin)
             .address();
         client.initialize(&admin, &stake_token, &100i128);
+        // Wire the generated `default_bps` into the registry's flat quorum
+        // config so the fallback path matches the reference model.
+        client.set_registry_config(
+            &admin,
+            &100i128,
+            &3u32,
+            &default_bps,
+            &(3 * 86_400u64),
+            &(7 * 86_400u64),
+        );
 
-        // Sort tier configs by threshold (ascending) to match contract's expectations
-        let mut tiers: Vec<(i128, u32)> = tier_configs;
+        // Sort tier configs by threshold (ascending) to match contract's
+        // expectations. `tier_configs` comes from proptest as a std Vec, so
+        // qualify it explicitly to avoid clashing with the soroban Vec alias.
+        let mut tiers: std::vec::Vec<(i128, u32)> = tier_configs;
         tiers.sort_by_key(|t| t.0);
 
         // Remove duplicate thresholds to keep tier list clean

@@ -1167,7 +1167,9 @@ impl OracleRegistryContract {
     // ---- #1038: Governance-gated parameter changes ----
 
     // #1038: Set invoice contract via governance proposal.
-    pub fn set_invoice_contract_via_governance(
+    // Shortened from `set_invoice_contract_via_governance` (35 chars) to fit
+    // Soroban's 32-char function-name limit.
+    pub fn set_invoice_contract_gov(
         env: Env,
         governance: Address,
         invoice_contract: Address,
@@ -1191,7 +1193,7 @@ impl OracleRegistryContract {
         governance.require_auth();
         Self::require_governance(&env, &governance)?;
         let mut config = Self::load_config(&env)?;
-        config.treasury = treasury;
+        config.treasury = treasury.clone();
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("gov_treas")), (governance, treasury));
@@ -1199,8 +1201,10 @@ impl OracleRegistryContract {
     }
 
     // #1038: Set registry config via governance proposal.
+    // Shortened from `set_registry_config_via_governance` (34 chars) to fit
+    // Soroban's 32-char function-name limit.
     #[allow(clippy::too_many_arguments)]
-    pub fn set_registry_config_via_governance(
+    pub fn set_registry_config_gov(
         env: Env,
         governance: Address,
         min_stake: i128,
@@ -1257,7 +1261,7 @@ impl OracleRegistryContract {
         }
         env.storage().instance().set(&DataKey::QuorumTiers, &tiers);
         env.events()
-            .publish((EVT, symbol_short!("gov_quorum")), (governance, tiers.len()));
+            .publish((EVT, symbol_short!("gov_qrum")), (governance, tiers.len()));
         Ok(())
     }
 

@@ -120,7 +120,7 @@ fn test_real_access_control_contract_2_of_3_treasury_manager_changes_real_config
 
     let super1 = Address::generate(&f.env);
     let super2 = Address::generate(&f.env);
-    let _ = ac_client.initialize(&vec![&f.env, super1.clone(), super2.clone()], &2, &604_800);
+    let _ = ac_client.initialize(&vec![&f.env, super1.clone(), super2.clone()], &2, &604_800, &0);
 
     f.client.set_access_control(&f.admin, &ac_id);
 

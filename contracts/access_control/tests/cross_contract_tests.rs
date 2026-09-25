@@ -83,7 +83,7 @@ fn setup() -> Fixture {
     let s1 = Address::generate(&env);
     let s2 = Address::generate(&env);
 
-    let _ = ac_client.initialize(&vec![&env, s1.clone(), s2.clone()], &2, &604_800);
+    let _ = ac_client.initialize(&vec![&env, s1.clone(), s2.clone()], &2, &604_800, &0);
 
     Fixture {
         env,

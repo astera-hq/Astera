@@ -871,7 +871,9 @@ impl ComplianceContract {
     // ---- #1038: Governance-gated parameter changes ----
 
     // #1038: Set rescreening interval via governance proposal.
-    pub fn set_rescreening_interval_via_governance(
+    // Shortened from `set_rescreening_interval_via_governance` (39 chars) to
+    // fit Soroban's 32-char function-name limit.
+    pub fn set_rescreening_interval_gov(
         env: Env,
         governance: Address,
         secs: u64,
@@ -885,12 +887,14 @@ impl ComplianceContract {
             .instance()
             .set(&DataKey::RescreeningInterval, &secs);
         env.events()
-            .publish((EVT, symbol_short!("gov_rescreen")), (governance, secs));
+            .publish((EVT, symbol_short!("gov_rscn")), (governance, secs));
         Ok(())
     }
 
     // #1038: Set screener timelock via governance proposal.
-    pub fn set_screener_timelock_via_governance(
+    // Shortened from `set_screener_timelock_via_governance` (36 chars) to fit
+    // Soroban's 32-char function-name limit.
+    pub fn set_screener_timelock_gov(
         env: Env,
         governance: Address,
         secs: u64,
@@ -904,7 +908,7 @@ impl ComplianceContract {
             .instance()
             .set(&DataKey::ScreenerTimelockSecs, &secs);
         env.events()
-            .publish((EVT, symbol_short!("gov_timelock")), (governance, secs));
+            .publish((EVT, symbol_short!("gov_tlck")), (governance, secs));
         Ok(())
     }
 

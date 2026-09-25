@@ -418,7 +418,7 @@ impl ReferralContract {
         }
         // #1348: prevent two-party referral cycles.
         if let Some(existing_referrer_of_referrer) =
-            env.storage().persistent().get(&DataKey::Referrer(referrer.clone()))
+            env.storage().persistent().get::<DataKey, Address>(&DataKey::Referrer(referrer.clone()))
         {
             if existing_referrer_of_referrer == referee {
                 panic_with_error!(&env, ReferralError::ReferralCycle);
