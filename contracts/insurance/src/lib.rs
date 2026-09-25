@@ -153,6 +153,7 @@ pub struct CoverageRecord {
     pub coverage_bps: u32,
     pub purchased_at: u64,
     pub claimed: bool,
+    pub paid_to_date: i128,
 }
 
 /// #937: A single historical claim entry recording the payout details.
@@ -654,6 +655,7 @@ impl InsuranceReserve {
                 coverage_bps,
                 purchased_at: env.ledger().timestamp(),
                 claimed: false,
+                paid_to_date: 0,
             };
             let key = DataKey::CoverageRecord(invoice_id);
             env.storage()
@@ -811,15 +813,31 @@ impl InsuranceReserve {
                 .total_claims_paid
                 .checked_add(payout)
                 .ok_or(InsuranceError::AmountOverflow)?;
-            reserve.total_covered_exposure = reserve
-                .total_covered_exposure
-                .checked_sub(nominal_covered)
-                .unwrap_or(0)
-                .max(0);
+
+            let mut updated_record = record.clone();
+            updated_record.paid_to_date = updated_record
+                .paid_to_date
+                .checked_add(payout)
+                .ok_or(InsuranceError::AmountOverflow)?;
+
+            // Only mark as claimed and remove from covered_exposure when fully paid
+            if updated_record.paid_to_date >= nominal_covered {
+                updated_record.claimed = true;
+                reserve.total_covered_exposure = reserve
+                    .total_covered_exposure
+                    .checked_sub(nominal_covered)
+                    .unwrap_or(0)
+                    .max(0);
+            }
+
             Self::recompute_ratio(&mut reserve);
             env.storage()
                 .instance()
                 .set(&DataKey::ReserveFund(record.token.clone()), &reserve);
+            env.storage()
+                .persistent()
+                .set(&record_key, &updated_record);
+            env.storage().persistent().extend_ttl(&record_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
 
             let hist_count: u32 = env
                 .storage()
@@ -898,7 +916,7 @@ impl InsuranceReserve {
             .unwrap_or(0);
         // With no configured floor there is no minimum for the reserve to
         // violate. Treat that state as healthy, consistent with needs_top_up.
-        let is_healthy = reserve.total_reserves >= min_amount;
+        let is_healthy = min_amount == 0 || reserve.total_reserves >= min_amount;
         ReserveHealth {
             token,
             total_reserves: reserve.total_reserves,
