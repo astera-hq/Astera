@@ -70,6 +70,14 @@ pub struct MultiSigConfig {
 
 // ─── Action payloads ────────────────────────────────────────────────────────
 
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProposalCategory {
+    ParameterChange,
+    Treasury,
+    Critical,
+}
+
 /// Every privileged action this system can gate. Each variant mirrors one
 /// real entrypoint on `pool`, `invoice`, or `credit_score` (see each
 /// contract's new `*_via_ac` methods) — except `AddSigner`,
@@ -127,11 +135,8 @@ pub enum ActionPayload {
     // ── governance ──
     /// (quorum_bps, pass_bps)
     UpdateGovernanceConfig(u32, u32),
-    /// (category discriminant, quorum_bps) — decoded by governance's own
-    /// `ProposalCategory` mapping (0=ParameterChange, 1=Treasury, 2=Critical),
-    /// the same "decode by discriminant" convention `RegisterAttestor` above
-    /// uses for credit_score's `AttestorType`.
-    SetCategoryQuorum(u32, u32),
+    /// (typed category, quorum_bps)
+    SetCategoryQuorum(ProposalCategory, u32),
     // ── referral ──
     SetReferralPaused(bool),
     SetReferralPool(Address),
@@ -347,7 +352,7 @@ pub trait GovernanceContractTrait {
     fn set_category_quorum_via_ac(
         env: Env,
         access_control: Address,
-        category: u32,
+        category: ProposalCategory,
         quorum_bps: u32,
     );
     fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);

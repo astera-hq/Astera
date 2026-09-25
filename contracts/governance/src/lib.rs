@@ -192,18 +192,6 @@ fn require_access_control(env: &Env, caller: &Address) -> GovernanceResult<()> {
     Ok(())
 }
 
-/// #1042: decodes access_control's discriminant-encoded category (see
-/// `ActionPayload::SetCategoryQuorum` in access_control/src/lib.rs) —
-/// 0=ParameterChange, 1=Treasury, 2=Critical.
-fn category_from_discriminant(discriminant: u32) -> GovernanceResult<ProposalCategory> {
-    match discriminant {
-        0 => Ok(ProposalCategory::ParameterChange),
-        1 => Ok(ProposalCategory::Treasury),
-        2 => Ok(ProposalCategory::Critical),
-        _ => Err(GovernanceError::InvalidConfig),
-    }
-}
-
 /// Voting weight is the holder's share balance at the moment the proposal was
 /// created (`snapshot_at`), not their balance at vote time — otherwise shares
 /// acquired mid-vote (or borrowed just long enough to vote) would inflate
@@ -849,7 +837,7 @@ impl Governance {
     pub fn set_category_quorum_via_ac(
         env: Env,
         access_control: Address,
-        category: u32,
+        category: ProposalCategory,
         quorum_bps: u32,
     ) -> Result<(), GovernanceError> {
         access_control.require_auth();
@@ -858,7 +846,6 @@ impl Governance {
         if quorum_bps == 0 || quorum_bps > 10_000 {
             return Err(GovernanceError::InvalidConfig);
         }
-        let category = category_from_discriminant(category)?;
         let mut config = load_config(&env)?;
 
         match category {
