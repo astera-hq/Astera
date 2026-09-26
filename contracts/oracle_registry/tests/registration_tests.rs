@@ -161,7 +161,10 @@ fn test_deregister_requested_oracle_cannot_resume_active_status() {
     // `deregister_requested_at` or flips `is_active` back to true.
     mint(&env, &stake_token, &operator, min_stake);
     let resume_attempt = client.try_register_oracle(&operator, &min_stake);
-    assert_eq!(resume_attempt, Err(Ok(OracleRegistryError::AlreadyRegistered)));
+    assert_eq!(
+        resume_attempt,
+        Err(Ok(OracleRegistryError::AlreadyRegistered))
+    );
 
     // State is untouched by the failed attempt: still mid-cooldown, still
     // inactive, stake still held by the contract.
