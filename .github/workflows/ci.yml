@@ -247,6 +247,28 @@ jobs:
       - name: Test oracle-service
         run: npm test
 
+  indexer:
+    name: Indexer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: indexer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Check indexer formatting
+        run: npx prettier --check .
+      - name: Build indexer
+        run: npm run build
+      - name: Test indexer
+        run: npm test
+
   deploy-smoke-test:
     name: Deploy Smoke Test
     runs-on: ubuntu-latest
