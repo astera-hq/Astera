@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use share::{ShareToken, ShareTokenClient};
+use share::{ShareError, ShareToken, ShareTokenClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env, String,
@@ -92,7 +92,6 @@ fn test_multiple_spenders_track_allowances_independently() {
 // ── transfer_from edge cases ─────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "insufficient balance")]
 fn test_transfer_from_sufficient_allowance_insufficient_balance() {
     let env = Env::default();
     env.mock_all_auths();
@@ -104,7 +103,11 @@ fn test_transfer_from_sufficient_allowance_insufficient_balance() {
     // Allowance is generous but owner only holds 50 tokens
     client.mint(&owner, &50i128);
     client.approve(&owner, &spender, &200i128);
-    client.transfer_from(&spender, &owner, &recipient, &100i128);
+    let result = client.try_transfer_from(&spender, &owner, &recipient, &100i128);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        ShareError::InsufficientBalance
+    );
 }
 
 #[test]
@@ -210,13 +213,13 @@ fn test_pause_blocks_state_changes() {
     client.pause(&admin);
 
     let result = client.try_mint(&bob, &10i128);
-    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::ContractPaused);
 
     let result = client.try_burn(&alice, &10i128);
-    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::ContractPaused);
 
     let result = client.try_transfer(&alice, &bob, &10i128);
-    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::ContractPaused);
 
     client.unpause(&admin);
     client.transfer(&alice, &bob, &10i128);
@@ -244,7 +247,6 @@ fn test_burn_from_reduces_allowance_and_balance() {
 // ── #1395: burn_from rejection paths ─────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "allowance exceeded")]
 fn test_burn_from_rejects_exceeding_allowance() {
     let env = Env::default();
     env.mock_all_auths();
@@ -254,11 +256,11 @@ fn test_burn_from_rejects_exceeding_allowance() {
 
     client.mint(&owner, &1_000i128);
     client.approve(&owner, &spender, &100i128);
-    client.burn_from(&spender, &owner, &101i128);
+    let result = client.try_burn_from(&spender, &owner, &101i128);
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::AllowanceExceeded);
 }
 
 #[test]
-#[should_panic(expected = "insufficient balance")]
 fn test_burn_from_rejects_exceeding_balance() {
     let env = Env::default();
     env.mock_all_auths();
@@ -269,7 +271,8 @@ fn test_burn_from_rejects_exceeding_balance() {
     // Allowance is generous but the holder only owns 50 tokens.
     client.mint(&owner, &50i128);
     client.approve(&owner, &spender, &200i128);
-    client.burn_from(&spender, &owner, &100i128);
+    let result = client.try_burn_from(&spender, &owner, &100i128);
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::InsufficientBalance);
 }
 
 // ── #1396: increase/decrease_allowance ───────────────────────────────────────
@@ -311,7 +314,6 @@ fn test_decrease_allowance_subtracts_from_existing() {
 }
 
 #[test]
-#[should_panic(expected = "allowance underflow")]
 fn test_decrease_allowance_rejects_underflow() {
     let env = Env::default();
     env.mock_all_auths();
@@ -320,11 +322,11 @@ fn test_decrease_allowance_rejects_underflow() {
     let spender = Address::generate(&env);
 
     client.approve(&owner, &spender, &100i128);
-    client.decrease_allowance(&owner, &spender, &101i128);
+    let result = client.try_decrease_allowance(&owner, &spender, &101i128);
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::AllowanceUnderflow);
 }
 
 #[test]
-#[should_panic(expected = "allowance overflow")]
 fn test_increase_allowance_rejects_overflow() {
     let env = Env::default();
     env.mock_all_auths();
@@ -333,7 +335,8 @@ fn test_increase_allowance_rejects_overflow() {
     let spender = Address::generate(&env);
 
     client.approve(&owner, &spender, &(i128::MAX - 10));
-    client.increase_allowance(&owner, &spender, &20i128);
+    let result = client.try_increase_allowance(&owner, &spender, &20i128);
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::AllowanceOverflow);
 }
 
 #[test]
@@ -451,4 +454,33 @@ fn test_two_large_mints_total_supply_correct() {
 
     assert_eq!(client.total_supply(), quarter * 2);
     assert_eq!(client.balance(&alice) + client.balance(&bob), quarter * 2);
+}
+
+// ── Typed contract errors (#1313): every guard surfaces a discriminable code ──
+
+#[test]
+fn test_initialize_twice_returns_typed_already_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let result = client.try_initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "Pool Shares"),
+        &String::from_str(&env, "POOL"),
+    );
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::AlreadyInitialized);
+}
+
+#[test]
+fn test_pause_by_non_admin_returns_typed_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+
+    let not_admin = Address::generate(&env);
+    let result = client.try_pause(&not_admin);
+    assert_eq!(result.unwrap_err().unwrap(), ShareError::Unauthorized);
 }
