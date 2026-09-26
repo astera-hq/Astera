@@ -13,5 +13,5 @@ pub enum TrancheError {
     ReentrancyDetected = 11,
     NotInitialized = 12,
     ExposureNotFound = 13,
-    ContractPaused = 14,
+    InvalidShareTokens = 14,
 }

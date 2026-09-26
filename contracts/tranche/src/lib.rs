@@ -89,6 +89,8 @@ impl TrancheContract {
             panic_with_error!(&env, TrancheError::AlreadyInitialized);
         }
 
+        Self::validate_share_tokens(&env, &senior_share_token, &junior_share_token);
+
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -221,6 +223,17 @@ impl TrancheContract {
         }
     }
 
+    /// The senior and junior classes must be tracked by *different* share
+    /// tokens. If both point at the same address, `deposit` mints and
+    /// `withdraw` burns against one token for both classes, so senior and
+    /// junior holders end up sharing a single fungible claim and the
+    /// waterfall's seniority guarantee is gone. (#1303)
+    fn validate_share_tokens(env: &Env, senior_share_token: &Address, junior_share_token: &Address) {
+        if senior_share_token == junior_share_token {
+            panic_with_error!(env, TrancheError::InvalidShareTokens);
+        }
+    }
+
     pub fn set_tranche_config(
         env: Env,
         admin: Address,
@@ -283,6 +296,7 @@ impl TrancheContract {
         }
 
         Self::validate_config(&env, &config);
+        Self::validate_share_tokens(&env, &senior_share_token, &junior_share_token);
 
         if env
             .storage()
