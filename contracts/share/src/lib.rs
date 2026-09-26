@@ -120,6 +120,48 @@ fn require_not_paused(env: &Env) {
     }
 }
 
+/// Read `total_supply` from persistent storage, where it lives alongside
+/// `Balance(..)` and shares the same TTL constants — so the supply entry and
+/// the balances it is the sum of can never be archived independently. (#1322)
+///
+/// Deployments that predate the move still hold the value in an instance
+/// entry; it is read as a fallback and migrated to persistent storage by the
+/// first write. Read-only, so `total_supply()` stays a pure view.
+fn read_total_supply(env: &Env) -> i128 {
+    let key = DataKey::TotalSupply;
+    if let Some(total) = env.storage().persistent().get::<DataKey, i128>(&key) {
+        return total;
+    }
+    env.storage()
+        .instance()
+        .get::<DataKey, i128>(&key)
+        .unwrap_or(0)
+}
+
+/// Persist `total` with the balance TTL, migrating a legacy instance entry and
+/// dropping it so two copies can never disagree.
+fn write_total_supply(env: &Env, total: i128) {
+    let key = DataKey::TotalSupply;
+    env.storage().persistent().set(&key, &total);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
+    env.storage().instance().remove(&key);
+}
+
+/// Keep the supply entry alive in lockstep with the balances on paths that
+/// move balances without changing the supply (`transfer`, `transfer_from`).
+/// Without this, an owner that only ever transfers would let the supply entry
+/// archive while the balances it must agree with stayed live.
+fn bump_total_supply_ttl(env: &Env) {
+    let key = DataKey::TotalSupply;
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
+    }
+}
+
 #[contract]
 pub struct ShareToken;
 
@@ -138,7 +180,7 @@ impl ShareToken {
         env.storage().instance().set(&DataKey::Decimals, &decimals);
         env.storage().instance().set(&DataKey::Name, &name);
         env.storage().instance().set(&DataKey::Symbol, &symbol);
-        env.storage().instance().set(&DataKey::TotalSupply, &0i128);
+        write_total_supply(&env, 0);
         env.events()
             .publish((EVT, symbol_short!("init")), (name, symbol, decimals));
     }
@@ -225,13 +267,11 @@ impl ShareToken {
         env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &to, new_balance);
 
-        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        let total = read_total_supply(&env);
         let new_total = total
             .checked_add(amount)
-            .unwrap_or_else(|| panic_with_error!(&env, ShareError::TotalSupplyOverflow));
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalSupply, &new_total);
+            .expect("total supply overflow");
+        write_total_supply(&env, new_total);
         env.events()
             .publish((EVT, symbol_short!("mint")), (to, amount, new_total));
     }
@@ -254,13 +294,11 @@ impl ShareToken {
         env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &from, new_balance);
 
-        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        let total = read_total_supply(&env);
         let new_total = total
             .checked_sub(amount)
-            .unwrap_or_else(|| panic_with_error!(&env, ShareError::TotalSupplyUnderflow));
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalSupply, &new_total);
+            .expect("total supply underflow");
+        write_total_supply(&env, new_total);
         env.events()
             .publish((EVT, symbol_short!("burn")), (from, amount, new_total));
     }
@@ -298,13 +336,11 @@ impl ShareToken {
         env.storage().persistent().extend_ttl(&balance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &from, new_balance);
 
-        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        let total = read_total_supply(&env);
         let new_total = total
             .checked_sub(amount)
-            .unwrap_or_else(|| panic_with_error!(&env, ShareError::TotalSupplyUnderflow));
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalSupply, &new_total);
+            .expect("total supply underflow");
+        write_total_supply(&env, new_total);
         let allowance_key = DataKey::Allowance(from.clone(), spender.clone());
         env.storage().persistent().set(
             &allowance_key,
@@ -341,6 +377,7 @@ impl ShareToken {
             .set(&balance_to_key, &new_balance_to);
         env.storage().persistent().extend_ttl(&balance_to_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
         write_checkpoint(&env, &to, new_balance_to);
+        bump_total_supply_ttl(&env);
         env.events()
             .publish((EVT, symbol_short!("transfer")), (from, to, amount));
     }
@@ -504,6 +541,7 @@ impl ShareToken {
             &(allowed - amount),
         );
         env.storage().persistent().extend_ttl(&allowance_key, BALANCE_LIFETIME_THRESHOLD, BALANCE_BUMP_AMOUNT);
+        bump_total_supply_ttl(&env);
         env.events().publish(
             (EVT, symbol_short!("xfer_from")),
             (spender, from, to, amount),
@@ -575,10 +613,7 @@ impl ShareToken {
     }
 
     pub fn total_supply(env: Env) -> i128 {
-        env.storage()
-            .instance()
-            .get(&DataKey::TotalSupply)
-            .unwrap_or(0)
+        read_total_supply(&env)
     }
 
     pub fn decimals(env: Env) -> u32 {
@@ -641,11 +676,9 @@ impl token::TokenInterface for ShareToken {
             .set(&DataKey::Balance(from.clone()), &new_balance);
         write_checkpoint(&env, &from, new_balance);
 
-        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let total = read_total_supply(&env);
         let new_total = total - amount;
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalSupply, &new_total);
+        write_total_supply(&env, new_total);
         env.events()
             .publish((EVT, symbol_short!("burn")), (from, amount, new_total));
     }
@@ -662,11 +695,9 @@ impl token::TokenInterface for ShareToken {
             .set(&DataKey::Balance(to.clone()), &new_balance);
         write_checkpoint(&env, &to, new_balance);
 
-        let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        let total = read_total_supply(&env);
         let new_total = total + amount;
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalSupply, &new_total);
+        write_total_supply(&env, new_total);
         env.events()
             .publish((EVT, symbol_short!("mint")), (to, amount, new_total));
     }
