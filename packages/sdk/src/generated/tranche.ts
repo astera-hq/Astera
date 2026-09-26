@@ -5,10 +5,6 @@ export const Errors = {
   3: { message: 'InvalidAmount' },
   4: { message: 'InsufficientBalance' },
   5: { message: 'AdvanceRateExceeded' },
-  6: { message: 'InvalidTranche' },
-  7: { message: 'ArithmeticOverflow' },
-  8: { message: 'WaterfallError' },
-  9: { message: 'LossAllocationError' },
   10: { message: 'ReentrancyDetected' },
 } as const;
 

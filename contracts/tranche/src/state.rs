@@ -63,4 +63,5 @@ pub enum DataKey {
     TrancheEnabled(Address),
     NonReentrantKey,
     InvoiceExposure(u64),
+    Paused,
 }
