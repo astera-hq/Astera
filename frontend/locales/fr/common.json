@@ -77,6 +77,12 @@
       "disconnectedTitle": "Portefeuille déconnecté",
       "disconnectedDescription": "Votre portefeuille Freighter n'est plus connecté à ce site. Reconnectez-vous pour continuer."
     },
+    "networkMismatch": {
+      "title": "Incompatibilité de réseau détectée",
+      "description": "Votre portefeuille Freighter est connecté à {walletNetwork}, mais cette application utilise {appNetwork}. Veuillez changer de réseau dans Freighter pour continuer.",
+      "switchNetworks": "Comment changer de réseau",
+      "dismiss": "Fermer l’avertissement d’incompatibilité de réseau"
+    },
     "toast": {
       "dismiss": "Fermer la notification"
     },
@@ -147,7 +153,8 @@
       "aging": "Rapport d'ancienneté",
       "oracles": "Réseau d'oracles",
       "attestors": "Attestateurs de crédit",
-      "insurance": "Assurance"
+      "insurance": "Assurance",
+      "governance": "Governance"
     },
     "layout": {
       "accessDeniedTitle": "Identification d'administrateur requise",
@@ -324,6 +331,12 @@
       "adminNotConnected": "Portefeuille administrateur non connecté.",
       "approvedInvoice": "La facture #{id} a été approuvée pour le cofinancement.",
       "defaultedInvoice": "La facture #{id} a été marquée comme DÉFAILLANTE.",
+      "modalApproveTitle": "Approve Invoice #{id}",
+      "modalApproveDescription": "Approve and fund Invoice #{id} for {amount}. This will initiate co-funding from the liquidity pool.",
+      "modalDisputeTitle": "Mark Invoice #{id} as Disputed",
+      "modalDisputeDescription": "Mark Invoice #{id} as disputed. This will pause all funding activities and flag the invoice for manual review.",
+      "modalVerifyTitle": "Verify Invoice #{id}",
+      "modalVerifyDescription": "Verify Invoice #{id} as authentic. This confirms the invoice details and enables funding.",
       "unknownError": "Erreur inconnue",
       "approveFailed": "Échec de l'approbation de la facture."
     },
@@ -703,6 +716,51 @@
       "validIdRequired": "Entrez un ID d'attestation valide.",
       "lookupFailed": "Échec de la recherche d'attestation.",
       "transactionFailed": "Transaction échouée."
+    },
+    "governance": {
+      "title": "Governance Proposals",
+      "description": "Create, vote on, and execute governance proposals for protocol parameter changes.",
+      "createProposal": "Create Proposal",
+      "totalProposals": "Total Proposals",
+      "activeProposals": "Active",
+      "passedProposals": "Passed",
+      "executedProposals": "Executed",
+      "proposals": "Proposals",
+      "loading": "Loading proposals...",
+      "noProposals": "No proposals found.",
+      "loadFailed": "Failed to load proposals.",
+      "connectWallet": "Please connect your wallet.",
+      "voteSuccess": "Vote recorded successfully.",
+      "voteFailed": "Failed to record vote.",
+      "executeSuccess": "Proposal executed successfully.",
+      "executeFailed": "Failed to execute proposal.",
+      "statusActive": "Active",
+      "statusPassed": "Passed",
+      "statusRejected": "Rejected",
+      "statusExecuted": "Executed",
+      "statusCancelled": "Cancelled",
+      "statusExpired": "Expired",
+      "categoryParameterChange": "Parameter Change",
+      "categoryTreasury": "Treasury",
+      "categoryCritical": "Critical",
+      "proposer": "Proposer",
+      "created": "Created",
+      "target": "Target",
+      "for": "For",
+      "against": "Against",
+      "quorum": "Quorum",
+      "pass": "Pass",
+      "voteFor": "Vote For",
+      "voteAgainst": "Vote Against",
+      "execute": "Execute",
+      "createProposalTitle": "Create Governance Proposal",
+      "createProposalDesc": "Proposal creation will be implemented once the governance contract is deployed and configured.",
+      "proposalCreationNotImplemented": "Proposal creation requires the governance contract to be deployed and configured. This feature will be available after contract deployment.",
+      "actionSetPoolYield": "Set pool yield to {value} bps",
+      "actionSetPoolTreasury": "Set pool treasury to {address}",
+      "actionSetInvoiceGracePeriod": "Set invoice grace period to {days} days",
+      "actionSetOracleRegistryInvoiceContract": "Set oracle registry invoice contract to {address}",
+      "actionSetComplianceRescreeningInterval": "Set compliance rescreening interval to {secs} seconds"
     }
   }
 }

@@ -19,6 +19,14 @@ pub fn fund_invoice_from_tranches(
     invoice_id: u64,
     total_amount: i128,
 ) -> TrancheFundingSplit {
+    if env
+        .storage()
+        .instance()
+        .has(&DataKey::InvoiceExposure(invoice_id))
+    {
+        panic_with_error!(env, TrancheError::AlreadyInitialized);
+    }
+
     let mut pool: TranchePool = env
         .storage()
         .instance()

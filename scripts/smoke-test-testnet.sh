@@ -4,10 +4,7 @@
 # Exits non-zero if any contract call fails.
 #
 # Usage:
-#   export INVOICE_CONTRACT_ID=...
-#   export POOL_CONTRACT_ID=...
-#   export CREDIT_SCORE_CONTRACT_ID=...
-#   export GOVERNANCE_CONTRACT_ID=...
+#   source deployed-testnet.env
 #   bash scripts/smoke-test-testnet.sh
 #
 # Environment:
@@ -21,10 +18,20 @@ PASSPHRASE="${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
 FAILED=0
 
 CONTRACTS=(
-  "INVOICE_CONTRACT_ID"
-  "POOL_CONTRACT_ID"
+  "ACCESS_CONTROL_CONTRACT_ID"
+  "ARBITRATION_CONTRACT_ID"
+  "AUCTION_CONTRACT_ID"
+  "COMPLIANCE_CONTRACT_ID"
   "CREDIT_SCORE_CONTRACT_ID"
   "GOVERNANCE_CONTRACT_ID"
+  "INSURANCE_CONTRACT_ID"
+  "INVOICE_CONTRACT_ID"
+  "ORACLE_REGISTRY_CONTRACT_ID"
+  "POOL_CONTRACT_ID"
+  "REFERRAL_CONTRACT_ID"
+  "SECONDARY_MARKET_CONTRACT_ID"
+  "SHARE_CONTRACT_ID"
+  "TRANCHE_CONTRACT_ID"
 )
 
 echo "==> Smoke-testing contracts on testnet"

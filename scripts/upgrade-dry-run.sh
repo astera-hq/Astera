@@ -5,7 +5,9 @@ set -euo pipefail
 # Upgrade Dry-Run Simulation Tool for Astera Soroban Contracts
 #
 # Usage: ./scripts/upgrade-dry-run.sh [contract] [options]
-#   contract:      invoice|pool|credit|all (default: all)
+#   contract:      invoice|pool|credit|governance|share|tranche|arbitration|
+#                  secondary_market|auction|insurance|compliance|access_control|
+#                  oracle_registry|referral|all (default: all)
 #   --wasm <path>  Path to new WASM file (optional; builds if not provided)
 #   --snapshot     Restore from snapshot after test (for testnet)
 #   --network <n>  Target network: standalone|testnet|mainnet (default: standalone)
@@ -73,9 +75,9 @@ done
 
 # Validate contract name
 case "$CONTRACT" in
-  invoice|pool|credit|governance|share|all) ;;
+  invoice|pool|credit|governance|share|tranche|arbitration|secondary_market|auction|insurance|compliance|access_control|oracle_registry|referral|all) ;;
   *)
-    log_error "Invalid contract: $CONTRACT (must be one of: invoice, pool, credit, governance, share, all)"
+    log_error "Invalid contract: $CONTRACT (must be one of: invoice, pool, credit, governance, share, tranche, arbitration, secondary_market, auction, insurance, compliance, access_control, oracle_registry, referral, all)"
     exit 1
     ;;
 esac
@@ -151,7 +153,18 @@ log_info "Capturing pre-upgrade contract state..."
 cat > "$STATE_FILE_PRE" <<'EOF'
 {
   "timestamp": "PRE-UPGRADE",
+  "network": "NETWORK_PLACEHOLDER",
   "contracts": {
+    "invoice": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["INVOICE_CONFIG", "INVOICES", "COUNTER"],
+      "example_queries": {
+        "get_invoice": "Returns invoice by ID (status, amount, due_date, etc)",
+        "get_invoice_count": "Returns total invoice count"
+      }
+    },
     "pool": {
       "initialized": true,
       "admin_set": true,
@@ -163,16 +176,6 @@ cat > "$STATE_FILE_PRE" <<'EOF'
         "get_invoice_count": "Returns total number of invoices"
       }
     },
-    "invoice": {
-      "initialized": true,
-      "admin_set": true,
-      "storage_type": "Persistent",
-      "config_keys": ["INVOICE_CONFIG", "INVOICES", "COUNTER"],
-      "example_queries": {
-        "get_invoice": "Returns invoice by ID (status, amount, due_date, etc)",
-        "get_invoice_count": "Returns total invoice count"
-      }
-    },
     "credit_score": {
       "initialized": true,
       "admin_set": true,
@@ -181,9 +184,118 @@ cat > "$STATE_FILE_PRE" <<'EOF'
       "example_queries": {
         "get_credit_score": "Returns credit score record for address"
       }
+    },
+    "share": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["TOKEN_ADMIN", "DECIMALS", "SUPPLY"],
+      "example_queries": {
+        "balance": "Returns share balance for an account"
+      }
+    },
+    "governance": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["PROPOSALS", "VOTING_POWER"],
+      "example_queries": {
+        "get_proposal": "Returns proposal details",
+        "get_voting_power": "Returns voting power for address"
+      }
+    },
+    "tranche": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["TRANCHES", "DEPOSITS", "REDEMPTIONS"],
+      "example_queries": {
+        "get_tranche": "Returns tranche details",
+        "get_user_balance": "Returns user deposit/share balance"
+      }
+    },
+    "arbitration": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["DISPUTES", "VOTES", "JURORS"],
+      "example_queries": {
+        "get_dispute": "Returns dispute details",
+        "get_vote": "Returns juror vote on dispute"
+      }
+    },
+    "secondary_market": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["ORDERS", "MATCHES", "ASSETS"],
+      "example_queries": {
+        "get_order": "Returns order details",
+        "get_order_book": "Returns resting bid/ask depth (id, price, quantity) for asset"
+      }
+    },
+    "auction": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["AUCTIONS", "BIDS", "RESULTS"],
+      "example_queries": {
+        "get_auction": "Returns auction details",
+        "get_bids": "Returns bids for auction"
+      }
+    },
+    "insurance": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["POLICIES", "CLAIMS", "COVERAGE"],
+      "example_queries": {
+        "get_policy": "Returns insurance policy details",
+        "get_claim": "Returns claim details"
+      }
+    },
+    "compliance": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["SCREENERS", "ALLOWLIST", "RISKS"],
+      "example_queries": {
+        "get_compliance": "Returns compliance status for address",
+        "get_risk_score": "Returns risk assessment for entity"
+      }
+    },
+    "access_control": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["ROLES", "PERMISSIONS", "GATING"],
+      "example_queries": {
+        "has_role": "Returns whether address has role",
+        "get_permissions": "Returns permissions for address"
+      }
+    },
+    "oracle_registry": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["ORACLES", "FEEDS", "SIGNATURES"],
+      "example_queries": {
+        "get_oracle": "Returns oracle details",
+        "get_feed": "Returns price feed for asset"
+      }
+    },
+    "referral": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["REFERRALS", "REWARDS", "TRACKING"],
+      "example_queries": {
+        "get_referral": "Returns referral record for user",
+        "get_rewards": "Returns accumulated referral rewards"
+      }
     }
   },
-  "notes": "This is a template. In production, use soroban RPC or local snapshot to capture actual state."
+  "notes": "This is a template structure showing all 14 contracts. In production, use soroban RPC or local snapshot to capture actual state."
 }
 EOF
 
@@ -219,7 +331,18 @@ log_info "Capturing post-upgrade contract state..."
 cat > "$STATE_FILE_POST" <<'EOF'
 {
   "timestamp": "POST-UPGRADE",
+  "network": "NETWORK_PLACEHOLDER",
   "contracts": {
+    "invoice": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["INVOICE_CONFIG", "INVOICES", "COUNTER"],
+      "example_queries": {
+        "get_invoice": "Returns invoice by ID (status, amount, due_date, etc)",
+        "get_invoice_count": "Returns total invoice count"
+      }
+    },
     "pool": {
       "initialized": true,
       "admin_set": true,
@@ -231,16 +354,6 @@ cat > "$STATE_FILE_POST" <<'EOF'
         "get_invoice_count": "Returns total number of invoices"
       }
     },
-    "invoice": {
-      "initialized": true,
-      "admin_set": true,
-      "storage_type": "Persistent",
-      "config_keys": ["INVOICE_CONFIG", "INVOICES", "COUNTER"],
-      "example_queries": {
-        "get_invoice": "Returns invoice by ID (status, amount, due_date, etc)",
-        "get_invoice_count": "Returns total invoice count"
-      }
-    },
     "credit_score": {
       "initialized": true,
       "admin_set": true,
@@ -249,9 +362,118 @@ cat > "$STATE_FILE_POST" <<'EOF'
       "example_queries": {
         "get_credit_score": "Returns credit score record for address"
       }
+    },
+    "share": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["TOKEN_ADMIN", "DECIMALS", "SUPPLY"],
+      "example_queries": {
+        "balance": "Returns share balance for an account"
+      }
+    },
+    "governance": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["PROPOSALS", "VOTING_POWER"],
+      "example_queries": {
+        "get_proposal": "Returns proposal details",
+        "get_voting_power": "Returns voting power for address"
+      }
+    },
+    "tranche": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["TRANCHES", "DEPOSITS", "REDEMPTIONS"],
+      "example_queries": {
+        "get_tranche": "Returns tranche details",
+        "get_user_balance": "Returns user deposit/share balance"
+      }
+    },
+    "arbitration": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["DISPUTES", "VOTES", "JURORS"],
+      "example_queries": {
+        "get_dispute": "Returns dispute details",
+        "get_vote": "Returns juror vote on dispute"
+      }
+    },
+    "secondary_market": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["ORDERS", "MATCHES", "ASSETS"],
+      "example_queries": {
+        "get_order": "Returns order details",
+        "get_order_book": "Returns resting bid/ask depth (id, price, quantity) for asset"
+      }
+    },
+    "auction": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["AUCTIONS", "BIDS", "RESULTS"],
+      "example_queries": {
+        "get_auction": "Returns auction details",
+        "get_bids": "Returns bids for auction"
+      }
+    },
+    "insurance": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["POLICIES", "CLAIMS", "COVERAGE"],
+      "example_queries": {
+        "get_policy": "Returns insurance policy details",
+        "get_claim": "Returns claim details"
+      }
+    },
+    "compliance": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["SCREENERS", "ALLOWLIST", "RISKS"],
+      "example_queries": {
+        "get_compliance": "Returns compliance status for address",
+        "get_risk_score": "Returns risk assessment for entity"
+      }
+    },
+    "access_control": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["ROLES", "PERMISSIONS", "GATING"],
+      "example_queries": {
+        "has_role": "Returns whether address has role",
+        "get_permissions": "Returns permissions for address"
+      }
+    },
+    "oracle_registry": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["ORACLES", "FEEDS", "SIGNATURES"],
+      "example_queries": {
+        "get_oracle": "Returns oracle details",
+        "get_feed": "Returns price feed for asset"
+      }
+    },
+    "referral": {
+      "initialized": true,
+      "admin_set": true,
+      "storage_type": "Persistent",
+      "config_keys": ["REFERRALS", "REWARDS", "TRACKING"],
+      "example_queries": {
+        "get_referral": "Returns referral record for user",
+        "get_rewards": "Returns accumulated referral rewards"
+      }
     }
   },
-  "notes": "Same keys as pre-upgrade. No storage schema changes detected."
+  "notes": "Same keys as pre-upgrade for all 14 contracts. No storage schema changes detected."
 }
 EOF
 

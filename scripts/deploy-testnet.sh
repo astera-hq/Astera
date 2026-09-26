@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Deploy all 5 Astera contracts to Stellar testnet in dependency order.
+# Deploy all 14 Astera contracts to Stellar testnet in dependency order.
 #
 # Usage:
 #   export DEPLOYER_KEY=<secret_key>   # required
@@ -57,39 +57,59 @@ deploy_contract() {
     2>&1 | tail -1
 }
 
-echo "=== Deploying contracts (order: invoice -> pool -> secondary_market -> credit_score -> share -> governance -> access_control) ==="
+# Deploy order is independent (each deploy only uploads wasm); contract IDs are
+# consumed later by scripts/init-contracts.sh, which wires them together.
+echo "=== Deploying contracts (all 14: access_control, arbitration, auction, compliance, credit_score, governance, insurance, invoice, oracle_registry, pool, referral, secondary_market, share, tranche) ==="
 
+ACCESS_CONTROL_CONTRACT_ID=$(deploy_contract "access_control" "$WASM_DIR/access_control.wasm")
+ARBITRATION_CONTRACT_ID=$(deploy_contract "arbitration" "$WASM_DIR/arbitration.wasm")
+AUCTION_CONTRACT_ID=$(deploy_contract "auction" "$WASM_DIR/auction.wasm")
+COMPLIANCE_CONTRACT_ID=$(deploy_contract "compliance" "$WASM_DIR/compliance.wasm")
+CREDIT_SCORE_CONTRACT_ID=$(deploy_contract "credit_score" "$WASM_DIR/credit_score.wasm")
+GOVERNANCE_CONTRACT_ID=$(deploy_contract "governance" "$WASM_DIR/governance.wasm")
+INSURANCE_CONTRACT_ID=$(deploy_contract "insurance" "$WASM_DIR/insurance.wasm")
 INVOICE_CONTRACT_ID=$(deploy_contract "invoice" "$WASM_DIR/invoice.wasm")
+ORACLE_REGISTRY_CONTRACT_ID=$(deploy_contract "oracle_registry" "$WASM_DIR/oracle_registry.wasm")
 POOL_CONTRACT_ID=$(deploy_contract "pool" "$WASM_DIR/pool.wasm")
+REFERRAL_CONTRACT_ID=$(deploy_contract "referral" "$WASM_DIR/referral.wasm")
 # #1044: secondary-market listings + withdrawal-wait/liquidity-forecast satellite
 # contract, split out of pool to clear the 200KB wasm deploy limit.
 SECONDARY_MARKET_CONTRACT_ID=$(deploy_contract "secondary_market" "$WASM_DIR/secondary_market.wasm")
-CREDIT_SCORE_CONTRACT_ID=$(deploy_contract "credit_score" "$WASM_DIR/credit_score.wasm")
 SHARE_CONTRACT_ID=$(deploy_contract "share" "$WASM_DIR/share.wasm")
-GOVERNANCE_CONTRACT_ID=$(deploy_contract "governance" "$WASM_DIR/governance.wasm")
-# #1042: role-based multisig access control, additive to every contract's
-# legacy single-admin path. See scripts/init-contracts.sh for how each
-# contract adopts it via set_access_control.
-ACCESS_CONTROL_CONTRACT_ID=$(deploy_contract "access_control" "$WASM_DIR/access_control.wasm")
+TRANCHE_CONTRACT_ID=$(deploy_contract "tranche" "$WASM_DIR/tranche.wasm")
 
 echo ""
 echo "=== Contract IDs ==="
-echo "  Invoice:          $INVOICE_CONTRACT_ID"
-echo "  Pool:             $POOL_CONTRACT_ID"
-echo "  Secondary Market: $SECONDARY_MARKET_CONTRACT_ID"
-echo "  Credit Score:     $CREDIT_SCORE_CONTRACT_ID"
-echo "  Share:            $SHARE_CONTRACT_ID"
-echo "  Governance:       $GOVERNANCE_CONTRACT_ID"
 echo "  Access Control:   $ACCESS_CONTROL_CONTRACT_ID"
+echo "  Arbitration:      $ARBITRATION_CONTRACT_ID"
+echo "  Auction:          $AUCTION_CONTRACT_ID"
+echo "  Compliance:       $COMPLIANCE_CONTRACT_ID"
+echo "  Credit Score:     $CREDIT_SCORE_CONTRACT_ID"
+echo "  Governance:       $GOVERNANCE_CONTRACT_ID"
+echo "  Insurance:        $INSURANCE_CONTRACT_ID"
+echo "  Invoice:          $INVOICE_CONTRACT_ID"
+echo "  Oracle Registry:  $ORACLE_REGISTRY_CONTRACT_ID"
+echo "  Pool:             $POOL_CONTRACT_ID"
+echo "  Referral:         $REFERRAL_CONTRACT_ID"
+echo "  Secondary Market: $SECONDARY_MARKET_CONTRACT_ID"
+echo "  Share:            $SHARE_CONTRACT_ID"
+echo "  Tranche:          $TRANCHE_CONTRACT_ID"
 
 cat > "$OUTPUT_FILE" <<EOF
-INVOICE_CONTRACT_ID=$INVOICE_CONTRACT_ID
-POOL_CONTRACT_ID=$POOL_CONTRACT_ID
-SECONDARY_MARKET_CONTRACT_ID=$SECONDARY_MARKET_CONTRACT_ID
-CREDIT_SCORE_CONTRACT_ID=$CREDIT_SCORE_CONTRACT_ID
-SHARE_CONTRACT_ID=$SHARE_CONTRACT_ID
-GOVERNANCE_CONTRACT_ID=$GOVERNANCE_CONTRACT_ID
 ACCESS_CONTROL_CONTRACT_ID=$ACCESS_CONTROL_CONTRACT_ID
+ARBITRATION_CONTRACT_ID=$ARBITRATION_CONTRACT_ID
+AUCTION_CONTRACT_ID=$AUCTION_CONTRACT_ID
+COMPLIANCE_CONTRACT_ID=$COMPLIANCE_CONTRACT_ID
+CREDIT_SCORE_CONTRACT_ID=$CREDIT_SCORE_CONTRACT_ID
+GOVERNANCE_CONTRACT_ID=$GOVERNANCE_CONTRACT_ID
+INSURANCE_CONTRACT_ID=$INSURANCE_CONTRACT_ID
+INVOICE_CONTRACT_ID=$INVOICE_CONTRACT_ID
+ORACLE_REGISTRY_CONTRACT_ID=$ORACLE_REGISTRY_CONTRACT_ID
+POOL_CONTRACT_ID=$POOL_CONTRACT_ID
+REFERRAL_CONTRACT_ID=$REFERRAL_CONTRACT_ID
+SECONDARY_MARKET_CONTRACT_ID=$SECONDARY_MARKET_CONTRACT_ID
+SHARE_CONTRACT_ID=$SHARE_CONTRACT_ID
+TRANCHE_CONTRACT_ID=$TRANCHE_CONTRACT_ID
 EOF
 
 echo "=== Contract IDs written to $OUTPUT_FILE ==="

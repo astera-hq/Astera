@@ -10,6 +10,24 @@
 const BPS_DENOM = 10_000n;
 const SECS_PER_YEAR = 31_536_000n;
 const SECS_PER_DAY = 86_400n;
+const PRECISION_SCALE = 1_000_000n; // 6 decimal places for float precision
+
+// ─── Utility for safe bigint arithmetic ──────────────────────────────────────
+
+/**
+ * Multiply a bigint by a float (0–1) while preserving precision.
+ * Scales the float to maintain precision without requiring Number conversion.
+ * @param value bigint value to multiply
+ * @param factor float factor (0–1) to apply
+ * @returns result of value × factor as bigint
+ */
+function multiplyBigintByFactor(value: bigint, factor: number): bigint {
+  if (factor <= 0) return 0n;
+  if (factor >= 1) return value;
+  // Scale factor to 6 decimal places to maintain precision
+  const scaledFactor = BigInt(Math.round(factor * Number(PRECISION_SCALE)));
+  return (value * scaledFactor) / PRECISION_SCALE;
+}
 
 // ─── Core yield math (unchanged) ─────────────────────────────────────────────
 
@@ -93,18 +111,19 @@ export function computeScenario(
   const recovery = Math.max(0, Math.min(1, collateralRecoveryRate));
 
   // Gross yield: only the deployed (utilised) portion earns interest
+  // Use bigint arithmetic to preserve precision for large amounts
   const fullInterest = projectedInterestStroops(principalStroops, yieldBps, lockDays);
-  const grossYieldStroops = BigInt(Math.floor(Number(fullInterest) * util));
+  const grossYieldStroops = multiplyBigintByFactor(fullInterest, util);
 
   // Default loss: defaults occur on deployed capital; recovery reduces the loss
-  const deployedStroops = BigInt(Math.floor(Number(principalStroops) * util));
-  const rawLoss = BigInt(Math.floor(Number(deployedStroops) * defRate));
-  const defaultLossStroops =
-    rawLoss > 0n ? BigInt(Math.floor(Number(rawLoss) * (1 - recovery))) : 0n;
+  // Calculate deployed amount and default loss while keeping precision
+  const deployedStroops = multiplyBigintByFactor(principalStroops, util);
+  const rawLoss = multiplyBigintByFactor(deployedStroops, defRate);
+  const defaultLossStroops = rawLoss > 0n ? multiplyBigintByFactor(rawLoss, 1 - recovery) : 0n;
 
   const netReturnStroops = grossYieldStroops - defaultLossStroops;
 
-  // Annualised net return %
+  // Annualised net return % — only convert to Number for final percentage calculation
   const yearFraction = lockDays / 365;
   const netReturnPct =
     principalStroops > 0n && yearFraction > 0

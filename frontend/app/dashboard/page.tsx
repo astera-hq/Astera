@@ -217,6 +217,31 @@ function DashboardContent() {
   const loadInvoices = useCallback(async () => {
     setLoading(true);
     try {
+      if (debouncedSearch.trim()) {
+        const indexerUrl = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
+        const params = new URLSearchParams({
+          q: debouncedSearch.trim(),
+          page: String(page),
+          pageSize: String(PAGE_SIZE),
+        });
+        const response = await fetch(`${indexerUrl}/api/invoices/search?${params}`);
+        if (!response.ok) throw new Error(`Invoice search failed: ${response.status}`);
+        const result = (await response.json()) as { invoiceIds: number[]; total: number };
+        const ids = result.invoiceIds;
+        const fetched = ids.length > 0 ? await getMultipleInvoices(ids) : [];
+        const rows = await Promise.all(
+          fetched
+            .map((invoice, index) => ({ invoice, id: ids[index] }))
+            .filter(({ invoice }) => invoice.owner === wallet.address)
+            .map(async ({ invoice, id }) => ({ invoice, metadata: await getInvoiceMetadata(id!) })),
+        );
+        setInvoices(rows);
+        setCommittedMap({});
+        setTotalOnChainCount(result.total);
+        setScannedCount(result.total);
+        return;
+      }
+
       const count = await getInvoiceCount();
       setTotalOnChainCount(count);
 
@@ -237,7 +262,7 @@ function DashboardContent() {
     } finally {
       setLoading(false);
     }
-  }, [fetchBatch]);
+  }, [debouncedSearch, fetchBatch, page, wallet.address]);
 
   /** Load the next page of invoices */
   const loadMore = useCallback(async () => {
@@ -362,8 +387,12 @@ function DashboardContent() {
 
   const isFiltered = debouncedSearch.trim() !== '' || statusFilters.length > 0;
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const pagedItems = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const totalPages = debouncedSearch
+    ? Math.max(1, Math.ceil(totalOnChainCount / PAGE_SIZE))
+    : Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pagedItems = debouncedSearch
+    ? filtered
+    : filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">

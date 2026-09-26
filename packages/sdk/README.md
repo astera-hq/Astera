@@ -101,7 +101,7 @@ const hash = await client.deposit({
 | `CreditScoreClient` | `getCreditScore`, `simulateScoreWithAttestations`, `getAttestorInfo`, `listActiveAttestors`, `getAttestation`, `listSmeAttestations`, `registerAttestor`, `deactivateAttestor`, `submitAttestation`, `disputeAttestation`, `resolveAttestationDispute` |
 | `OracleRegistryClient` | `openRound`, `register`, `vote`, `getRound`, `getOracleInfo` |
 | `ComplianceClient` | `isCleared`, `getRecord`, `getHistory`, `listFlagged`, `listPendingReview`, `submitScreeningResult`, `requestReview` |
-| `TrancheClient` | `getPool`, `getTrancheConfig`, `getTotals`, `getInvestorPosition`, `getEffectiveApy`, `getInvoiceExposure`, `simulateWaterfall`, `deposit`, `withdraw`, `setTrancheConfig` |
+| `TrancheClient` | `getPool`, `getTrancheConfig`, `getTotals`, `getInvestorPosition`, `getLifetimeReturnBps`, `getInvoiceExposure`, `simulateWaterfall`, `deposit`, `withdraw`, `setTrancheConfig` |
 | `AccessControlClient` | `getRoleConfig`, `isSigner`, `getProposal`, `listProposals`, `proposeAction`, `approveAction`, `revokeApproval`, `rejectAction`, `executeAction` |
 
 Or use `AsteraClient`, a single convenience wrapper over all per-contract clients (`client.invoice`, `client.pool`, `client.tranche`, `client.accessControl`, etc.), configured once with an `AsteraConfig` of contract IDs.

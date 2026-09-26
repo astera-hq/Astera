@@ -1,5 +1,5 @@
 /**
- * Replays `credit_score` payment/default events from the indexer's SQLite
+ * Replays `credit_score` payment/default events from the indexer's Postgres
  * `events` table (see indexer/src/db.ts) into a per-SME score trajectory.
  *
  * Design note (#1041): rather than reimplementing
@@ -14,7 +14,7 @@
  * sync with the Rust — noted as a follow-up, not attempted here to avoid
  * that drift risk.
  */
-import Database from 'better-sqlite3';
+import { Pool } from 'pg';
 
 export interface PaymentSample {
   ledgerSequence: number;
@@ -48,21 +48,19 @@ function decodeStatus(raw: unknown): string {
  * Read every `credit_score` `payment`/`default` event from the indexer DB
  * and group into one trajectory per SME, ordered by ledger sequence.
  */
-export function replay(db: Database.Database): SmeTrajectory[] {
-  const rows = db
-    .prepare(
-      `SELECT * FROM events
-       WHERE contract_type = 'credit_score' AND event_type IN ('payment', 'default')
-       ORDER BY ledger_sequence ASC`,
-    )
-    .all() as any[];
+export async function replay(pool: Pool): Promise<SmeTrajectory[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM events
+     WHERE contract_type = 'credit_score' AND event_type IN ('payment', 'default')
+     ORDER BY ledger_sequence ASC`,
+  );
 
   const bySme = new Map<string, PaymentSample[]>();
 
   for (const row of rows) {
     let value: any;
     try {
-      value = row.value ? JSON.parse(row.value) : null;
+      value = row.value ? (typeof row.value === 'string' ? JSON.parse(row.value) : row.value) : null;
     } catch {
       continue;
     }

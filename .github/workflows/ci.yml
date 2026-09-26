@@ -119,6 +119,8 @@ jobs:
       - run: npm ci
       - name: Check frontend formatting
         run: npx prettier --check .
+      - name: Check locale files stay in sync with en
+        run: npm run check:locales
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -222,6 +224,28 @@ jobs:
   #         name: lighthouse-report
   #         path: .lighthouseci/
   #         retention-days: 30
+
+  oracle-service:
+    name: Oracle Service
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: oracle-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: oracle-service/package-lock.json
+      - run: npm ci
+      - name: Check oracle-service formatting
+        run: npx prettier --check .
+      - name: Build oracle-service
+        run: npm run build
+      - name: Test oracle-service
+        run: npm test
 
   deploy-smoke-test:
     name: Deploy Smoke Test

@@ -12,3 +12,20 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 pool = { path = "../pool" }
+proptest = "1.4"
+
+[[test]]
+name = "fuzz_tests"
+path = "tests/fuzz_tests.rs"
+
+[[test]]
+name = "order_book_tests"
+path = "tests/order_book_tests.rs"
+
+[[test]]
+name = "secondary_market_tests"
+path = "tests/secondary_market_tests.rs"
+
+[[test]]
+name = "withdrawal_forecast_tests"
+path = "tests/withdrawal_forecast_tests.rs"

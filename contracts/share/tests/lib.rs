@@ -1,7 +1,10 @@
 #![cfg(test)]
 
 use share::{ShareToken, ShareTokenClient};
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env, String,
+};
 
 fn setup(env: &Env) -> (ShareTokenClient<'_>, Address) {
     let contract_id = env.register(ShareToken, ());
@@ -159,6 +162,28 @@ fn test_burn_requires_admin_auth() {
 }
 
 #[test]
+fn test_set_admin_rotates_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    assert_eq!(client.admin(), admin);
+    client.set_admin(&new_admin);
+    assert_eq!(client.admin(), new_admin);
+}
+
+#[test]
+fn test_set_admin_requires_current_admin_auth() {
+    let env = Env::default();
+    // No mock_all_auths — only the current admin may rotate.
+    let (client, _admin) = setup(&env);
+    let new_admin = Address::generate(&env);
+    let result = client.try_set_admin(&new_admin);
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_transfer_requires_sender_auth() {
     let env = Env::default();
     // No mock_all_auths — from.require_auth() must be satisfied explicitly.
@@ -170,6 +195,211 @@ fn test_transfer_requires_sender_auth() {
     assert!(
         result.is_err(),
         "transfer must fail without sender authorization"
+    );
+}
+
+#[test]
+fn test_pause_blocks_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&alice, &200i128);
+    client.pause(&admin);
+
+    let result = client.try_mint(&bob, &10i128);
+    assert!(result.is_err());
+
+    let result = client.try_burn(&alice, &10i128);
+    assert!(result.is_err());
+
+    let result = client.try_transfer(&alice, &bob, &10i128);
+    assert!(result.is_err());
+
+    client.unpause(&admin);
+    client.transfer(&alice, &bob, &10i128);
+    assert_eq!(client.balance(&alice), 190);
+    assert_eq!(client.balance(&bob), 10);
+}
+
+#[test]
+fn test_burn_from_reduces_allowance_and_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.mint(&owner, &1_000i128);
+    client.approve(&owner, &spender, &400i128);
+    client.burn_from(&spender, &owner, &250i128);
+
+    assert_eq!(client.balance(&owner), 750);
+    assert_eq!(client.allowance(&owner, &spender), 150);
+    assert_eq!(client.total_supply(), 750);
+}
+
+// ── #1395: burn_from rejection paths ─────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "allowance exceeded")]
+fn test_burn_from_rejects_exceeding_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.mint(&owner, &1_000i128);
+    client.approve(&owner, &spender, &100i128);
+    client.burn_from(&spender, &owner, &101i128);
+}
+
+#[test]
+#[should_panic(expected = "insufficient balance")]
+fn test_burn_from_rejects_exceeding_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    // Allowance is generous but the holder only owns 50 tokens.
+    client.mint(&owner, &50i128);
+    client.approve(&owner, &spender, &200i128);
+    client.burn_from(&spender, &owner, &100i128);
+}
+
+// ── #1396: increase/decrease_allowance ───────────────────────────────────────
+
+#[test]
+fn test_increase_allowance_adds_to_existing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.approve(&owner, &spender, &100i128);
+    client.increase_allowance(&owner, &spender, &50i128);
+    assert_eq!(client.allowance(&owner, &spender), 150);
+
+    // Usable immediately via transfer_from/burn_from accounting.
+    client.mint(&owner, &1_000i128);
+    let recipient = Address::generate(&env);
+    client.transfer_from(&spender, &owner, &recipient, &150i128);
+    assert_eq!(client.allowance(&owner, &spender), 0);
+}
+
+#[test]
+fn test_decrease_allowance_subtracts_from_existing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.approve(&owner, &spender, &100i128);
+    client.decrease_allowance(&owner, &spender, &40i128);
+    assert_eq!(client.allowance(&owner, &spender), 60);
+
+    // Decreasing to exactly zero is allowed.
+    client.decrease_allowance(&owner, &spender, &60i128);
+    assert_eq!(client.allowance(&owner, &spender), 0);
+}
+
+#[test]
+#[should_panic(expected = "allowance underflow")]
+fn test_decrease_allowance_rejects_underflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.approve(&owner, &spender, &100i128);
+    client.decrease_allowance(&owner, &spender, &101i128);
+}
+
+#[test]
+#[should_panic(expected = "allowance overflow")]
+fn test_increase_allowance_rejects_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.approve(&owner, &spender, &(i128::MAX - 10));
+    client.increase_allowance(&owner, &spender, &20i128);
+}
+
+#[test]
+fn test_balance_at_handles_many_checkpoint_boundaries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let alice = Address::generate(&env);
+
+    let mut expected = 0i128;
+    let last_ts = 1_000u64;
+    for i in 0..128u64 {
+        env.ledger().with_mut(|l| l.timestamp = last_ts + i * 7);
+        expected += 17 + i as i128;
+        client.mint(&alice, &(17 + i as i128));
+    }
+
+    assert_eq!(client.balance_at(&alice, &999), 0);
+    assert_eq!(client.balance_at(&alice, &1_000), 17);
+    assert_eq!(client.balance_at(&alice, &1_006), 17);
+    assert_eq!(client.balance_at(&alice, &1_007), 35);
+    assert_eq!(client.balance_at(&alice, &(last_ts + 7 * 127)), expected);
+    assert_eq!(client.balance_at(&alice, &u64::MAX), expected);
+}
+
+// ── Checkpoint cap enforcement ───────────────────────────────────────────────
+
+/// Mints 2 × MAX_CHECKPOINTS times, each at a distinct timestamp, to verify
+/// that the checkpoint Vec is bounded and old entries are pruned.
+/// Invariants checked:
+///   1. `balance_at` with a recent timestamp still returns the correct balance,
+///      confirming new entries are retained.
+///   2. `balance_at` with a timestamp from the very first mint returns 0 once
+///      those entries fall outside the rolling window, confirming pruning works.
+#[test]
+fn test_checkpoint_cap_is_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let alice = Address::generate(&env);
+
+    let cap = share::MAX_CHECKPOINTS;
+    let total_mints = cap * 2; // deliberately exceed the cap
+
+    // Each mint at a unique second so each gets its own checkpoint slot.
+    for i in 0..total_mints {
+        env.ledger().with_mut(|l| l.timestamp = 1_000 + i as u64);
+        client.mint(&alice, &1i128);
+    }
+
+    let final_balance = total_mints as i128;
+    assert_eq!(client.balance(&alice), final_balance);
+
+    // The most recent checkpoint window must return the full balance.
+    let recent_ts = 1_000 + (total_mints - 1) as u64;
+    assert_eq!(client.balance_at(&alice, &recent_ts), final_balance);
+
+    // A timestamp from the very first mint (ts = 1_000) is now outside the
+    // rolling window of `cap` entries; the oldest retained entry starts at
+    // ts = 1_000 + cap (the cap+1-th mint).  Querying before that must
+    // return 0 because no checkpoint exists that early anymore.
+    let evicted_ts = 1_000 + (cap - 1) as u64; // last evicted timestamp
+    assert_eq!(
+        client.balance_at(&alice, &evicted_ts),
+        0,
+        "entries older than the cap window must be pruned"
     );
 }
 

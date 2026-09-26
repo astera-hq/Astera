@@ -14,6 +14,9 @@ interface DepositTick {
 /** #982: called when a tracked subject's clearance has reached its rescreening interval. */
 export type RescreenHandler = (address: string) => Promise<void>;
 
+/** Maximum number of alerts retained in memory. */
+const MAX_ALERTS = 1_000;
+
 export class Monitor {
   private readonly config: ComplianceConfig;
   private readonly keypair: Keypair;
@@ -146,18 +149,42 @@ export class Monitor {
   }
 
   private async handleRecord(rec: Record<string, unknown>): Promise<void> {
-    // Best-effort: look for invoke_host_function ops that touch the pool.
     const type = String(rec.type ?? '');
     if (type !== 'invoke_host_function') return;
 
-    const functionName = String(rec.function ?? '');
-    if (!functionName.includes('HostFunction')) {
-      // Horizon may expose different shapes; still try topic-like fields.
-    }
+    const functionName = String(rec.function ?? '').toLowerCase();
+    const sourceAccount = String(rec.source_account ?? '');
 
-    // Parse a lightweight "deposit" signal from transaction memo / envelope is
-    // unreliable without full event decoding. For the demo service we also
-    // expose recordDeposit() for the REST surface / tests.
+    // Parse deposit/withdraw from pool contract operations
+    // Amount is extracted from operation parameters when available
+    if (!sourceAccount) return;
+
+    const contractId = String(rec.contract_id ?? rec.address ?? '');
+    if (contractId && this.config.poolContractId && contractId === this.config.poolContractId) {
+      // Extract amount from parameters if present
+      let amount = 0n;
+      if (rec.parameters) {
+        const params = Array.isArray(rec.parameters) ? rec.parameters : [rec.parameters];
+        if (params.length >= 2) {
+          try {
+            amount = BigInt(String(params[1] ?? '0'));
+          } catch {
+            // Invalid bigint; use 0
+          }
+        }
+      }
+
+      if (functionName.includes('deposit') && amount > 0n) {
+        await this.recordDeposit(sourceAccount, amount);
+      } else if (functionName.includes('withdraw')) {
+        // For withdrawals, we record with the amount if available, otherwise 0n
+        // The rapid-cycle check only needs timing, not amount
+        await this.recordWithdraw(sourceAccount, amount);
+      }
+    } else if (functionName.includes('withdraw') && !contractId) {
+      // Fallback: if no contract ID, use the basic withdrawal heuristic
+      await this.recordWithdraw(sourceAccount, 0n);
+    }
   }
 
   /** Called by REST or internal hooks when a deposit is observed. */
@@ -205,6 +232,9 @@ export class Monitor {
       pattern,
     };
     this.alerts.push(alert);
+    if (this.alerts.length > MAX_ALERTS) {
+      this.alerts.splice(0, this.alerts.length - MAX_ALERTS);
+    }
     console.log(`[monitor] alert ${pattern} for ${address}: ${reason}`);
 
     try {

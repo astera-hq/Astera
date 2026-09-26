@@ -6,6 +6,7 @@
  */
 
 import * as http from 'http';
+import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import { Keypair, TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc, Address, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import { MockScreener, HttpScreenerProvider, ScreenerProvider } from './screener';
@@ -47,8 +48,31 @@ function requireAdmin(req: http.IncomingMessage): boolean {
   const header = req.headers['x-admin-token'] || req.headers['authorization'];
   if (!header) return false;
   const value = Array.isArray(header) ? header[0] : header;
-  if (value === config.adminToken) return true;
-  if (value.startsWith('Bearer ') && value.slice(7) === config.adminToken) return true;
+
+  const tokenBuffer = Buffer.from(config.adminToken);
+  const valueBuffer = Buffer.from(value);
+
+  if (valueBuffer.length === tokenBuffer.length) {
+    try {
+      if (crypto.timingSafeEqual(valueBuffer, tokenBuffer)) return true;
+    } catch {
+      // Buffer length mismatch or other error
+    }
+  }
+
+  if (value.startsWith('Bearer ')) {
+    const bearerToken = value.slice(7);
+    const bearerBuffer = Buffer.from(bearerToken);
+    const tokenBuffer2 = Buffer.from(config.adminToken);
+    if (bearerBuffer.length === tokenBuffer2.length) {
+      try {
+        if (crypto.timingSafeEqual(bearerBuffer, tokenBuffer2)) return true;
+      } catch {
+        // Buffer length mismatch or other error
+      }
+    }
+  }
+
   return false;
 }
 

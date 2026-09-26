@@ -70,6 +70,8 @@ class InvoiceMonitor {
   private readonly keypair: Keypair;
   private readonly server: StellarRpc.Server;
   private readonly contract: Contract;
+  private lastSeenInvoiceCount: number = 0;
+  private checkedInvoiceIds: Set<number> = new Set();
 
   constructor(config: Config) {
     this.config = config;
@@ -83,14 +85,24 @@ class InvoiceMonitor {
     const globalGraceDays = await this.readGraceDays();
     const nowSecs = Math.floor(Date.now() / 1000);
 
-    for (let id = 1; id <= invoiceCount; id++) {
+    // Only check invoices beyond what we've already seen, or if count decreased
+    const startId = invoiceCount < this.lastSeenInvoiceCount ? 1 : this.lastSeenInvoiceCount + 1;
+    this.lastSeenInvoiceCount = invoiceCount;
+
+    for (let id = startId; id <= invoiceCount; id++) {
+      // Skip invoices we've already checked unless count was reset
+      if (startId > 1 && this.checkedInvoiceIds.has(id)) continue;
+
       let invoice: any;
       try {
         invoice = await this.readInvoice(id);
       } catch (err) {
         console.error(`[monitor] failed to read invoice ${id}:`, err);
+        this.checkedInvoiceIds.add(id);
         continue;
       }
+
+      this.checkedInvoiceIds.add(id);
       if (invoice.status !== INVOICE_STATUS_FUNDED) continue;
 
       const graceDays: number = invoice.grace_period_override ?? globalGraceDays;

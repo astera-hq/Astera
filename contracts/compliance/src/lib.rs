@@ -56,6 +56,8 @@ pub enum ComplianceError {
     // #1042: a `*_via_ac` entrypoint was called but no `access_control`
     // contract has been configured via `set_access_control` yet.
     AccessControlNotConfigured = 15,
+    // #1038: governance contract not configured
+    GovernanceNotConfigured = 16,
 }
 
 #[contracttype]
@@ -133,6 +135,8 @@ pub enum DataKey {
     Screener(Address),
     ScreenerIds,
     PendingScreener(Address),
+    // #1111: list of pending screener addresses for enumeration
+    PendingScreenerIds,
     FlaggedIds,
     PendingReviewIds,
     // #927: last request_review timestamp keyed by (caller, target address).
@@ -144,6 +148,8 @@ pub enum DataKey {
     // #1042: multisig trust anchor. Additive — untouched, this stays unset
     // and every admin-gated entrypoint above works exactly as before.
     AccessControl,
+    // #1038: governance contract address for governance-gated parameter changes
+    Governance,
 }
 
 const EVT: Symbol = symbol_short!("COMPLY");
@@ -182,6 +188,9 @@ impl ComplianceContract {
         env.storage()
             .instance()
             .set(&DataKey::ScreenerIds, &Vec::<Address>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingScreenerIds, &Vec::<Address>::new(&env));
         env.storage()
             .instance()
             .set(&DataKey::FlaggedIds, &Vec::<Address>::new(&env));
@@ -274,6 +283,13 @@ impl ComplianceContract {
             env.storage()
                 .instance()
                 .set(&DataKey::PendingScreener(screener.clone()), &pending);
+            // #1111: track this pending screener for enumeration
+            Self::add_to_list(
+                env,
+                &DataKey::PendingScreenerIds,
+                &screener,
+                MAX_SCREENER_LIST,
+            );
             env.events().publish(
                 (EVT, symbol_short!("scr_prop")),
                 (caller, screener, pending.effective_at),
@@ -313,6 +329,8 @@ impl ComplianceContract {
         env.storage()
             .instance()
             .remove(&DataKey::PendingScreener(screener.clone()));
+        // #1111: remove from pending screener tracking list
+        Self::remove_from_list(env, &DataKey::PendingScreenerIds, &screener);
         Self::activate_screener(env, &screener)?;
         Ok(())
     }
@@ -348,6 +366,8 @@ impl ComplianceContract {
                 env.storage()
                     .instance()
                     .remove(&DataKey::PendingScreener(screener.clone()));
+                // #1111: remove from pending screener tracking list
+                Self::remove_from_list(env, &DataKey::PendingScreenerIds, &screener);
                 env.events()
                     .publish((EVT, symbol_short!("scr_can")), (caller, screener));
                 return Ok(());
@@ -373,6 +393,29 @@ impl ComplianceContract {
             .instance()
             .get(&DataKey::ScreenerIds)
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// #1111: List all pending screeners awaiting activation after their timelock.
+    pub fn list_pending_screeners(env: Env) -> Vec<PendingScreener> {
+        let pending_ids: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingScreenerIds)
+            .unwrap_or(Vec::new(&env));
+
+        let mut pending_screeners = Vec::new(&env);
+        for i in 0..pending_ids.len() {
+            if let Some(address) = pending_ids.get(i) {
+                if let Some(pending) = env
+                    .storage()
+                    .instance()
+                    .get::<DataKey, PendingScreener>(&DataKey::PendingScreener(address))
+                {
+                    pending_screeners.push_back(pending);
+                }
+            }
+        }
+        pending_screeners
     }
 
     pub fn set_rescreening_interval(
@@ -764,6 +807,34 @@ impl ComplianceContract {
         env.storage().instance().get(&DataKey::AccessControl)
     }
 
+    // #1038: Bootstrap the governance contract address. Admin-gated one-time setup.
+    pub fn set_governance_address(
+        env: Env,
+        admin: Address,
+        governance: Address,
+    ) -> Result<(), ComplianceError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ComplianceError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(ComplianceError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Governance, &governance);
+        env.events()
+            .publish((EVT, symbol_short!("set_gov")), (admin, governance));
+        Ok(())
+    }
+
+    // #1038: Get the configured governance contract address.
+    pub fn get_governance_address(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Governance)
+    }
+
     /// #1042: rotates the trust anchor itself through the currently
     /// configured `access_control` contract rather than the legacy admin
     /// key.
@@ -794,6 +865,46 @@ impl ComplianceContract {
         env.storage().instance().set(&DataKey::Paused, &paused);
         env.events()
             .publish((EVT, symbol_short!("ac_pause")), (access_control, paused));
+        Ok(())
+    }
+
+    // ---- #1038: Governance-gated parameter changes ----
+
+    // #1038: Set rescreening interval via governance proposal.
+    pub fn set_rescreening_interval_via_governance(
+        env: Env,
+        governance: Address,
+        secs: u64,
+    ) -> Result<(), ComplianceError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        if secs < 86_400 {
+            return Err(ComplianceError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RescreeningInterval, &secs);
+        env.events()
+            .publish((EVT, symbol_short!("gov_rescreen")), (governance, secs));
+        Ok(())
+    }
+
+    // #1038: Set screener timelock via governance proposal.
+    pub fn set_screener_timelock_via_governance(
+        env: Env,
+        governance: Address,
+        secs: u64,
+    ) -> Result<(), ComplianceError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+        if secs < 3_600 {
+            return Err(ComplianceError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ScreenerTimelockSecs, &secs);
+        env.events()
+            .publish((EVT, symbol_short!("gov_timelock")), (governance, secs));
         Ok(())
     }
 
@@ -880,6 +991,19 @@ impl ComplianceContract {
             .instance()
             .get(&DataKey::AccessControl)
             .ok_or(ComplianceError::AccessControlNotConfigured)?;
+        if caller != &configured {
+            return Err(ComplianceError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    // #1038: Helper function to verify the caller is the configured governance contract
+    fn require_governance(env: &Env, caller: &Address) -> Result<(), ComplianceError> {
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Governance)
+            .ok_or(ComplianceError::GovernanceNotConfigured)?;
         if caller != &configured {
             return Err(ComplianceError::Unauthorized);
         }

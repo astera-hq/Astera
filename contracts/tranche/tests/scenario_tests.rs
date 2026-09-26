@@ -1,6 +1,53 @@
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, Env};
+use soroban_sdk::token::StellarAssetClient;
+use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
 use tranche::{state::TrancheClass, TrancheContract};
+
+/// Registers a real token contract: `deposit_tranche` performs actual token
+/// transfers, so a plain generated address won't do.
+fn create_token(env: &Env) -> Address {
+    env.register_stellar_asset_contract_v2(Address::generate(env))
+        .address()
+}
+
+fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
+    StellarAssetClient::new(env, token_id).mint(to, &amount);
+}
+
+#[contract]
+pub struct DummyShare;
+
+#[contractimpl]
+impl DummyShare {
+    pub fn total_supply(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "tot"))
+            .unwrap_or(0)
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage().persistent().get(&id).unwrap_or(0)
+    }
+
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let total = Self::total_supply(env.clone());
+        let balance = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "tot"), &(total + amount));
+        env.storage().persistent().set(&to, &(balance + amount));
+    }
+
+    pub fn burn(env: Env, from: Address, amount: i128) {
+        let total = Self::total_supply(env.clone());
+        let balance = Self::balance(env.clone(), from.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "tot"), &(total - amount));
+        env.storage().persistent().set(&from, &(balance - amount));
+    }
+}
 
 #[test]
 fn test_basic_deposit_and_withdraw() {
@@ -8,11 +55,11 @@ fn test_basic_deposit_and_withdraw() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let token = create_token(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
 
     env.as_contract(&contract_id, || {
         TrancheContract::initialize(
@@ -34,18 +81,21 @@ fn test_basic_deposit_and_withdraw() {
             env.clone(),
             admin.clone(),
             token.clone(),
-            senior_share_token,
-            junior_share_token,
+            senior_share_token.clone(),
+            junior_share_token.clone(),
             tranche::state::TrancheConfig {
                 senior_target_yield_bps: 1000,
                 senior_advance_rate_bps: 8000,
                 junior_first_loss_bps: 10000,
             },
-        );
+        )
+        .unwrap();
     });
 
     let investor1 = Address::generate(&env);
     let investor2 = Address::generate(&env);
+    mint(&env, &token, &investor1, 1_000_000);
+    mint(&env, &token, &investor2, 1_000_000);
 
     // Deposit junior first to create capacity for senior
     env.as_contract(&contract_id, || {
@@ -76,6 +126,16 @@ fn test_basic_deposit_and_withdraw() {
         assert_eq!(pool.junior.deposited, 2000);
     });
 
+    // Deposits mint share tokens 1:1 to the investor
+    assert_eq!(
+        DummyShareClient::new(&env, &senior_share_token).balance(&investor1),
+        5000
+    );
+    assert_eq!(
+        DummyShareClient::new(&env, &junior_share_token).balance(&investor2),
+        2000
+    );
+
     // Withdraw from senior
     env.as_contract(&contract_id, || {
         TrancheContract::withdraw_tranche(
@@ -92,6 +152,12 @@ fn test_basic_deposit_and_withdraw() {
         let pool = TrancheContract::get_pool(env.clone(), token.clone());
         assert_eq!(pool.senior.deposited, 4000);
     });
+
+    // Withdrawals burn share tokens 1:1 from the investor
+    assert_eq!(
+        DummyShareClient::new(&env, &senior_share_token).balance(&investor1),
+        4000
+    );
 }
 
 #[test]
@@ -100,11 +166,11 @@ fn test_funding_and_repayment() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let token = create_token(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
 
     env.as_contract(&contract_id, || {
         TrancheContract::initialize(
@@ -133,11 +199,14 @@ fn test_funding_and_repayment() {
                 senior_advance_rate_bps: 8000,
                 junior_first_loss_bps: 10000,
             },
-        );
+        )
+        .unwrap();
     });
 
     let investor1 = Address::generate(&env);
     let investor2 = Address::generate(&env);
+    mint(&env, &token, &investor1, 1_000_000);
+    mint(&env, &token, &investor2, 1_000_000);
 
     // Deposit junior first to create capacity for senior
     env.as_contract(&contract_id, || {
@@ -208,11 +277,11 @@ fn test_full_scenario_five_invoices_mixed_outcomes() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let token = create_token(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
 
     env.as_contract(&contract_id, || {
         TrancheContract::initialize(
@@ -241,11 +310,14 @@ fn test_full_scenario_five_invoices_mixed_outcomes() {
                 senior_advance_rate_bps: 8000,
                 junior_first_loss_bps: 10000,
             },
-        );
+        )
+        .unwrap();
     });
 
     let investor1 = Address::generate(&env);
     let investor2 = Address::generate(&env);
+    mint(&env, &token, &investor1, 1_000_000);
+    mint(&env, &token, &investor2, 1_000_000);
 
     // Deposit junior first to create capacity for senior
     env.as_contract(&contract_id, || {
@@ -362,29 +434,15 @@ fn test_full_scenario_five_invoices_mixed_outcomes() {
         assert!(junior_payout3 > 570);
     });
 
-    // Invoice 4: Partial repayment then default with partial collateral recovery
-    // First, partial repayment of 500
-    env.as_contract(&contract_id, || {
-        let (senior_payout4_partial, junior_payout4_partial) =
-            TrancheContract::distribute_waterfall_repayment(
-                env.clone(),
-                token.clone(),
-                4,
-                500,
-                15 * 24 * 60 * 60, // 15 days elapsed
-            );
-        // All 500 goes to senior since it's below cap
-        assert_eq!(senior_payout4_partial, 500);
-        assert_eq!(junior_payout4_partial, 0);
-    });
-
-    // Then default with 300 collateral recovered (shortfall of 1000 from remaining 1300)
+    // Invoice 4: Full default. A repayment settles an invoice completely
+    // (its exposure is removed), so a default is modelled as no repayment
+    // at all: the full 1500 funded amount is lost.
     env.as_contract(&contract_id, || {
         TrancheContract::allocate_loss(
             env.clone(),
             token.clone(),
             4,
-            1000, // Shortfall
+            1500, // Full principal lost
         );
     });
 
@@ -440,11 +498,11 @@ fn test_junior_absorbs_full_default_senior_whole() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let token = create_token(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
 
     env.as_contract(&contract_id, || {
         TrancheContract::initialize(
@@ -473,11 +531,14 @@ fn test_junior_absorbs_full_default_senior_whole() {
                 senior_advance_rate_bps: 8000,
                 junior_first_loss_bps: 10000,
             },
-        );
+        )
+        .unwrap();
     });
 
     let investor1 = Address::generate(&env);
     let investor2 = Address::generate(&env);
+    mint(&env, &token, &investor1, 1_000_000);
+    mint(&env, &token, &investor2, 1_000_000);
 
     // Deposit junior first to create capacity
     env.as_contract(&contract_id, || {
@@ -530,11 +591,11 @@ fn test_senior_takes_loss_after_junior_exhausted() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token = Address::generate(&env);
-    let senior_share_token = Address::generate(&env);
-    let junior_share_token = Address::generate(&env);
+    let token = create_token(&env);
+    let senior_share_token = env.register(DummyShare, ());
+    let junior_share_token = env.register(DummyShare, ());
 
-    let contract_id = env.register_contract(None, TrancheContract);
+    let contract_id = env.register(TrancheContract, ());
 
     env.as_contract(&contract_id, || {
         TrancheContract::initialize(
@@ -563,11 +624,14 @@ fn test_senior_takes_loss_after_junior_exhausted() {
                 senior_advance_rate_bps: 8000,
                 junior_first_loss_bps: 10000,
             },
-        );
+        )
+        .unwrap();
     });
 
     let investor1 = Address::generate(&env);
     let investor2 = Address::generate(&env);
+    mint(&env, &token, &investor1, 1_000_000);
+    mint(&env, &token, &investor2, 1_000_000);
 
     // Deposit junior first to create capacity
     env.as_contract(&contract_id, || {

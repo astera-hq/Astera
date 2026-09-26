@@ -10,7 +10,8 @@
     "migrate": "node-pg-migrate",
     "migrate:up": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
-    "migrate:sqlite-to-postgres": "ts-node scripts/migrate-sqlite-to-postgres.ts"
+    "migrate:sqlite-to-postgres": "ts-node scripts/migrate-sqlite-to-postgres.ts",
+    "test": "ts-node src/db.test.ts src/parser.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",

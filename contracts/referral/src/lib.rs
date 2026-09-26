@@ -55,6 +55,11 @@ pub enum ReferralError {
     // #1042: a `*_via_ac` entrypoint was called but no `access_control`
     // contract has been configured via `set_access_control` yet.
     AccessControlNotConfigured = 6,
+    InvalidRewardCap = 7,
+    RewardOverflow = 8,
+    ReferralCycle = 7,
+    InvalidActivityKind = 8,
+    NotInitialized = 9,
 }
 
 #[contracttype]
@@ -87,6 +92,10 @@ pub enum DataKey {
     Activated(Address),
     /// (referrer, token) -> unclaimed reward balance
     PendingReward(Address, Address),
+    /// Maximum lifetime reward for one referee, denominated in token base units.
+    LifetimeRewardCap(Address),
+    /// (referee, token) -> total reward credited over the referee's lifetime.
+    RefereeRewardAccrued(Address, Address),
     /// referrer -> number of referees who have completed a qualifying
     /// activity
     ReferralCount(Address),
@@ -140,47 +149,32 @@ fn update_leaderboard(env: &Env, referrer: &Address, new_count: u32) {
     };
 
     if let Some(i) = existing_idx {
-        board.set(i, entry);
-    } else if board.len() < MAX_LEADERBOARD_SIZE {
-        board.push_back(entry);
-    } else {
-        let mut min_idx: u32 = 0;
-        let mut min_count = board.get(0).unwrap().referral_count;
-        for i in 1..board.len() {
-            let count = board.get(i).unwrap().referral_count;
-            if count < min_count {
-                min_count = count;
-                min_idx = i;
-            }
-        }
-        if new_count <= min_count {
-            // Doesn't crack the tracked top set — nothing to persist.
+        board.remove(i);
+    } else if board.len() == MAX_LEADERBOARD_SIZE {
+        if new_count <= board.get(board.len() - 1).unwrap().referral_count {
             return;
         }
-        board.set(min_idx, entry);
+        board.pop_back();
     }
 
-    // Re-sort descending by referral_count (selection sort — board is
-    // capped at MAX_LEADERBOARD_SIZE so this stays cheap).
-    let mut sorted: Vec<LeaderboardEntry> = Vec::new(env);
-    let len = board.len();
-    for _ in 0..len {
-        let mut best_idx: u32 = 0;
-        let mut best = board.get(0).unwrap();
-        for j in 1..board.len() {
-            let candidate = board.get(j).unwrap();
-            if candidate.referral_count > best.referral_count {
-                best_idx = j;
-                best = candidate;
-            }
-        }
-        sorted.push_back(best);
-        board.remove(best_idx);
+    let mut insert_at = 0;
+    while insert_at < board.len() && board.get(insert_at).unwrap().referral_count >= new_count {
+        insert_at += 1;
     }
+    if insert_at >= MAX_LEADERBOARD_SIZE {
+        return;
+    }
+
+    let old_len = board.len();
+    board.push_back(entry.clone());
+    for i in (insert_at..old_len).rev() {
+        board.set(i + 1, board.get(i).unwrap());
+    }
+    board.set(insert_at, entry);
 
     env.storage()
         .persistent()
-        .set(&DataKey::TopReferrers, &sorted);
+        .set(&DataKey::TopReferrers, &board);
     env.storage()
         .persistent()
         .extend_ttl(&DataKey::TopReferrers, REGISTRY_TTL, REGISTRY_TTL);
@@ -191,7 +185,7 @@ fn require_admin(env: &Env, admin: &Address) {
         .storage()
         .instance()
         .get(&DataKey::Admin)
-        .expect("not initialized");
+        .unwrap_or_else(|| panic_with_error!(&env, ReferralError::NotInitialized));
     if admin != &stored_admin {
         panic_with_error!(env, ReferralError::Unauthorized);
     }
@@ -214,6 +208,7 @@ pub struct ReferralContract;
 #[contractimpl]
 impl ReferralContract {
     pub fn initialize(env: Env, admin: Address, pool: Address) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, ReferralError::AlreadyInitialized);
         }
@@ -268,7 +263,7 @@ impl ReferralContract {
         env.storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, ReferralError::NotInitialized))
     }
 
     /// Admin-configurable share (bps) of the factoring fee a referrer earns
@@ -301,6 +296,32 @@ impl ReferralContract {
         bump_instance(&env);
         env.events()
             .publish((EVT, symbol_short!("dep_bps")), (admin, bps));
+    }
+
+    /// Set the maximum lifetime reward credited for each referee in `token` units.
+    /// A zero cap disables referral rewards for that token. Caps are required
+    /// before rewards can accrue, so an unconfigured token cannot create an
+    /// unbounded referral liability.
+    pub fn set_lifetime_reward_cap(env: Env, admin: Address, token: Address, cap: i128) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        if cap < 0 {
+            panic_with_error!(&env, ReferralError::InvalidRewardCap);
+        }
+        let key = DataKey::LifetimeRewardCap(token.clone());
+        env.storage().persistent().set(&key, &cap);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, REGISTRY_TTL, REGISTRY_TTL);
+        bump_instance(&env);
+        env.events()
+            .publish((EVT, symbol_short!("rew_cap")), (token, cap));
+    }
+
+    pub fn get_lifetime_reward_cap(env: Env, token: Address) -> Option<i128> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LifetimeRewardCap(token))
     }
 
     // #1042: multisig admin path, additive to the legacy single-admin
@@ -413,6 +434,16 @@ impl ReferralContract {
         if referee == referrer {
             panic_with_error!(&env, ReferralError::SelfReferral);
         }
+        // #1348: prevent two-party referral cycles.
+        if let Some(existing_referrer_of_referrer) = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Referrer(referrer.clone()))
+        {
+            if existing_referrer_of_referrer == referee {
+                panic_with_error!(&env, ReferralError::ReferralCycle);
+            }
+        }
         let key = DataKey::Referrer(referee.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, ReferralError::AlreadyRegistered);
@@ -428,6 +459,13 @@ impl ReferralContract {
 
     pub fn get_referrer(env: Env, referee: Address) -> Option<Address> {
         env.storage().persistent().get(&DataKey::Referrer(referee))
+    }
+
+    pub fn is_activated(env: Env, referee: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::Activated(referee))
+            .unwrap_or(false)
     }
 
     /// Records a qualifying activity (`kind` is `"borrow"` or `"deposit"`)
@@ -455,7 +493,7 @@ impl ReferralContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, ReferralError::NotInitialized));
         if caller != pool {
             panic_with_error!(&env, ReferralError::Unauthorized);
         }
@@ -503,22 +541,43 @@ impl ReferralContract {
 
         let bps: u32 = if kind == symbol_short!("borrow") {
             Self::get_borrow_reward_bps(env.clone())
-        } else {
+        } else if kind == symbol_short!("deposit") {
             Self::get_deposit_reward_bps(env.clone())
+        } else {
+            panic_with_error!(&env, ReferralError::InvalidActivityKind);
         };
         // #799: floor (not ceiling) — this is a payout carved out of an
         // already-collected fee, so rounding in the protocol's favor
         // (never overpaying the referrer) is the safe direction.
-        let reward = fee_amount.saturating_mul(bps as i128) / BPS_DENOM;
+        let calculated_reward = fee_amount.saturating_mul(bps as i128) / BPS_DENOM;
+        let cap_key = DataKey::LifetimeRewardCap(token.clone());
+        let Some(cap) = env.storage().persistent().get::<DataKey, i128>(&cap_key) else {
+            return 0;
+        };
+        let accrued_key = DataKey::RefereeRewardAccrued(referee, token.clone());
+        let accrued: i128 = env
+            .storage()
+            .persistent()
+            .get(&accrued_key)
+            .unwrap_or(0);
+        let remaining = cap.saturating_sub(accrued).max(0);
+        let reward = calculated_reward.min(remaining);
         if reward > 0 {
             let reward_key = DataKey::PendingReward(referrer.clone(), token);
             let pending: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
-            env.storage()
-                .persistent()
-                .set(&reward_key, &(pending + reward));
+            let new_pending = pending
+                .checked_add(reward)
+                .unwrap_or_else(|| panic_with_error!(&env, ReferralError::RewardOverflow));
+            env.storage().persistent().set(&reward_key, &new_pending);
             env.storage()
                 .persistent()
                 .extend_ttl(&reward_key, REGISTRY_TTL, REGISTRY_TTL);
+            env.storage()
+                .persistent()
+                .set(&accrued_key, &accrued.saturating_add(reward));
+            env.storage()
+                .persistent()
+                .extend_ttl(&accrued_key, REGISTRY_TTL, REGISTRY_TTL);
             bump_instance(&env);
             env.events()
                 .publish((EVT, symbol_short!("accrued")), (referrer, reward));
@@ -540,19 +599,38 @@ impl ReferralContract {
         referrer.require_auth();
         require_not_paused(&env);
         let reward_key = DataKey::PendingReward(referrer.clone(), token.clone());
-        let amount: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
+        let mut amount: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
         if amount <= 0 {
             return 0;
         }
-        env.storage().persistent().set(&reward_key, &0i128);
-        bump_instance(&env);
 
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&env.current_contract_address(), &referrer, &amount);
+        let balance = token_client.balance(&env.current_contract_address());
+        // The actual amount to claim is limited by both the pending reward and the contract's balance
+        let actual_claim_amount = if amount > balance { balance } else { amount };
 
-        env.events()
-            .publish((EVT, symbol_short!("claimed")), (referrer, token, amount));
-        amount
+        if actual_claim_amount <= 0 {
+            return 0;
+        }
+
+        // Deduct the claimed amount from pending rewards
+        let current_pending: i128 = env.storage().persistent().get(&reward_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&reward_key, &(current_pending - actual_claim_amount));
+        bump_instance(&env);
+
+        token_client.transfer(
+            &env.current_contract_address(),
+            &referrer,
+            &actual_claim_amount,
+        );
+
+        env.events().publish(
+            (EVT, symbol_short!("claimed")),
+            (referrer, token, actual_claim_amount),
+        );
+        actual_claim_amount
     }
 
     pub fn get_stats(env: Env, referrer: Address) -> ReferralStats {

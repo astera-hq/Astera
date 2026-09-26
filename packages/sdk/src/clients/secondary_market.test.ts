@@ -176,22 +176,36 @@ describe('SecondaryMarketClient reads', () => {
     expect(await client.getOrder(9999)).toBeNull();
   });
 
-  it('getOrderBook decodes the (bid_ids, ask_ids) tuple into bidIds/askIds', async () => {
+  it('getOrderBook decodes the (bid_levels, ask_levels) tuple into bids/asks depth', async () => {
     const client = makeClient();
+    const level = (orderId: number, price: number, quantity: number) =>
+      scvMap({
+        order_id: xdr.ScVal.scvU64(new xdr.Uint64(orderId)),
+        price: xdr.ScVal.scvI128(
+          new xdr.Int128Parts({
+            hi: xdr.Int64.fromString('0'),
+            lo: xdr.Uint64.fromString(String(price)),
+          }),
+        ),
+        quantity: xdr.ScVal.scvU64(new xdr.Uint64(quantity)),
+      });
     jest.spyOn(client as any, 'simulate').mockResolvedValue({
       result: {
         retval: xdr.ScVal.scvVec([
-          xdr.ScVal.scvVec([xdr.ScVal.scvU64(new xdr.Uint64(1))]),
-          xdr.ScVal.scvVec([
-            xdr.ScVal.scvU64(new xdr.Uint64(2)),
-            xdr.ScVal.scvU64(new xdr.Uint64(3)),
-          ]),
+          xdr.ScVal.scvVec([level(1, 10_000_000, 1_000)]),
+          xdr.ScVal.scvVec([level(2, 20_000_000, 2_000), level(3, 30_000_000, 3_000)]),
         ]),
       },
     });
 
     const book = await client.getOrderBook(42, 'CoFunding');
-    expect(book).toEqual({ bidIds: [1n], askIds: [2n, 3n] });
+    expect(book).toEqual({
+      bids: [{ orderId: 1n, price: 10_000_000n, quantity: 1_000n }],
+      asks: [
+        { orderId: 2n, price: 20_000_000n, quantity: 2_000n },
+        { orderId: 3n, price: 30_000_000n, quantity: 3_000n },
+      ],
+    });
   });
 
   it('getOrderBook returns empty arrays instead of throwing on a simulation error', async () => {
@@ -200,7 +214,7 @@ describe('SecondaryMarketClient reads', () => {
       error: 'HostError: Error(Contract, #NotInitialized)',
     });
 
-    expect(await client.getOrderBook(42, 'CoFunding')).toEqual({ bidIds: [], askIds: [] });
+    expect(await client.getOrderBook(42, 'CoFunding')).toEqual({ bids: [], asks: [] });
   });
 
   it('listOrdersForOwner decodes a Vec<u64> of order ids', async () => {

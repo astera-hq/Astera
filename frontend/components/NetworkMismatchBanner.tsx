@@ -2,8 +2,10 @@
 
 import { useStore } from '@/lib/store';
 import { formatNetworkName } from '@/lib/network-label';
+import { useTranslations } from 'next-intl';
 
 export default function NetworkMismatchBanner() {
+  const t = useTranslations('Notifications.networkMismatch');
   const { networkMismatch, setNetworkMismatch } = useStore();
 
   if (!networkMismatch.isMismatched) {
@@ -18,20 +20,24 @@ export default function NetworkMismatchBanner() {
     });
   };
 
-  const walletNetworkName = formatNetworkName(networkMismatch.walletNetwork);
-  const appNetworkName = formatNetworkName(networkMismatch.appNetwork);
+  const walletNetworkName = networkMismatch.walletNetwork
+    ? formatNetworkName(networkMismatch.walletNetwork)
+    : t('unknownNetwork');
+  const appNetworkName = networkMismatch.appNetwork
+    ? formatNetworkName(networkMismatch.appNetwork)
+    : t('unknownNetwork');
 
   return (
     <div className="fixed top-16 left-0 right-0 z-40 bg-red-900/95 border-b border-red-800 backdrop-blur-sm">
       <div className="max-w-7xl mx-auto px-6 py-3">
         <div className="flex items-start gap-3">
           <div className="flex-1 min-w-0">
-            <p className="text-red-100 text-sm font-medium">Network Mismatch Detected</p>
+            <p className="text-red-100 text-sm font-medium">{t('title')}</p>
             <p className="text-red-200 text-xs mt-1">
-              Your Freighter wallet is connected to{' '}
-              <span className="font-semibold text-red-100">{walletNetworkName}</span> but this app
-              uses <span className="font-semibold text-red-100">{appNetworkName}</span>. Please
-              switch networks in Freighter to continue.
+              {t('description', {
+                walletNetwork: walletNetworkName,
+                appNetwork: appNetworkName,
+              })}
             </p>
             <a
               href="https://www.freighter.app/help#how-do-i-switch-networks"
@@ -39,7 +45,7 @@ export default function NetworkMismatchBanner() {
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-red-300 hover:text-red-100 text-xs mt-2 transition-colors"
             >
-              How to switch networks
+              {t('switchNetworks')}
               <svg
                 width="12"
                 height="12"
@@ -60,7 +66,7 @@ export default function NetworkMismatchBanner() {
           <button
             onClick={dismissBanner}
             className="flex-shrink-0 p-1 text-red-300 hover:text-red-100 transition-colors"
-            aria-label="Dismiss network mismatch warning"
+            aria-label={t('dismiss')}
           >
             <svg
               width="16"

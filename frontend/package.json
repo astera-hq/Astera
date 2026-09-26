@@ -9,6 +9,7 @@
     "start:e2e": "next build && next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "check:locales": "node scripts/check-locale-parity.mjs",
     "format": "prettier --write .",
     "prepare": "[ \"$CI\" = \"true\" ] || (cd .. && git config core.hooksPath frontend/.husky)",
     "test": "jest",

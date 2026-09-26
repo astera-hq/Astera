@@ -177,6 +177,18 @@ export interface Listing {
 export type OrderSide = 'Bid' | 'Ask';
 export type OrderStatus = 'Open' | 'PartiallyFilled' | 'Filled' | 'Cancelled' | 'Expired';
 
+/**
+ * One resting order in an order book's depth view (#1133) — lets callers
+ * render a real book without a follow-up `getOrder` call per id.
+ */
+export interface OrderBookLevel {
+  orderId: bigint;
+  /** Per-unit price, scaled by 1e7 (`PRICE_SCALE` on-chain). */
+  price: bigint;
+  /** Remaining quantity: bps of CoFundShare (CoFunding) or raw token amount (SingleFunded). */
+  quantity: bigint;
+}
+
 export interface Order {
   orderId: bigint;
   invoiceId: bigint;

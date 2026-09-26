@@ -12,6 +12,7 @@ export default function TestnetFaucet({ address }: Props) {
   const { NEXT_PUBLIC_NETWORK, NEXT_PUBLIC_USDC_TOKEN_ID } = getEnvConfig();
   const [fundingXlm, setFundingXlm] = useState(false);
   const [fundingUsdc, setFundingUsdc] = useState(false);
+  const hasUsdcToken = Boolean(NEXT_PUBLIC_USDC_TOKEN_ID?.trim());
 
   // Only render on testnet
   if (NEXT_PUBLIC_NETWORK !== 'testnet') return null;
@@ -70,10 +71,11 @@ export default function TestnetFaucet({ address }: Props) {
           </button>
           <button
             onClick={fundWithUsdc}
-            disabled={fundingUsdc}
-            className="px-3 py-1.5 rounded-lg border border-brand-gold/40 text-brand-gold text-xs font-bold disabled:opacity-50 hover:bg-brand-gold/10 transition-colors"
+            disabled={fundingUsdc || !hasUsdcToken}
+            title={!hasUsdcToken ? 'Configure NEXT_PUBLIC_USDC_TOKEN_ID to enable the USDC faucet.' : undefined}
+            className="px-3 py-1.5 rounded-lg border border-brand-gold/40 text-brand-gold text-xs font-bold disabled:opacity-50 disabled:cursor-not-allowed hover:bg-brand-gold/10 transition-colors"
           >
-            {fundingUsdc ? 'Minting…' : 'Get Test USDC'}
+            {!hasUsdcToken ? 'USDC faucet unavailable' : fundingUsdc ? 'Minting…' : 'Get Test USDC'}
           </button>
         </div>
       </div>

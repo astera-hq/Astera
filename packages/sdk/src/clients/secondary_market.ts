@@ -8,6 +8,7 @@ import type {
   Listing,
   ListingKind,
   Order,
+  OrderBookLevel,
   OrderSide,
   TransactionProgress,
 } from '../types';
@@ -249,20 +250,28 @@ export class SecondaryMarketClient extends BaseClient {
     return this.orderFromRaw(raw as Record<string, unknown>);
   }
 
-  /** Resting bid/ask order IDs for an invoice's order book, as `{ bidIds, askIds }`. */
+  /** Resting bid/ask depth levels for an invoice's order book, as `{ bids, asks }` (#1133). */
   async getOrderBook(
     invoiceId: bigint | number,
     kind: ListingKind,
-  ): Promise<{ bidIds: bigint[]; askIds: bigint[] }> {
+  ): Promise<{ bids: OrderBookLevel[]; asks: OrderBookLevel[] }> {
+    const levelFromRaw = (raw: Record<string, unknown>): OrderBookLevel => ({
+      orderId: BigInt(String(raw.order_id)),
+      price: BigInt(String(raw.price)),
+      quantity: BigInt(String(raw.quantity)),
+    });
     const sim = await this.simulate('get_order_book', [
       nativeToScVal(invoiceId, { type: 'u64' }),
       this.listingKindToScVal(kind),
     ]);
-    if (StellarRpc.Api.isSimulationError(sim)) return { bidIds: [], askIds: [] };
-    const [bids, asks] = scValToNative(sim.result!.retval) as [unknown[], unknown[]];
+    if (StellarRpc.Api.isSimulationError(sim)) return { bids: [], asks: [] };
+    const [bids, asks] = scValToNative(sim.result!.retval) as [
+      Record<string, unknown>[],
+      Record<string, unknown>[],
+    ];
     return {
-      bidIds: (bids ?? []).map((id) => BigInt(String(id))),
-      askIds: (asks ?? []).map((id) => BigInt(String(id))),
+      bids: (bids ?? []).map(levelFromRaw),
+      asks: (asks ?? []).map(levelFromRaw),
     };
   }
 

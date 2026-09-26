@@ -131,3 +131,141 @@ const myListings = await pool.listListingsForInvestor(sellerAddress);
 | `lst_open` | `(listing_id, invoice_id, seller, amount_or_bps, price)` | New listing created |
 | `lst_cncl` | `(listing_id, invoice_id, seller)` | Listing cancelled by seller |
 | `lst_buy`  | `(listing_id, invoice_id, seller, buyer, price)` | Listing filled by buyer |
+
+## Invoice Contract
+
+Manages invoice lifecycle from creation through repayment or default. Invoices can be funded by multiple co-investors and track repayment schedules with grace periods.
+
+### Entrypoints
+
+- `create_invoice(creator, due_date, amount)` — Create a new invoice
+- `deploy_capital(investor, invoice_id, amount)` — Deploy capital into an invoice
+- `repay_invoice(repayer, invoice_id, amount)` — Repay an invoice
+- `mark_defaulted(keeper, invoice_id)` — Mark invoice as defaulted
+- `get_invoice(id)` — Retrieve invoice by ID
+- `get_invoice_count()` — Get total number of invoices
+- `get_grace_period()` — Get default grace period in days
+
+## Pool Contract
+
+The main contract managing pool operations, investor positions, and capital deployment across multiple invoices.
+
+### Entrypoints
+
+- `deploy(investor, invoice_id, amount)` — Deploy available balance into an invoice
+- `withdraw(investor, amount)` — Withdraw from pool balance
+- `get_investor_balance(investor)` — Get investor's available and deployed balances
+- `get_pool_stats()` — Get overall pool statistics
+
+## Tranche Contract
+
+Divides pool positions into tranches with different seniority levels and risk profiles.
+
+### Entrypoints
+
+- `create_tranche(pool_id, name, seniority_level)` — Create a new tranche
+- `deploy_to_tranche(investor, tranche_id, amount)` — Deploy capital into a tranche
+- `get_tranche(tranche_id)` — Retrieve tranche details
+- `distribute_returns(invoice_id, amount)` — Distribute repayment pro-rata by tranche seniority
+
+## Arbitration Contract
+
+Handles dispute resolution between parties (borrowers, investors, or the pool).
+
+### Entrypoints
+
+- `raise_dispute(initiator, dispute_type, details)` — Initiate a dispute
+- `submit_evidence(juror, dispute_id, evidence)` — Submit evidence for a dispute
+- `vote(juror, dispute_id, verdict)` — Cast a vote on a dispute outcome
+- `finalize_dispute(dispute_id)` — Finalize dispute and execute verdict
+- `get_dispute(dispute_id)` — Retrieve dispute details
+
+## Auction Contract
+
+Enables reverse auctions for invoice pricing and settlement matching between borrowers and investors.
+
+### Entrypoints
+
+- `create_auction(invoice_id, target_amount, duration_secs)` — Create a new auction
+- `place_bid(bidder, auction_id, rate)` — Submit a bid rate
+- `settle_auction(auction_id)` — Settle auction and commit winning rate
+- `get_auction(auction_id)` — Retrieve auction details
+
+## Access Control Contract
+
+Manages role-based permissions across the platform (admin, borrower, investor, etc.).
+
+### Entrypoints
+
+- `set_role(admin, subject, role)` — Assign a role to an address
+- `check_role(subject, role)` — Verify if subject has a role
+- `revoke_role(admin, subject, role)` — Remove a role from an address
+- `has_admin_role(subject)` — Check admin status
+
+## Compliance Contract
+
+Performs sanctions screening and risk assessment on addresses and transactions.
+
+### Entrypoints
+
+- `screen_address(address, name, jurisdiction)` — Screen an address for sanctions and risk
+- `submit_screening_result(screener, address, status, reason_code, risk_tier, expires_at, notes)` — Submit screening decision
+- `get_screening_result(address)` — Retrieve latest screening result for an address
+- `get_risk_tier(address)` — Get current risk tier
+- `update_structuring_check(address, amount)` — Track structuring-check violations
+
+## Insurance Contract
+
+Provides default insurance for invoices, protecting investors against borrower default.
+
+### Entrypoints
+
+- `create_insurance_pool()` — Initialize insurance pool
+- `deposit_premium(investor, invoice_id, amount)` — Deposit insurance premium
+- `claim_payout(investor, invoice_id)` — Claim insurance payout on default
+- `get_insurance_pool()` — Retrieve pool details
+
+## Oracle Registry Contract
+
+Manages oracle providers and price feeds for the platform.
+
+### Entrypoints
+
+- `register_oracle(oracle_address, asset_pair)` — Register an oracle provider
+- `submit_price_feed(oracle, asset_pair, price, timestamp)` — Submit price data
+- `get_price(asset_pair)` — Retrieve latest price for an asset pair
+- `list_oracles()` — List all registered oracles
+
+## Governance Contract
+
+Enables governance proposals and voting on protocol changes.
+
+### Entrypoints
+
+- `submit_proposal(proposer, description, target_contract, action)` — Submit a proposal
+- `vote_on_proposal(voter, proposal_id, vote)` — Vote on a proposal
+- `execute_proposal(proposal_id)` — Execute an approved proposal
+- `get_proposal(proposal_id)` — Retrieve proposal details
+
+## Referral Contract
+
+Tracks and rewards referrals for borrowers and investors joining the platform.
+
+### Entrypoints
+
+- `register_referral(referrer, referee)` — Register a referral relationship
+- `claim_referral_reward(referrer)` — Claim accrued referral rewards
+- `get_referral_stats(address)` — Get referral count and reward balance
+- `get_referral_rate()` — Get current referral reward rate
+
+## Share Contract
+
+Represents co-funding shares for investors in financed invoices (ERC-20-like token).
+
+### Entrypoints
+
+- `mint(recipient, invoice_id, bps_amount)` — Mint co-funding shares
+- `burn(holder, invoice_id, bps_amount)` — Burn shares
+- `balance_of(holder, invoice_id)` — Get share balance
+- `transfer(from, to, invoice_id, bps_amount)` — Transfer shares between investors
+- `allowance(owner, spender, invoice_id)` — Get spending allowance

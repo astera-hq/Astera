@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 
 interface Props {
@@ -34,15 +34,24 @@ export default function SMEOnboardingChecklist({
   invoiceCount,
   onDismiss,
 }: Props) {
+  const [dismissed, setDismissed] = useState(true);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setDismissed(isDismissed());
+    setMounted(true);
+  }, []);
+
   const handleDismiss = useCallback(() => {
     if (typeof window !== 'undefined') {
       localStorage.setItem(DISMISSED_KEY, 'true');
     }
+    setDismissed(true);
     onDismiss();
   }, [onDismiss]);
 
-  if (invoiceCount >= 1) return null;
-  if (isDismissed()) return null;
+  if (!mounted || invoiceCount >= 1) return null;
+  if (dismissed) return null;
 
   const completed: Record<StepKey, boolean> = {
     'connect-wallet': walletConnected,

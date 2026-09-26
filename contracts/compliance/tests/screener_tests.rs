@@ -475,3 +475,110 @@ fn test_reducing_timelock_only_affects_future_registrations() {
         Err(Ok(ComplianceError::ScreenerTimelockActive))
     );
 }
+
+#[test]
+fn test_append_history_fifo_trim_at_max_entries() {
+    // #1112: verify FIFO trimming of history at MAX_HISTORY_ENTRIES (64) boundary
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    client.set_screener_timelock(&admin, &0u64);
+    let screener = Address::generate(&env);
+    client.register_screener(&admin, &screener);
+    let subject = Address::generate(&env);
+
+    // Submit 64 screening results to build up to MAX_HISTORY_ENTRIES
+    for i in 0..64u32 {
+        let timestamp = 1_000_000u64 + (i as u64 * 100);
+        env.ledger().with_mut(|l| l.timestamp = timestamp);
+
+        client.submit_screening_result(
+            &screener,
+            &subject,
+            &ComplianceStatus::Cleared,
+            &i,
+            &RiskTier::Low,
+            &(timestamp + 1000),
+            &String::from_str(&env, &format!("note_{}", i)),
+        );
+    }
+
+    // Get history and verify we have exactly 64 entries
+    let history1 = client.get_address_history(&subject);
+    assert_eq!(history1.len(), 64);
+    assert_eq!(history1.get(0).unwrap().reason_code, 0u32); // First entry is entry 0
+
+    // Add the 65th entry — oldest (entry 0) should be dropped
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000u64 + (64u64 * 100));
+    client.submit_screening_result(
+        &screener,
+        &subject,
+        &ComplianceStatus::Cleared,
+        &64u32,
+        &RiskTier::Low,
+        &(1_000_000u64 + 64 * 100 + 1000),
+        &String::from_str(&env, "note_64"),
+    );
+
+    // Verify history still has 64 entries (oldest dropped)
+    let history2 = client.get_address_history(&subject);
+    assert_eq!(history2.len(), 64);
+    // First entry should now be entry 1 (entry 0 was dropped)
+    assert_eq!(history2.get(0).unwrap().reason_code, 1u32);
+    // Last entry should be entry 64
+    assert_eq!(history2.get(63).unwrap().reason_code, 64u32);
+}
+
+#[test]
+fn test_append_screener_submission_fifo_trim_at_max_entries() {
+    // #1112: verify FIFO trimming of screener submissions at MAX_HISTORY_ENTRIES (64) boundary
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    client.set_screener_timelock(&admin, &0u64);
+    let screener = Address::generate(&env);
+    client.register_screener(&admin, &screener);
+
+    // Submit 64 screening results for different subjects to build screener submission history
+    for i in 0..64u32 {
+        let subject = Address::generate(&env);
+        let timestamp = 1_000_000u64 + (i as u64 * 100);
+        env.ledger().with_mut(|l| l.timestamp = timestamp);
+
+        client.submit_screening_result(
+            &screener,
+            &subject,
+            &ComplianceStatus::Cleared,
+            &i,
+            &RiskTier::Low,
+            &(timestamp + 1000),
+            &String::from_str(&env, &format!("sub_note_{}", i)),
+        );
+    }
+
+    // Get screener submissions and verify we have exactly 64 entries
+    let submissions1 = client.get_screener_submissions(&screener);
+    assert_eq!(submissions1.len(), 64);
+    assert_eq!(submissions1.get(0).unwrap().reason_code, 0u32); // First entry is entry 0
+
+    // Submit the 65th result — oldest (entry 0) should be dropped
+    let subject_65 = Address::generate(&env);
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000u64 + (64u64 * 100));
+    client.submit_screening_result(
+        &screener,
+        &subject_65,
+        &ComplianceStatus::Flagged,
+        &64u32,
+        &RiskTier::High,
+        &(1_000_000u64 + 64 * 100 + 1000),
+        &String::from_str(&env, "sub_note_64"),
+    );
+
+    // Verify submissions still has 64 entries (oldest dropped)
+    let submissions2 = client.get_screener_submissions(&screener);
+    assert_eq!(submissions2.len(), 64);
+    // First entry should now be entry 1 (entry 0 was dropped)
+    assert_eq!(submissions2.get(0).unwrap().reason_code, 1u32);
+    // Last entry should be entry 64
+    assert_eq!(submissions2.get(63).unwrap().reason_code, 64u32);
+}

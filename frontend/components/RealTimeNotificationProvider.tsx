@@ -20,29 +20,29 @@ import type { UserRole } from '@/lib/sse-events';
 export function RealTimeNotificationProvider() {
   const wallet = useStore((s) => s.wallet);
   const poolConfig = useStore((s) => s.poolConfig);
+  const position = useStore((s) => s.position);
 
   // Determine user role based on wallet and pool config
   const userRole: UserRole = (() => {
     if (!wallet.connected || !wallet.address) {
-      return 'Admin'; // Default role when not connected
+      return 'Investor';
     }
 
-    // Check if user is admin
     if (poolConfig?.admin === wallet.address) {
       return 'Admin';
     }
 
-    // Default to Admin for broad event coverage
-    // Can be refined later with more sophisticated role detection
-    // (e.g., checking invoice ownership, investor positions, etc.)
-    return 'Admin';
+    return position ? 'Investor' : 'SME';
   })();
 
   // Activate polling with user role and default interval (15 seconds)
+  // Only enable polling if wallet is connected to avoid spurious requests
+  const shouldEnablePolling = wallet.connected;
+
   const { isPolling } = useSseEvents({
     role: userRole,
     intervalMs: 15_000,
-    enabled: true, // Always enabled once mounted
+    enabled: shouldEnablePolling,
   });
 
   // Log polling status for debugging

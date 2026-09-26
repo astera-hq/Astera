@@ -22,7 +22,24 @@
       "disputed": "En disputa",
       "funded": "Financiada",
       "paid": "Pagada",
-      "defaulted": "En mora"
+      "defaulted": "En mora",
+      "cancelled": "Cancelada",
+      "expired": "Expirada"
+    },
+    "view": {
+      "list": "Lista",
+      "pipeline": "Canal"
+    },
+    "pipeline": {
+      "needsAttention": "Necesitan atencion",
+      "noAttention": "Ninguna factura necesita atencion por ahora.",
+      "columns": {
+        "pending": "Pendiente",
+        "awaitingVerification": "En espera de verificacion",
+        "verified": "Verificada",
+        "funded": "Financiada",
+        "paid": "Pagada / completada"
+      }
     },
     "sort": {
       "createdDesc": "Fecha de creacion (mas reciente)",
@@ -59,6 +76,12 @@
       "retryAttempt": "Intento {retryCount}/{maxRetries}...",
       "disconnectedTitle": "Billetera desconectada",
       "disconnectedDescription": "Tu billetera Freighter ya no esta conectada a este sitio. Vuelve a conectarla para continuar."
+    },
+    "networkMismatch": {
+      "title": "Incompatibilidad de red detectada",
+      "description": "Tu billetera Freighter está conectada a {walletNetwork}, pero esta aplicación usa {appNetwork}. Cambia de red en Freighter para continuar.",
+      "switchNetworks": "Cómo cambiar de red",
+      "dismiss": "Cerrar advertencia de incompatibilidad de red"
     },
     "toast": {
       "dismiss": "Cerrar notificacion"
@@ -121,6 +144,7 @@
       "yield": "Tasa de rendimiento",
       "defaults": "Morosidad",
       "analytics": "Analitica",
+      "revenue": "Revenue",
       "monitoring": "Monitoreo",
       "kyc": "KYC / Lista blanca",
       "compliance": "Cumplimiento",
@@ -129,7 +153,8 @@
       "aging": "Informe de antiguedad",
       "oracles": "Red de oraculos",
       "attestors": "Atestadores de credito",
-      "insurance": "Seguro"
+      "insurance": "Seguro",
+      "governance": "Governance"
     },
     "layout": {
       "accessDeniedTitle": "Identificacion de administrador requerida",
@@ -201,6 +226,55 @@
       "loading": "Cargando...",
       "error": "Error al cargar los datos analiticos. Intentalo de nuevo."
     },
+    "revenue": {
+      "title": "Protocol Revenue Dashboard",
+      "description": "Factoring-fee revenue over time, treasury status, and funded-volume metrics — all sourced from on-chain state.",
+      "lastUpdated": "Last updated: {time}",
+      "loading": "Loading...",
+      "refresh": "Refresh Data",
+      "error": "Failed to load revenue data. Please try again.",
+      "sectionRevenue": "Revenue Overview",
+      "cumulativeFees": "Cumulative Fees",
+      "cumulativeFeesDesc": "All-time protocol fees collected",
+      "pendingFees": "Pending Fees",
+      "pendingFeesDesc": "Unclaimed fees in pool contract",
+      "avgFeePerInvoice": "Avg Fee / Invoice",
+      "avgFeePerInvoiceDesc": "Across all funded invoices",
+      "feeRate": "Fee Rate",
+      "feeRateDesc": "Current factoring fee",
+      "sectionPerToken": "Breakdown by Token",
+      "tableToken": "Token",
+      "tableCumulative": "Cumulative Fees",
+      "tablePending": "Pending",
+      "tableTreasury": "Treasury Balance",
+      "sectionTreasury": "Treasury Status",
+      "treasuryBalances": "Treasury Balances",
+      "treasuryNotConfigured": "No treasury address configured on the pool contract yet.",
+      "noTreasuryData": "No treasury data available yet.",
+      "treasuryAddressLabel": "Treasury:",
+      "withdrawals": "Fee Withdrawals",
+      "lastWithdrawal": "Last withdrawal",
+      "lastWithdrawalDate": "Date",
+      "toTreasury": "To treasury",
+      "noWithdrawals": "No fee withdrawals recorded yet.",
+      "treasuryPollNote": "Treasury balances refresh automatically every 30 seconds.",
+      "monthlyRevenueTitle": "Monthly Fee Revenue",
+      "weeklyRevenueTitle": "Weekly Fee Revenue",
+      "sectionVolume": "Volume Metrics",
+      "totalFundedVolume": "Total Funded Volume",
+      "totalFundedVolumeDesc": "All-time invoice volume funded",
+      "activeToday": "Active Today",
+      "activeTodayDesc": "Funded in the last 24 hours",
+      "activeWeek": "Active This Week",
+      "activeWeekDesc": "Funded in the last 7 days",
+      "activeMonth": "Active This Month",
+      "activeMonthDesc": "Funded in the last 30 days",
+      "uniqueBorrowers": "Unique Borrowers",
+      "uniqueBorrowersDesc": "SMEs with funded invoices",
+      "uniqueLenders": "Unique Lenders",
+      "uniqueLendersDesc": "Addresses with pool deposits",
+      "dataNote": "Revenue figures reflect on-chain state and pool events. Historical chart series are derived from current cumulative totals, and event-derived figures (last withdrawal, unique lenders) cover the trailing 30 days of activity; a full time-series store arrives with the event indexer."
+    },
     "invoices": {
       "titlePending": "Facturas pendientes",
       "titleFunding": "Cola de facturas verificadas",
@@ -257,6 +331,12 @@
       "adminNotConnected": "Billetera de administrador no conectada.",
       "approvedInvoice": "La factura #{id} ha sido aprobada para cofinanciamiento.",
       "defaultedInvoice": "La factura #{id} ha sido marcada como MOROSA.",
+      "modalApproveTitle": "Approve Invoice #{id}",
+      "modalApproveDescription": "Approve and fund Invoice #{id} for {amount}. This will initiate co-funding from the liquidity pool.",
+      "modalDisputeTitle": "Mark Invoice #{id} as Disputed",
+      "modalDisputeDescription": "Mark Invoice #{id} as disputed. This will pause all funding activities and flag the invoice for manual review.",
+      "modalVerifyTitle": "Verify Invoice #{id}",
+      "modalVerifyDescription": "Verify Invoice #{id} as authentic. This confirms the invoice details and enables funding.",
       "unknownError": "Error desconocido",
       "approveFailed": "Error al aprobar la factura."
     },
@@ -636,6 +716,51 @@
       "validIdRequired": "Ingresa un ID de atestacion valido.",
       "lookupFailed": "Error al buscar la atestacion.",
       "transactionFailed": "Transaccion fallida."
+    },
+    "governance": {
+      "title": "Governance Proposals",
+      "description": "Create, vote on, and execute governance proposals for protocol parameter changes.",
+      "createProposal": "Create Proposal",
+      "totalProposals": "Total Proposals",
+      "activeProposals": "Active",
+      "passedProposals": "Passed",
+      "executedProposals": "Executed",
+      "proposals": "Proposals",
+      "loading": "Loading proposals...",
+      "noProposals": "No proposals found.",
+      "loadFailed": "Failed to load proposals.",
+      "connectWallet": "Please connect your wallet.",
+      "voteSuccess": "Vote recorded successfully.",
+      "voteFailed": "Failed to record vote.",
+      "executeSuccess": "Proposal executed successfully.",
+      "executeFailed": "Failed to execute proposal.",
+      "statusActive": "Active",
+      "statusPassed": "Passed",
+      "statusRejected": "Rejected",
+      "statusExecuted": "Executed",
+      "statusCancelled": "Cancelled",
+      "statusExpired": "Expired",
+      "categoryParameterChange": "Parameter Change",
+      "categoryTreasury": "Treasury",
+      "categoryCritical": "Critical",
+      "proposer": "Proposer",
+      "created": "Created",
+      "target": "Target",
+      "for": "For",
+      "against": "Against",
+      "quorum": "Quorum",
+      "pass": "Pass",
+      "voteFor": "Vote For",
+      "voteAgainst": "Vote Against",
+      "execute": "Execute",
+      "createProposalTitle": "Create Governance Proposal",
+      "createProposalDesc": "Proposal creation will be implemented once the governance contract is deployed and configured.",
+      "proposalCreationNotImplemented": "Proposal creation requires the governance contract to be deployed and configured. This feature will be available after contract deployment.",
+      "actionSetPoolYield": "Set pool yield to {value} bps",
+      "actionSetPoolTreasury": "Set pool treasury to {address}",
+      "actionSetInvoiceGracePeriod": "Set invoice grace period to {days} days",
+      "actionSetOracleRegistryInvoiceContract": "Set oracle registry invoice contract to {address}",
+      "actionSetComplianceRescreeningInterval": "Set compliance rescreening interval to {secs} seconds"
     }
   }
 }

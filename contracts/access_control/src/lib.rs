@@ -40,6 +40,14 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 /// unapproved, unless overridden at `initialize()`. 7 days.
 const DEFAULT_PROPOSAL_EXPIRY_SECS: u64 = 604_800;
 
+/// Default timelock (in seconds) between proposal approval and execution,
+/// unless overridden at `initialize()`. 48 hours.
+const DEFAULT_PROPOSAL_EXECUTION_TIMELOCK_SECS: u64 = 172_800;
+
+/// Maximum number of signers per role to prevent unbounded iteration.
+const MAX_SIGNERS_PER_ROLE: u32 = 32;
+const MAX_PROPOSAL_PAGE_SIZE: u32 = 100;
+
 // ─── Roles ──────────────────────────────────────────────────────────────────
 
 /// A named role, each with its own independent signer set and threshold.
@@ -174,6 +182,9 @@ pub enum ActionPayload {
     AddSigner(Role, Address),
     RemoveSigner(Role, Address),
     SetThreshold(Role, u32),
+    /// Update the global proposal expiry window (in seconds). Must be > 0.
+    /// Gated under `Role::SuperAdmin` — same bar as signer/threshold changes.
+    SetProposalExpiry(u64),
 }
 
 #[contracttype]
@@ -197,6 +208,10 @@ pub struct Proposal {
     pub approvals: Vec<Address>,
     pub created_at: u64,
     pub expires_at: u64,
+    /// Earliest ledger timestamp at which this proposal can be executed,
+    /// set when the proposal is approved. Implements a timelock between
+    /// approval and execution.
+    pub earliest_execution_time: u64,
     pub status: ProposalStatus,
 }
 
@@ -204,17 +219,21 @@ pub struct Proposal {
 
 #[contracttype]
 pub enum DataKey {
+    // Instance storage (fast, bumped lifetime, limited size)
     Initialized,
     RoleConfig(Role),
-    Proposal(u64),
     NextProposalId,
     ProposalExpirySecs,
+    ProposalExecutionTimelock,
+    // Persistent storage (proposals accumulate, can be pruned)
+    Proposal(u64),
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum AccessControlError {
     AlreadyInitialized = 0,
     NotInitialized = 1,
@@ -225,6 +244,8 @@ pub enum AccessControlError {
     ProposalExpired = 6,
     ProposalNotPending = 7,
     ProposalNotApproved = 8,
+    /// Proposal cannot be executed yet due to timelock.
+    ProposalNotYetExecutable = 20,
     InvalidThreshold = 9,
     DuplicateSigner = 10,
     RoleNotConfigured = 11,
@@ -232,6 +253,20 @@ pub enum AccessControlError {
     InvalidExpiryWindow = 13,
     SignerNotFound = 14,
     NoApprovalToRevoke = 15,
+    /// The `action` payload and `target` address are incoherent: self-management
+    /// payloads (AddSigner / RemoveSigner / SetThreshold / SetProposalExpiry)
+    /// must be proposed with `target == this_contract`, and every cross-contract
+    /// payload must be proposed with `target != this_contract`.  A mismatched
+    /// proposal would silently no-op on execution, so it is rejected at
+    /// creation time instead.
+    IncoherentProposal = 16,
+    /// The signer set for a role has reached MAX_SIGNERS_PER_ROLE.
+    MaxSignersExceeded = 17,
+    /// A signer removal would invalidate the current threshold. Lower the
+    /// threshold in a preceding proposal before removing the signer.
+    ThresholdMustBeLoweredBeforeSignerRemoval = 18,
+    /// The selected role is not permitted to propose this action.
+    RoleNotAuthorized = 19,
 }
 
 type Result_ = Result<(), AccessControlError>;
@@ -385,6 +420,7 @@ impl AccessControlContract {
         super_admin_signers: Vec<Address>,
         super_admin_threshold: u32,
         proposal_expiry_secs: u64,
+        proposal_execution_timelock_secs: u64,
     ) -> Result_ {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(AccessControlError::AlreadyInitialized);
@@ -392,6 +428,12 @@ impl AccessControlContract {
         Self::validate_config(&super_admin_signers, super_admin_threshold)?;
         if proposal_expiry_secs == 0 {
             return Err(AccessControlError::InvalidExpiryWindow);
+        }
+        // #1339: require explicit authorization from every initial SuperAdmin
+        // signer. Without this, anyone observing a deployed-but-uninitialized
+        // contract could front-run initialize and install their own signer set.
+        for i in 0..super_admin_signers.len() {
+            super_admin_signers.get(i).unwrap().require_auth();
         }
 
         env.storage().instance().set(&DataKey::Initialized, &true);
@@ -405,6 +447,10 @@ impl AccessControlContract {
         env.storage()
             .instance()
             .set(&DataKey::ProposalExpirySecs, &proposal_expiry_secs);
+        env.storage().instance().set(
+            &DataKey::ProposalExecutionTimelock,
+            &proposal_execution_timelock_secs,
+        );
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &0u64);
@@ -413,6 +459,14 @@ impl AccessControlContract {
         env.events()
             .publish((EVT, symbol_short!("init")), super_admin_threshold);
         Ok(())
+    }
+
+    /// Read-only accessor for the current proposal expiry window in seconds.
+    pub fn get_proposal_expiry_secs(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProposalExpirySecs)
+            .unwrap_or(DEFAULT_PROPOSAL_EXPIRY_SECS)
     }
 
     /// Read-only accessor for a role's current signer set / threshold.
@@ -429,13 +483,46 @@ impl AccessControlContract {
 
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
     }
 
+    /// Read a bounded range of proposals. `start` is inclusive; an optional
+    /// status filter narrows the returned rows without changing stored state.
+    pub fn list_proposals(
+        env: Env,
+        start: u64,
+        limit: u32,
+        status_filter: Option<ProposalStatus>,
+    ) -> Vec<Proposal> {
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(0);
+        let end = start
+            .saturating_add(limit.min(MAX_PROPOSAL_PAGE_SIZE) as u64)
+            .min(next_id);
+        let mut proposals = Vec::new(&env);
+        for id in start..end {
+            if let Some(proposal) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Proposal>(&DataKey::Proposal(id))
+            {
+                if status_filter
+                    .as_ref()
+                    .map_or(true, |status| &proposal.status == status)
+                {
+                    proposals.push_back(proposal);
+                }
+            }
+        }
+        proposals
+    }
+
     /// One past `proposal_id`, i.e. proposals exist for `0..get_next_proposal_id()`.
-    /// Lets a frontend page through the full proposal history/queue without
-    /// this contract needing its own paginated listing entrypoint.
+    /// Useful as an upper bound when paging through the proposal queue.
     pub fn get_next_proposal_id(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -459,6 +546,26 @@ impl AccessControlContract {
 
         if Self::requires_super_admin(&action) && !matches!(role, Role::SuperAdmin) {
             return Err(AccessControlError::SelfManagementRequiresSuperAdmin);
+        }
+        if !Self::role_can_propose(role, &action) {
+            return Err(AccessControlError::RoleNotAuthorized);
+        }
+
+        // #1135: Validate payload/target coherence before the proposal enters
+        // the approval queue.  Self-management payloads mutate *this* contract's
+        // own storage, so they must target this contract.  Cross-contract
+        // payloads call out to an external contract, so they must not target
+        // this contract — executing them against `this_contract` would hit
+        // `execute_cross_contract`'s self-management catch-all arm and silently
+        // do nothing.  Rejecting here ensures a mismatched proposal never
+        // reaches `Executed` status with zero real effect.
+        let this_contract = env.current_contract_address();
+        let targets_self = target == this_contract;
+        if Self::is_self_management(&action) && !targets_self {
+            return Err(AccessControlError::IncoherentProposal);
+        }
+        if !Self::is_self_management(&action) && targets_self {
+            return Err(AccessControlError::IncoherentProposal);
         }
 
         let config: MultiSigConfig = env
@@ -497,11 +604,14 @@ impl AccessControlContract {
             proposer: proposer.clone(),
             approvals,
             created_at: now,
-            expires_at: now + expiry_secs,
+            expires_at: now
+                .checked_add(expiry_secs)
+                .ok_or(AccessControlError::InvalidExpiryWindow)?,
+            earliest_execution_time: 0,
             status,
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
         env.storage()
             .instance()
@@ -523,11 +633,12 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
-        if proposal.status != ProposalStatus::Pending {
+        if proposal.status != ProposalStatus::Pending && proposal.status != ProposalStatus::Approved
+        {
             return Err(AccessControlError::ProposalNotPending);
         }
         if env.ledger().timestamp() > proposal.expires_at {
@@ -549,9 +660,15 @@ impl AccessControlContract {
         proposal.approvals.push_back(signer.clone());
         if proposal.approvals.len() >= config.threshold {
             proposal.status = ProposalStatus::Approved;
+            let timelock_secs: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ProposalExecutionTimelock)
+                .unwrap_or(DEFAULT_PROPOSAL_EXECUTION_TIMELOCK_SECS);
+            proposal.earliest_execution_time = env.ledger().timestamp() + timelock_secs;
         }
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -568,7 +685,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
         // Allowed on Pending or Approved (but not-yet-executed) proposals —
@@ -600,7 +717,7 @@ impl AccessControlContract {
         };
 
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -608,20 +725,21 @@ impl AccessControlContract {
         Ok(())
     }
 
-    /// Reject a still-pending proposal. Any registered signer for the
-    /// proposal's role may reject — correcting a mistaken or malicious
-    /// proposal doesn't need the full approval threshold, since rejecting
-    /// only ever narrows what can execute, never widens it.
+    /// Reject a pending or approved proposal before it executes. Any registered
+    /// signer for the proposal's role may reject — correcting a mistaken or
+    /// malicious proposal doesn't need the full approval threshold, since
+    /// rejecting only ever narrows what can execute, never widens it.
     pub fn reject_action(env: Env, signer: Address, proposal_id: u64) -> Result_ {
         signer.require_auth();
         bump_instance(&env);
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
-        if proposal.status != ProposalStatus::Pending {
+        if proposal.status != ProposalStatus::Pending && proposal.status != ProposalStatus::Approved
+        {
             return Err(AccessControlError::ProposalNotPending);
         }
         let config: MultiSigConfig = env
@@ -635,7 +753,7 @@ impl AccessControlContract {
 
         proposal.status = ProposalStatus::Rejected;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -657,15 +775,19 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
         if proposal.status != ProposalStatus::Approved {
             return Err(AccessControlError::ProposalNotApproved);
         }
-        if env.ledger().timestamp() > proposal.expires_at {
+        let now = env.ledger().timestamp();
+        if now > proposal.expires_at {
             return Err(AccessControlError::ProposalExpired);
+        }
+        if now < proposal.earliest_execution_time {
+            return Err(AccessControlError::ProposalNotYetExecutable);
         }
 
         // CEI: flip status before the external call. Soroban invocations
@@ -674,7 +796,7 @@ impl AccessControlContract {
         // effect actually having happened, or vice versa.
         proposal.status = ProposalStatus::Executed;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         let this_contract = env.current_contract_address();
@@ -697,14 +819,12 @@ impl AccessControlContract {
     ) {
         match action {
             ActionPayload::SetPaused(paused) => {
-                // Every target contract exposes the same unified setter
-                // name, so try each client in turn is unnecessary — the
-                // proposal was raised against a specific `target`, and only
-                // one of these three calls will actually match that
-                // contract's deployed interface. Soroban resolves this at
-                // the call site: whichever client's method the target
-                // actually implements succeeds; the others are simply never
-                // invoked because `target` only ever hosts one contract.
+                // This arm makes a single hardcoded call to PoolClient.
+                // It succeeds only if the target is a pool contract and
+                // implements set_paused_via_ac; other targets would fail.
+                // The proposal was raised against a specific `target` and
+                // the caller is responsible for ensuring the action and
+                // target are coherent.
                 PoolClient::new(env, target).set_paused_via_ac(this_contract, paused);
             }
             ActionPayload::SetYield(bps) => {
@@ -882,7 +1002,8 @@ impl AccessControlContract {
             }
             ActionPayload::AddSigner(_, _)
             | ActionPayload::RemoveSigner(_, _)
-            | ActionPayload::SetThreshold(_, _) => {
+            | ActionPayload::SetThreshold(_, _)
+            | ActionPayload::SetProposalExpiry(_) => {
                 // Self-management actions never reach here: execute_action
                 // routes them to execute_self_management() based on
                 // `target == this_contract`, which is enforced at
@@ -901,6 +1022,10 @@ impl AccessControlContract {
                 let mut config = Self::role_config_or_default(env, *role);
                 if config.signers.contains(address) {
                     return Err(AccessControlError::DuplicateSigner);
+                }
+                // #1141: cap signer set size to prevent unbounded iteration overhead.
+                if config.signers.len() >= MAX_SIGNERS_PER_ROLE {
+                    return Err(AccessControlError::MaxSignersExceeded);
                 }
                 config.signers.push_back(address.clone());
                 env.storage()
@@ -921,7 +1046,7 @@ impl AccessControlContract {
                     .ok_or(AccessControlError::SignerNotFound)?;
                 config.signers.remove(idx as u32);
                 if config.signers.len() < config.threshold {
-                    return Err(AccessControlError::InvalidThreshold);
+                    return Err(AccessControlError::ThresholdMustBeLoweredBeforeSignerRemoval);
                 }
                 env.storage()
                     .instance()
@@ -935,6 +1060,15 @@ impl AccessControlContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::RoleConfig(*role), &config);
+                Ok(())
+            }
+            ActionPayload::SetProposalExpiry(new_secs) => {
+                if *new_secs == 0 {
+                    return Err(AccessControlError::InvalidExpiryWindow);
+                }
+                env.storage()
+                    .instance()
+                    .set(&DataKey::ProposalExpirySecs, new_secs);
                 Ok(())
             }
             _ => Ok(()),
@@ -957,14 +1091,15 @@ impl AccessControlContract {
             ActionPayload::AddSigner(_, _)
                 | ActionPayload::RemoveSigner(_, _)
                 | ActionPayload::SetThreshold(_, _)
+                | ActionPayload::SetProposalExpiry(_)
         )
     }
 
-    /// Self-management actions (this contract's own role config) and
-    /// access-control-rotation actions (repointing a target contract's
-    /// trust anchor) both bypass every other role's threshold entirely if
-    /// left ungated — so both are restricted to `Role::SuperAdmin`, the
-    /// role with the highest bar to reconfigure.
+    /// Self-management actions (this contract's own role config / expiry
+    /// window) and access-control-rotation actions (repointing a target
+    /// contract's trust anchor) both bypass every other role's threshold
+    /// entirely if left ungated — so both are restricted to
+    /// `Role::SuperAdmin`, the role with the highest bar to reconfigure.
     fn requires_super_admin(action: &ActionPayload) -> bool {
         Self::is_self_management(action)
             || matches!(
@@ -978,7 +1113,72 @@ impl AccessControlContract {
             )
     }
 
+    /// Enforce least-privilege boundaries between the named operational
+    /// roles. SuperAdmin remains an override for every action.
+    fn role_can_propose(role: Role, action: &ActionPayload) -> bool {
+        if matches!(role, Role::SuperAdmin) {
+            return true;
+        }
+
+        match action {
+            ActionPayload::SetPaused(_)
+            | ActionPayload::SetYield(_)
+            | ActionPayload::SetMaxUtilization(_)
+            | ActionPayload::SetLateThreshold(_)
+            | ActionPayload::SetScoreThresholds(_, _, _, _) => {
+                matches!(role, Role::RiskManager)
+            }
+            ActionPayload::SetTreasury(_)
+            | ActionPayload::WithdrawRevenue(_, _)
+            | ActionPayload::UpdateGovernanceConfig(_, _)
+            | ActionPayload::SetCategoryQuorum(_, _)
+            | ActionPayload::SetReferralPaused(_)
+            | ActionPayload::SetReferralPool(_)
+            | ActionPayload::SetBorrowRewardBps(_)
+            | ActionPayload::SetDepositRewardBps(_) => {
+                matches!(role, Role::TreasuryManager)
+            }
+            ActionPayload::SetKycRequired(_)
+            | ActionPayload::SetInvestorKyc(_, _)
+            | ActionPayload::RegisterDebtor(_, _, _)
+            | ActionPayload::DeactivateDebtor(_)
+            | ActionPayload::AddKeeper(_)
+            | ActionPayload::SetCompliancePaused(_)
+            | ActionPayload::RegisterScreener(_)
+            | ActionPayload::ConfirmScreenerRegistration(_)
+            | ActionPayload::DeregisterScreener(_)
+            | ActionPayload::SetRescreeningInterval(_)
+            | ActionPayload::SetScreenerTimelock(_) => {
+                matches!(role, Role::ComplianceOfficer)
+            }
+            ActionPayload::SetOracleContract(_)
+            | ActionPayload::SetOracle(_)
+            | ActionPayload::RegisterAttestor(_, _, _)
+            | ActionPayload::SetOracleRegistryInvoiceContract(_)
+            | ActionPayload::SetOracleRegistryTreasury(_)
+            | ActionPayload::SetOracleRegistryConfig(_, _, _, _, _)
+            | ActionPayload::SetOracleRegistryPaused(_)
+            | ActionPayload::SlashOracle(_, _, _, _)
+            | ActionPayload::AdminResolveRound(_, _, _) => {
+                matches!(role, Role::OracleManager)
+            }
+            ActionPayload::SetInvoiceAccessControl(_)
+            | ActionPayload::SetCreditScoreAccessControl(_)
+            | ActionPayload::SetOracleRegistryAccessControl(_)
+            | ActionPayload::SetComplianceAccessControl(_)
+            | ActionPayload::SetGovernanceAccessControl(_)
+            | ActionPayload::SetReferralAccessControl(_)
+            | ActionPayload::AddSigner(_, _)
+            | ActionPayload::RemoveSigner(_, _)
+            | ActionPayload::SetThreshold(_, _)
+            | ActionPayload::SetProposalExpiry(_) => false,
+        }
+    }
+
     fn validate_config(signers: &Vec<Address>, threshold: u32) -> Result_ {
+        if signers.len() > MAX_SIGNERS_PER_ROLE as usize {
+            return Err(AccessControlError::MaxSignersExceeded);
+        }
         if threshold == 0 || threshold > signers.len() {
             return Err(AccessControlError::InvalidThreshold);
         }
@@ -991,5 +1191,31 @@ impl AccessControlContract {
             }
         }
         Ok(())
+    }
+
+    /// Prune a terminal proposal (Executed, Rejected, or Expired) from
+    /// persistent storage to prevent unbounded growth. Permissionless
+    /// — anyone can clean up old proposals.
+    pub fn prune_proposal(env: Env, proposal_id: u64) -> Result_ {
+        bump_instance(&env);
+        let proposal: Proposal = env
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(AccessControlError::ProposalNotFound)?;
+
+        match proposal.status {
+            ProposalStatus::Executed | ProposalStatus::Rejected => {
+                env.persistent().remove(&DataKey::Proposal(proposal_id));
+                Ok(())
+            }
+            ProposalStatus::Pending | ProposalStatus::Approved => {
+                if env.ledger().timestamp() > proposal.expires_at {
+                    env.persistent().remove(&DataKey::Proposal(proposal_id));
+                    Ok(())
+                } else {
+                    Err(AccessControlError::ProposalNotPending)
+                }
+            }
+        }
     }
 }

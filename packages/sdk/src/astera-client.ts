@@ -556,8 +556,8 @@ export class AsteraClient {
     ): Promise<TrancheInvestorPosition> =>
       this.trancheClient.getInvestorPosition(investor, token, trancheClass),
 
-    getEffectiveApy: (token: string, trancheClass: TrancheClass): Promise<number> =>
-      this.trancheClient.getEffectiveApy(token, trancheClass),
+    getLifetimeReturnBps: (token: string, trancheClass: TrancheClass): Promise<number> =>
+      this.trancheClient.getLifetimeReturnBps(token, trancheClass),
 
     getInvoiceExposure: (invoiceId: number): Promise<InvoiceTrancheExposure | null> =>
       this.trancheClient.getInvoiceExposure(invoiceId),

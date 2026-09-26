@@ -11,6 +11,10 @@ soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 invoice = { path = "../contracts/invoice" }
 pool = { path = "../contracts/pool" }
 share = { path = "../contracts/share" }
+credit_score = { path = "../contracts/credit_score" }
+governance = { path = "../contracts/governance" }
+auction = { path = "../contracts/auction" }
+referral = { path = "../contracts/referral" }
 
 [[bench]]
 name = "contract_benchmarks"

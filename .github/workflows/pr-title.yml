@@ -45,6 +45,18 @@ jobs:
             ci
             deps
             exchange-rate
+            tranche
+            arbitration
+            secondary_market
+            auction
+            compliance
+            access_control
+            oracle_registry
+            governance
+            referral
+            indexer
+            oracle-service
+            compliance-service
           requireScope: false
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: |

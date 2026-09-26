@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { usePoolConfig } from '@/lib/cache';
 import { formatApyPercent, projectedInterestStroops } from '@/lib/apy';
-import { formatUSDC, toStroops } from '@/lib/stellar';
+import { formatUSDC, toStroops, stablecoinLabel } from '@/lib/stellar';
 import { getCurrentRate } from '@/lib/contracts';
 import { Skeleton } from '@/components/Skeleton';
 import { RetryIndicator } from '@/components/RetryIndicator';
@@ -99,7 +99,9 @@ export function APYCalculator({ className = '', token }: { className?: string; t
 
       <div className="space-y-4">
         <div>
-          <label className="block text-sm text-[var(--muted)] mb-2">Deposit amount (USDC)</label>
+          <label className="block text-sm text-[var(--muted)] mb-2">
+            Deposit amount ({token ? stablecoinLabel(token) : 'USDC'})
+          </label>
           <div className="relative">
             <input
               type="number"
@@ -112,7 +114,7 @@ export function APYCalculator({ className = '', token }: { className?: string; t
               className="w-full bg-[var(--bg)] border border-[var(--border)] rounded-xl px-4 py-3 text-[var(--text-primary)] placeholder-[var(--muted)] focus:outline-none focus:border-brand-gold text-lg disabled:opacity-50"
             />
             <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[var(--muted)] text-sm font-medium">
-              USDC
+              {token ? stablecoinLabel(token) : 'USDC'}
             </span>
           </div>
         </div>

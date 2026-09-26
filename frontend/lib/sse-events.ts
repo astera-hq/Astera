@@ -157,6 +157,7 @@ class SseEventsService {
   private currentRole: UserRole = 'Admin';
   private visibilityHandler: (() => void) | null = null;
   private cleanupCallbacks: (() => void)[] = [];
+  private consumerCount = 0;
 
   private constructor() {}
 
@@ -172,8 +173,9 @@ class SseEventsService {
    * @param options - Configuration options
    */
   public start(options?: { intervalMs?: number; role?: UserRole }): void {
+    this.consumerCount += 1;
+
     if (this.isRunning) {
-      console.warn('[SSE Events] Polling is already running. Call stop() first.');
       return;
     }
 
@@ -209,6 +211,9 @@ class SseEventsService {
    * Stop the polling loop and clean up all resources.
    */
   public stop(): void {
+    this.consumerCount = Math.max(0, this.consumerCount - 1);
+    if (this.consumerCount > 0) return;
+
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;

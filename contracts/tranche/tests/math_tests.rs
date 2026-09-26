@@ -104,8 +104,8 @@ fn test_waterfall_split_time_proportional() {
     );
 
     // Senior cap should be 1000 + 50 (half of 100) = 1050 (allow for rounding)
-    assert!(senior_amount >= 1049 && senior_amount <= 1051);
-    assert!(junior_amount >= 449 && junior_amount <= 451);
+    assert!((1049..=1051).contains(&senior_amount));
+    assert!((449..=451).contains(&junior_amount));
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_waterfall_split_sum_equals_total() {
     let senior_target_yield_bps = 1000;
     let elapsed_secs = 365 * 24 * 60 * 60;
 
-    for total_due in vec![0, 500, 1000, 1100, 1500, 2000] {
+    for total_due in [0, 500, 1000, 1100, 1500, 2000] {
         let (senior_amount, junior_amount) = calculate_waterfall_split(
             &env,
             total_due,
@@ -214,8 +214,8 @@ fn test_loss_allocation_zero_shortfall() {
 
 #[test]
 fn test_loss_allocation_sum_equals_shortfall() {
-    for shortfall in vec![0, 50, 100, 200, 500] {
-        for junior_remaining in vec![0, 50, 100, 200, 500] {
+    for shortfall in [0, 50, 100, 200, 500] {
+        for junior_remaining in [0, 50, 100, 200, 500] {
             let (junior_loss, senior_loss) = calculate_loss_allocation(shortfall, junior_remaining);
             assert_eq!(
                 junior_loss + senior_loss,

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import Database from 'better-sqlite3';
+import { Pool } from 'pg';
 import { replay } from './replay';
 import { computePredictiveQuality } from './metrics';
 import { renderReport } from './report';
@@ -9,20 +9,24 @@ function parseArg(name: string): string | undefined {
   return idx !== -1 ? process.argv[idx + 1] : undefined;
 }
 
-function main() {
-  const dbPath = parseArg('db') || process.env.INDEXER_DB_PATH;
-  if (!dbPath) {
+async function main() {
+  const connectionString = parseArg('database-url') || process.env.DATABASE_URL;
+  if (!connectionString) {
     console.error(
-      'Usage: npm run backtest -- --db <path-to-indexer-sqlite-db>\n' +
-        '(or set INDEXER_DB_PATH). The db is the indexer\'s own SQLite file — see indexer/src/db.ts.',
+      'Usage: npm run backtest -- --database-url <postgres-connection-string>\n' +
+        '(or set DATABASE_URL). The connection string points at the indexer\'s Postgres database.',
     );
     process.exit(1);
   }
 
-  const db = new Database(dbPath, { readonly: true });
-  const trajectories = replay(db);
-  const quality = computePredictiveQuality(trajectories);
-  console.log(renderReport(trajectories, quality));
+  const pool = new Pool({ connectionString });
+  try {
+    const trajectories = await replay(pool);
+    const quality = computePredictiveQuality(trajectories);
+    console.log(renderReport(trajectories, quality));
+  } finally {
+    await pool.end();
+  }
 }
 
 main();

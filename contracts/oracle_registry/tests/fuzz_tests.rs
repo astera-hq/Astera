@@ -10,10 +10,15 @@
 use oracle_registry::{OracleRegistryContract, OracleRegistryContractClient};
 use proptest::prelude::*;
 use soroban_sdk::{
-    contract, contractimpl,
+    contract, contractclient, contractimpl,
     testutils::{Address as _, Ledger},
     token, Address, Env, String, Symbol, Vec,
 };
+
+#[contractclient(name = "DummyInvoiceClient")]
+pub trait DummyInvoiceTrait {
+    fn set_invoice_amount(env: Env, id: u64, amount: i128);
+}
 
 #[contract]
 pub struct DummyInvoice;
@@ -47,7 +52,29 @@ impl DummyInvoice {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    pub fn get_invoice_verification_state(_env: Env, _id: u64) -> (bool, i128) {
+    pub fn set_invoice_amount(env: Env, id: u64, amount: i128) {
+        let mut amounts: Vec<(u64, i128)> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "amounts"))
+            .unwrap_or_else(|| Vec::new(&env));
+        amounts.push_back((id, amount));
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "amounts"), &amounts);
+    }
+
+    pub fn get_invoice_verification_state(env: Env, id: u64) -> (bool, i128) {
+        let amounts: Vec<(u64, i128)> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "amounts"))
+            .unwrap_or_else(|| Vec::new(&env));
+        for (invoice_id, amount) in amounts.iter() {
+            if invoice_id == id {
+                return (true, amount);
+            }
+        }
         (true, 0)
     }
 }
@@ -177,5 +204,130 @@ proptest! {
     ) {
         let threshold = (total_stake * bps as i128 + 9_999) / 10_000;
         prop_assert!(threshold >= 1);
+    }
+
+    /// #1146: Property tests for `resolve_quorum_bps` tier-resolution logic.
+    /// Verifies that the highest tier whose threshold the invoice amount clears
+    /// is selected; falls back to default if no tiers apply.
+    #[test]
+    fn prop_resolve_quorum_bps_selects_highest_matching_tier(
+        default_bps in 1u32..=10_000u32,
+        // Generate 1-4 tiers with random thresholds and quorum values
+        tier_configs in prop::collection::vec((0i128..10_000_000i128, 1u32..=10_000u32), 0..4),
+        invoice_amount in 0i128..10_000_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let registry_id = env.register(OracleRegistryContract, ());
+        let client = OracleRegistryContractClient::new(&env, &registry_id);
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let stake_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.initialize(&admin, &stake_token, &100i128);
+
+        // Sort tier configs by threshold (ascending) to match contract's expectations
+        let mut tiers: Vec<(i128, u32)> = tier_configs;
+        tiers.sort_by_key(|t| t.0);
+
+        // Remove duplicate thresholds to keep tier list clean
+        let mut unique_tiers: Vec<oracle_registry::QuorumTier> = Vec::new(&env);
+        let mut prev_threshold = -1i128;
+        for (min_amount, bps) in tiers.iter() {
+            if *min_amount != prev_threshold {
+                unique_tiers.push_back(oracle_registry::QuorumTier {
+                    min_invoice_amount: *min_amount,
+                    quorum_bps: *bps,
+                });
+                prev_threshold = *min_amount;
+            }
+        }
+
+        if unique_tiers.len() > 0 {
+            client.set_quorum_tiers(&admin, &unique_tiers);
+        }
+
+        // Open a round and verify the resolved quorum matches our expectation
+        let invoice_id = env.register(DummyInvoice, ());
+        client.set_invoice_contract(&admin, &invoice_id);
+        let invoice_client = DummyInvoiceClient::new(&env, &invoice_id);
+
+        // Configure the dummy invoice to return our test amount
+        invoice_client.set_invoice_amount(&1u64, &invoice_amount);
+
+        // Register a single oracle with enough stake to open the round
+        let op = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &stake_token).mint(&op, &1_000_000i128);
+        client.register_oracle(&op, &1_000_000i128);
+
+        let caller = Address::generate(&env);
+        let hash = String::from_str(&env, "h");
+        client.open_verification_round(&caller, &1u64, &hash);
+
+        let round = client.get_verification_round(&1u64).unwrap();
+
+        // Compute expected quorum: highest tier whose threshold we clear, else default
+        let mut expected_bps = default_bps;
+        for i in 0..unique_tiers.len() {
+            let tier = unique_tiers.get(i as u32).unwrap();
+            if invoice_amount >= tier.min_invoice_amount {
+                expected_bps = tier.quorum_bps;
+            } else {
+                // Tiers are sorted, so if we didn't clear this one, we won't clear any higher
+                break;
+            }
+        }
+
+        prop_assert_eq!(round.quorum_bps, expected_bps);
+    }
+
+    /// Verifies that `resolve_quorum_bps` correctly handles boundary conditions:
+    /// amounts exactly at tier thresholds should select that tier.
+    #[test]
+    fn prop_resolve_quorum_bps_exact_boundary_selects_tier(
+        default_bps in 1u32..=10_000u32,
+        // Single tier to simplify boundary testing
+        min_amount in 1i128..1_000_000i128,
+        tier_bps in 1u32..=10_000u32,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let registry_id = env.register(OracleRegistryContract, ());
+        let client = OracleRegistryContractClient::new(&env, &registry_id);
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let stake_token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        client.initialize(&admin, &stake_token, &100i128);
+
+        let mut tiers: Vec<oracle_registry::QuorumTier> = Vec::new(&env);
+        tiers.push_back(oracle_registry::QuorumTier {
+            min_invoice_amount: min_amount,
+            quorum_bps: tier_bps,
+        });
+        client.set_quorum_tiers(&admin, &tiers);
+
+        let invoice_id = env.register(DummyInvoice, ());
+        client.set_invoice_contract(&admin, &invoice_id);
+        let invoice_client = DummyInvoiceClient::new(&env, &invoice_id);
+
+        let op = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &stake_token).mint(&op, &1_000_000i128);
+        client.register_oracle(&op, &1_000_000i128);
+
+        let caller = Address::generate(&env);
+        let hash = String::from_str(&env, "h");
+
+        // Test exact boundary: amount == tier threshold
+        invoice_client.set_invoice_amount(&1u64, &min_amount);
+        client.open_verification_round(&caller, &1u64, &hash);
+        let round = client.get_verification_round(&1u64).unwrap();
+        prop_assert_eq!(round.quorum_bps, tier_bps, "exact boundary should select tier");
     }
 }

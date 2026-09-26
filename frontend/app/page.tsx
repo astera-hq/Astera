@@ -5,6 +5,8 @@ import GlossaryTerm from '@/components/GlossaryTerm';
 // #783: canonical tag for the landing page — resolved against
 // metadataBase (set in the root layout) into an absolute URL.
 export const metadata: Metadata = {
+  title: 'Astera — Real World Assets on Stellar',
+  description: 'Tokenize invoices. Fund real businesses. Earn on-chain yield. Built on Stellar Soroban.',
   alternates: { canonical: '/' },
 };
 

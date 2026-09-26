@@ -19,11 +19,49 @@ function isRegistryPausedError(error: unknown): boolean {
   return message.includes(`Error(Contract, #${CONTRACT_PAUSED_CODE})`);
 }
 
+/** Simple queue for managing concurrent invoice verification jobs */
+class VerificationQueue {
+  private queue: bigint[] = [];
+  private running: number = 0;
+  private readonly maxConcurrency: number;
+
+  constructor(maxConcurrency: number = 3) {
+    this.maxConcurrency = maxConcurrency;
+  }
+
+  async enqueue(invoiceId: bigint, handler: (id: bigint) => Promise<void>): Promise<void> {
+    this.queue.push(invoiceId);
+    await this.process(handler);
+  }
+
+  private async process(handler: (id: bigint) => Promise<void>): Promise<void> {
+    if (this.running >= this.maxConcurrency || this.queue.length === 0) {
+      return;
+    }
+
+    this.running += 1;
+    const invoiceId = this.queue.shift()!;
+
+    try {
+      await handler(invoiceId);
+    } catch (error) {
+      console.error(`[VerificationQueue] Error verifying invoice ${invoiceId}:`, error);
+    } finally {
+      this.running -= 1;
+      // Process next item if there's anything in the queue
+      if (this.queue.length > 0) {
+        setImmediate(() => this.process(handler));
+      }
+    }
+  }
+}
+
 export class Verifier {
   private client: AsteraClient;
   private config: OracleConfig;
   private oracleKeypair: Keypair;
   private consensusTracker?: ConsensusTracker;
+  private verificationQueue: VerificationQueue;
   /**
    * #861: when a registry contract is configured this node participates in
    * the N-of-M stake-weighted consensus network (`submit_vote`) instead of
@@ -44,6 +82,8 @@ export class Verifier {
       poolContractId: '', // Not needed for verification
       oracleRegistryContractId: config.oracleRegistryContractId,
     });
+    // Limit to 3 concurrent verifications to avoid overwhelming the network
+    this.verificationQueue = new VerificationQueue(3);
   }
 
   private signTx = async (xdr: string): Promise<string> => {
@@ -52,7 +92,20 @@ export class Verifier {
     return tx.toXDR();
   };
 
+  /**
+   * Queue an invoice for verification with concurrency limit.
+   * Multiple calls burst-enqueued on event stream are throttled to avoid
+   * overwhelming the network with concurrent verification jobs.
+   */
   async verifyInvoice(invoiceId: bigint) {
+    await this.verificationQueue.enqueue(invoiceId, (id) => this.performVerification(id));
+  }
+
+  /**
+   * Perform the actual verification work for an invoice.
+   * Called by the verification queue with limited concurrency.
+   */
+  private async performVerification(invoiceId: bigint) {
     console.log(`[Verifier] Starting verification for invoice ${invoiceId}...`);
 
     try {

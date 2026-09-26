@@ -41,6 +41,7 @@ import type {
   Listing,
   ListingKind,
   Order,
+  OrderBookLevel,
 } from './types';
 
 type SWRCacheEntry = {
@@ -357,14 +358,13 @@ async function hydrateOrders(ids: number[]): Promise<Order[]> {
   return orders.filter((o): o is Order => o !== null);
 }
 
-/** Resting bid/ask orders for one invoice's order book, as `{ bids, asks }`. */
+/** Resting bid/ask depth levels for one invoice's order book, as `{ bids, asks }` (#1133). */
 export function useOrderBook(invoiceId: number | null, kind: ListingKind | null) {
-  return useSWR<{ bids: Order[]; asks: Order[] }, ContractError>(
+  return useSWR<{ bids: OrderBookLevel[]; asks: OrderBookLevel[] }, ContractError>(
     invoiceId !== null && kind ? ['secondary-market-order-book', invoiceId, kind] : null,
     () =>
       fetcher(async () => {
-        const { bidIds, askIds } = await getOrderBook(invoiceId!, kind!);
-        const [bids, asks] = await Promise.all([hydrateOrders(bidIds), hydrateOrders(askIds)]);
+        const { bids, asks } = await getOrderBook(invoiceId!, kind!);
         return { bids, asks };
       }),
     {

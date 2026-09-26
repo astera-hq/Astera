@@ -13,6 +13,8 @@ import {
   formatUSDC,
   fromStroops,
   truncateAddress,
+  stablecoinLabel,
+  USDC_TOKEN_ID,
 } from '@/lib/stellar';
 
 const EXPLORER_BASE = 'https://stellar.expert/explorer/testnet';
@@ -40,6 +42,7 @@ interface HistoryEvent {
   timestamp: string;
   ledger: number;
   txHash: string;
+  token?: string;
 }
 
 const KIND_LABELS: Record<EventKind, string> = {
@@ -103,6 +106,7 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
       let amount: bigint | undefined;
       let interest: bigint | undefined;
       let address: string | undefined;
+      let token: string | undefined;
       let relevant = false;
 
       if (ns === 'invoice' && contract === INVOICE_CONTRACT_ID) {
@@ -168,6 +172,7 @@ function parseEvents(rawEvents: any[], walletAddress: string): HistoryEvent[] {
         timestamp: e.ledgerClosedAt ?? '',
         ledger: Number(e.ledger ?? 0),
         txHash: e.txHash ?? '',
+        token: token ?? USDC_TOKEN_ID,
       });
     } catch {
       // skip malformed events
@@ -189,12 +194,13 @@ function formatTs(ts: string): string {
 }
 
 function exportCSV(events: HistoryEvent[]) {
+  const tokenSymbol = events.length > 0 ? stablecoinLabel(events[0].token || USDC_TOKEN_ID) : 'USD';
   const header = [
     'Date',
     'Type',
     'Invoice ID',
-    'Amount (USD)',
-    'Interest (USD)',
+    `Amount (${tokenSymbol})`,
+    `Interest (${tokenSymbol})`,
     'Address',
     'Tx Hash',
   ];
@@ -452,12 +458,12 @@ export default function HistoryPage() {
                       )}
                       {evt.amount !== undefined && (
                         <span className="text-sm text-brand-gold font-semibold">
-                          {formatUSDC(evt.amount)}
+                          {formatUSDC(evt.amount)} {stablecoinLabel(evt.token || USDC_TOKEN_ID)}
                         </span>
                       )}
                       {evt.interest !== undefined && evt.interest > 0n && (
                         <span className="text-xs text-brand-muted">
-                          +{formatUSDC(evt.interest)} interest
+                          +{formatUSDC(evt.interest)} {stablecoinLabel(evt.token || USDC_TOKEN_ID)} interest
                         </span>
                       )}
                       {evt.address && evt.kind !== 'invoice_created' && (

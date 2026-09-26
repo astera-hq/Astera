@@ -10,7 +10,7 @@ import {
   getPoolConfig,
   submitTx,
 } from '@/lib/contracts';
-import { formatUSDC } from '@/lib/stellar';
+import { formatUSDC, stablecoinLabel } from '@/lib/stellar';
 
 type Row = { token: string; deposited: bigint; value: bigint; accrued: bigint };
 
@@ -96,7 +96,7 @@ export default function LenderPortfolio() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="font-medium">
-                    {row.token.slice(0, 8)}…{row.token.slice(-4)}
+                    {stablecoinLabel(row.token)}
                   </p>
                   <p className="text-sm text-brand-muted">
                     Deposited {formatUSDC(row.deposited)} · Current value {formatUSDC(row.value)}

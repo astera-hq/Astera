@@ -4,6 +4,7 @@ use access_control::{
     AccessControlContract, AccessControlContractClient, AccessControlError, ActionPayload,
     ProposalStatus, Role,
 };
+
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     vec, Address, Env,
@@ -40,6 +41,7 @@ fn setup() -> Fixture {
         &vec![&env, s1.clone(), s2.clone(), s3.clone()],
         &2,
         &604_800,
+        &0,
     );
 
     Fixture {
@@ -57,10 +59,57 @@ fn test_initialize_can_only_be_called_once() {
     let f = setup();
     let result = f
         .client
-        .try_initialize(&vec![&f.env, f.s1.clone()], &1, &604_800);
+        .try_initialize(&vec![&f.env, f.s1.clone()], &1, &604_800, &0);
     assert_eq!(
         result.unwrap_err().unwrap(),
         AccessControlError::AlreadyInitialized.into()
+    );
+}
+
+#[test]
+fn test_list_proposals_is_bounded_and_filters_status() {
+    let f = setup();
+    for _ in 0..3 {
+        f.client.propose_action(
+            &Role::SuperAdmin,
+            &f.s1,
+            &f.contract_id,
+            &ActionPayload::SetProposalExpiry(3_600),
+        );
+    }
+
+    let page = f.client.list_proposals(&0, &2, &None);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap().id, 0);
+    assert_eq!(page.get(1).unwrap().id, 1);
+    assert_eq!(f.client.list_proposals(&2, &10, &None).len(), 1);
+    assert!(f
+        .client
+        .list_proposals(&0, &10, &Some(ProposalStatus::Approved))
+        .is_empty());
+}
+
+#[test]
+fn test_propose_action_rejects_expiry_timestamp_overflow() {
+    let f = setup();
+    f.env.ledger().with_mut(|ledger| ledger.timestamp = 100);
+    let expiry_update = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(u64::MAX),
+    );
+    f.client.approve_action(&f.s2, &expiry_update);
+    f.client.execute_action(&f.s1, &expiry_update);
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(3_600),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::InvalidExpiryWindow.into()
     );
 }
 
@@ -72,7 +121,7 @@ fn test_initialize_rejects_threshold_above_signer_count() {
     let client = AccessControlContractClient::new(&env, &contract_id);
     let s1 = Address::generate(&env);
 
-    let result = client.try_initialize(&vec![&env, s1], &2, &604_800);
+    let result = client.try_initialize(&vec![&env, s1], &2, &604_800, &0);
     assert_eq!(
         result.unwrap_err().unwrap(),
         AccessControlError::InvalidThreshold.into()
@@ -87,7 +136,7 @@ fn test_initialize_rejects_duplicate_signers() {
     let client = AccessControlContractClient::new(&env, &contract_id);
     let s1 = Address::generate(&env);
 
-    let result = client.try_initialize(&vec![&env, s1.clone(), s1], &1, &604_800);
+    let result = client.try_initialize(&vec![&env, s1.clone(), s1], &1, &604_800, &0);
     assert_eq!(
         result.unwrap_err().unwrap(),
         AccessControlError::DuplicateSigner.into()
@@ -101,12 +150,13 @@ fn test_super_admin_can_configure_a_new_role_via_its_own_multisig() {
     let f = setup();
     let risk1 = Address::generate(&f.env);
     let risk2 = Address::generate(&f.env);
+    let external = Address::generate(&f.env);
 
     // Nothing can be proposed under RiskManager yet — it isn't configured.
     let unconfigured = f.client.try_propose_action(
         &Role::RiskManager,
         &risk1,
-        &f.contract_id,
+        &external,
         &ActionPayload::SetYield(500),
     );
     assert_eq!(
@@ -152,7 +202,7 @@ fn test_super_admin_can_configure_a_new_role_via_its_own_multisig() {
     let proposal = f.client.propose_action(
         &Role::RiskManager,
         &risk1,
-        &f.contract_id,
+        &external,
         &ActionPayload::SetYield(500),
     );
     assert_eq!(
@@ -234,7 +284,7 @@ fn test_remove_signer_rejects_dropping_below_threshold() {
     let result = f.client.try_execute_action(&f.s1, &remove_s2);
     assert_eq!(
         result.unwrap_err().unwrap(),
-        AccessControlError::InvalidThreshold.into()
+        AccessControlError::ThresholdMustBeLoweredBeforeSignerRemoval.into()
     );
 }
 
@@ -356,6 +406,71 @@ fn test_reject_action_blocks_further_approval_and_execution() {
 }
 
 #[test]
+fn test_approved_proposal_can_be_rejected_before_execution() {
+    let f = setup();
+    let target = Address::generate(&f.env);
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::OracleManager, target),
+    );
+    let _ = f.client.approve_action(&f.s2, &proposal_id);
+    assert_eq!(
+        f.client.get_proposal(&proposal_id).unwrap().status,
+        ProposalStatus::Approved
+    );
+
+    let _ = f.client.reject_action(&f.s3, &proposal_id);
+    assert_eq!(
+        f.client.get_proposal(&proposal_id).unwrap().status,
+        ProposalStatus::Rejected
+    );
+    assert_eq!(
+        f.client
+            .try_execute_action(&f.s1, &proposal_id)
+            .unwrap_err()
+            .unwrap(),
+        AccessControlError::ProposalNotApproved.into()
+    );
+}
+
+#[test]
+fn test_compliance_officer_cannot_propose_treasury_action() {
+    let f = setup();
+    let compliance = Address::generate(&f.env);
+    let add = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::ComplianceOfficer, compliance.clone()),
+    );
+    let _ = f.client.approve_action(&f.s2, &add);
+    let _ = f.client.execute_action(&f.s1, &add);
+    let set_threshold = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetThreshold(Role::ComplianceOfficer, 1),
+    );
+    let _ = f.client.approve_action(&f.s2, &set_threshold);
+    let _ = f.client.execute_action(&f.s1, &set_threshold);
+
+    let external = Address::generate(&f.env);
+    let token = Address::generate(&f.env);
+    let result = f.client.try_propose_action(
+        &Role::ComplianceOfficer,
+        &compliance,
+        &external,
+        &ActionPayload::WithdrawRevenue(token, 100),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::RoleNotAuthorized
+    );
+}
+
+#[test]
 fn test_revoke_approval_removes_own_approval_only() {
     let f = setup();
     let target = Address::generate(&f.env);
@@ -438,5 +553,262 @@ fn test_expired_approved_proposal_cannot_execute() {
     assert_eq!(
         result.unwrap_err().unwrap(),
         AccessControlError::ProposalExpired.into()
+    );
+}
+
+// ── #1135: payload/target coherence validation ────────────────────────────
+
+/// A self-management payload (AddSigner) proposed against an external address
+/// must be rejected immediately — executing it against `this_contract != target`
+/// would route to `execute_cross_contract` whose self-management catch-all arm
+/// silently does nothing, leaving the proposal with `Executed` status but zero
+/// real effect.
+#[test]
+fn test_self_management_payload_with_external_target_is_rejected() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+    let victim = Address::generate(&f.env);
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external, // wrong: self-management must target this_contract
+        &ActionPayload::AddSigner(Role::TreasuryManager, victim),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// A RemoveSigner payload proposed against an external address must likewise
+/// be rejected — same silent-no-op risk as AddSigner above.
+#[test]
+fn test_remove_signer_payload_with_external_target_is_rejected() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external,
+        &ActionPayload::RemoveSigner(Role::SuperAdmin, f.s2.clone()),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// A SetThreshold payload proposed against an external address must be
+/// rejected — same silent-no-op risk.
+#[test]
+fn test_set_threshold_payload_with_external_target_is_rejected() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external,
+        &ActionPayload::SetThreshold(Role::SuperAdmin, 1),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// A cross-contract payload (SetYield) proposed with `target == this_contract`
+/// must be rejected — executing it would route to `execute_self_management`
+/// whose `_ => Ok(())` catch-all silently does nothing, leaving the proposal
+/// with `Executed` status but zero real effect on the intended external target.
+#[test]
+fn test_cross_contract_payload_with_self_as_target_is_rejected() {
+    let f = setup();
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id, // wrong: cross-contract payload must NOT target this_contract
+        &ActionPayload::SetYield(500),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// Another cross-contract payload (SetPaused) with this_contract as target —
+/// verifies the check applies regardless of which pool action is used.
+#[test]
+fn test_set_paused_payload_with_self_as_target_is_rejected() {
+    let f = setup();
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetPaused(true),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
+    );
+}
+
+/// Coherent self-management proposals (target == this_contract) must still work
+/// correctly — regression guard to confirm the validation only blocks bad cases.
+#[test]
+fn test_coherent_self_management_proposal_is_accepted() {
+    let f = setup();
+    let new_signer = Address::generate(&f.env);
+
+    // This is the correct pairing: AddSigner payload + this_contract as target.
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::OracleManager, new_signer.clone()),
+    );
+    assert_eq!(
+        f.client.get_proposal(&proposal_id).unwrap().status,
+        ProposalStatus::Pending
+    );
+}
+
+/// Coherent cross-contract proposals (target != this_contract) must still work
+/// correctly — regression guard to confirm the validation only blocks bad cases.
+#[test]
+fn test_coherent_cross_contract_proposal_is_accepted() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+
+    // This is the correct pairing: SetYield payload + an external target.
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external,
+        &ActionPayload::SetYield(800),
+    );
+    assert_eq!(
+        f.client.get_proposal(&proposal_id).unwrap().status,
+        ProposalStatus::Pending
+    );
+}
+
+// ── #1136: update proposal_expiry_secs after initialize ───────────────────
+
+/// SuperAdmin can update the expiry window via the multisig lifecycle, and
+/// newly created proposals use the new window immediately.
+#[test]
+fn test_super_admin_can_update_proposal_expiry_secs() {
+    let f = setup();
+    assert_eq!(f.client.get_proposal_expiry_secs(), 604_800);
+
+    // Propose + approve + execute a new 7-day window of 3600s (1 hour).
+    let new_expiry: u64 = 3_600;
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(new_expiry),
+    );
+    let _ = f.client.approve_action(&f.s2, &proposal_id);
+    let _ = f.client.execute_action(&f.s1, &proposal_id);
+
+    // Accessor reflects the new value.
+    assert_eq!(f.client.get_proposal_expiry_secs(), new_expiry);
+
+    // A proposal created after the change uses the new window.
+    let target = Address::generate(&f.env);
+    let pid2 = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::OracleManager, target.clone()),
+    );
+    let proposal = f.client.get_proposal(&pid2).unwrap();
+    // expires_at should be approximately created_at + 3600, not + 604800.
+    assert_eq!(proposal.expires_at, proposal.created_at + new_expiry);
+}
+
+/// SetProposalExpiry(0) must be rejected at execution time — zero is not a
+/// valid expiry window (mirrors the check in `initialize`).
+#[test]
+fn test_set_proposal_expiry_rejects_zero() {
+    let f = setup();
+
+    let proposal_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(0),
+    );
+    let _ = f.client.approve_action(&f.s2, &proposal_id);
+
+    let result = f.client.try_execute_action(&f.s1, &proposal_id);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::InvalidExpiryWindow.into()
+    );
+    // Value must be unchanged after a failed execution.
+    assert_eq!(f.client.get_proposal_expiry_secs(), 604_800);
+}
+
+/// SetProposalExpiry proposed under a non-SuperAdmin role must be rejected —
+/// same SuperAdmin-only gate that protects AddSigner / SetThreshold.
+#[test]
+fn test_set_proposal_expiry_requires_super_admin() {
+    let f = setup();
+
+    // Bootstrap a RiskManager with threshold 1 so it can propose.
+    let risk1 = Address::generate(&f.env);
+    let add = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::AddSigner(Role::RiskManager, risk1.clone()),
+    );
+    let _ = f.client.approve_action(&f.s2, &add);
+    let _ = f.client.execute_action(&f.s1, &add);
+    let set_t = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetThreshold(Role::RiskManager, 1),
+    );
+    let _ = f.client.approve_action(&f.s2, &set_t);
+    let _ = f.client.execute_action(&f.s1, &set_t);
+
+    // RiskManager must not be able to change the expiry window.
+    let result = f.client.try_propose_action(
+        &Role::RiskManager,
+        &risk1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(1_800),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::SelfManagementRequiresSuperAdmin
+    );
+}
+
+/// SetProposalExpiry proposed with an external target must be rejected —
+/// same coherence check that protects AddSigner / SetThreshold.
+#[test]
+fn test_set_proposal_expiry_with_external_target_is_rejected() {
+    let f = setup();
+    let external = Address::generate(&f.env);
+
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &external, // wrong: must target this_contract
+        &ActionPayload::SetProposalExpiry(3_600),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::IncoherentProposal
     );
 }

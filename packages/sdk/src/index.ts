@@ -10,6 +10,8 @@ export type { TrancheInvestorPosition } from './clients/tranche';
 export { AccessControlClient } from './clients/access_control';
 export { AuctionClient } from './clients/auction';
 export { InsuranceClient } from './clients/insurance';
+export { GovernanceClient } from './clients/governance';
+export { ReferralClient } from './clients/referral';
 export { AsteraClient } from './astera-client';
 export * from './types';
 export * from './stellar';
@@ -18,7 +20,7 @@ export { Errors as InvoiceErrors } from './generated/invoice';
 export { Errors as PoolErrors } from './generated/pool';
 export { Errors as SecondaryMarketErrors } from './generated/secondary_market';
 export { Errors as CreditScoreErrors } from './generated/credit_score';
-export { GovernanceError } from './generated/governance';
+export { GovernanceError, ProposalStatus, ProposalCategory, GovernanceAction, Proposal, GovernanceConfig } from './generated/governance';
 export { Errors as OracleRegistryErrors } from './generated/oracle_registry';
 export { Errors as ComplianceErrors } from './generated/compliance';
 export { Errors as ArbitrationErrors } from './generated/arbitration';
@@ -40,6 +42,8 @@ export type {
   ClaimHistoryItem,
   ReserveHealth,
 } from './generated/insurance';
+export { Errors as ReferralErrors } from './generated/referral';
+export type { ReferralStats, LeaderboardEntry } from './generated/referral';
 export {
   parseContractEvent,
   ContractEvent,
