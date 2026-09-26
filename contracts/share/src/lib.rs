@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, Env, String, Symbol, Vec,
 };
 
 const EVT: Symbol = symbol_short!("share");
@@ -46,6 +46,27 @@ pub enum DataKey {
     /// Ring buffer head index for the checkpoint vec — points to the oldest
     /// entry when the buffer is full, otherwise 0.
     CheckpointsHead(Address),
+}
+
+/// Typed failure reasons for every guard in this contract. Raised via
+/// `panic_with_error!` so the SDK and frontend can branch on a stable numeric
+/// code instead of parsing an opaque host failure string.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ShareError {
+    ContractPaused = 1,
+    AlreadyInitialized = 2,
+    NotInitialized = 3,
+    Unauthorized = 4,
+    InvalidDecimals = 5,
+    InvalidAmount = 6,
+    InsufficientBalance = 7,
+    AllowanceExceeded = 8,
+    AllowanceOverflow = 9,
+    AllowanceUnderflow = 10,
+    TotalSupplyOverflow = 11,
+    TotalSupplyUnderflow = 12,
 }
 
 /// Records a checkpoint of `who`'s new balance at the current ledger timestamp.
@@ -95,7 +116,7 @@ fn require_not_paused(env: &Env) {
         .get(&DataKey::Paused)
         .unwrap_or(false)
     {
-        panic!("contract is paused");
+        panic_with_error!(env, ShareError::ContractPaused);
     }
 }
 
@@ -107,10 +128,10 @@ impl ShareToken {
     pub fn initialize(env: Env, admin: Address, decimals: u32, name: String, symbol: String) {
         admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialized");
+            panic_with_error!(&env, ShareError::AlreadyInitialized);
         }
         if decimals > MAX_DECIMALS {
-            panic!("decimals must not exceed 18");
+            panic_with_error!(&env, ShareError::InvalidDecimals);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -129,10 +150,10 @@ impl ShareToken {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|_| {
-                panic!("contract not initialized");
+                panic_with_error!(&env, ShareError::NotInitialized);
             });
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, ShareError::Unauthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish((EVT, symbol_short!("paused")), admin);
@@ -145,10 +166,10 @@ impl ShareToken {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|_| {
-                panic!("contract not initialized");
+                panic_with_error!(&env, ShareError::NotInitialized);
             });
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, ShareError::Unauthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish((EVT, symbol_short!("unpause")), admin);
@@ -163,7 +184,7 @@ impl ShareToken {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|_| {
-                panic!("contract not initialized");
+                panic_with_error!(&env, ShareError::NotInitialized);
             })
     }
 
@@ -174,7 +195,7 @@ impl ShareToken {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|_| {
-                panic!("contract not initialized");
+                panic_with_error!(&env, ShareError::NotInitialized);
             });
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
@@ -189,11 +210,11 @@ impl ShareToken {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|_| {
-                panic!("contract not initialized");
+                panic_with_error!(&env, ShareError::NotInitialized);
             });
         admin.require_auth();
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let balance = Self::balance(env.clone(), to.clone());
         let new_balance = balance + amount;
@@ -207,7 +228,7 @@ impl ShareToken {
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         let new_total = total
             .checked_add(amount)
-            .expect("total supply overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, ShareError::TotalSupplyOverflow));
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &new_total);
@@ -219,11 +240,11 @@ impl ShareToken {
         require_not_paused(&env);
         from.require_auth();
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let balance = Self::balance(env.clone(), from.clone());
         if balance < amount {
-            panic!("insufficient balance");
+            panic_with_error!(&env, ShareError::InsufficientBalance);
         }
         let new_balance = balance - amount;
         let balance_key = DataKey::Balance(from.clone());
@@ -236,7 +257,7 @@ impl ShareToken {
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         let new_total = total
             .checked_sub(amount)
-            .expect("total supply underflow");
+            .unwrap_or_else(|| panic_with_error!(&env, ShareError::TotalSupplyUnderflow));
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &new_total);
@@ -248,7 +269,7 @@ impl ShareToken {
         require_not_paused(&env);
         spender.require_auth();
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let record = env.storage()
             .persistent()
@@ -263,11 +284,11 @@ impl ShareToken {
             record.amount
         };
         if allowed < amount {
-            panic!("allowance exceeded");
+            panic_with_error!(&env, ShareError::AllowanceExceeded);
         }
         let balance = Self::balance(env.clone(), from.clone());
         if balance < amount {
-            panic!("insufficient balance");
+            panic_with_error!(&env, ShareError::InsufficientBalance);
         }
         let new_balance = balance - amount;
         let balance_key = DataKey::Balance(from.clone());
@@ -280,7 +301,7 @@ impl ShareToken {
         let total: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         let new_total = total
             .checked_sub(amount)
-            .expect("total supply underflow");
+            .unwrap_or_else(|| panic_with_error!(&env, ShareError::TotalSupplyUnderflow));
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &new_total);
@@ -298,11 +319,11 @@ impl ShareToken {
         require_not_paused(&env);
         from.require_auth();
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let balance_from = Self::balance(env.clone(), from.clone());
         if balance_from < amount {
-            panic!("insufficient balance");
+            panic_with_error!(&env, ShareError::InsufficientBalance);
         }
         let new_balance_from = balance_from - amount;
         let balance_from_key = DataKey::Balance(from.clone());
@@ -334,7 +355,7 @@ impl ShareToken {
         require_not_paused(&env);
         owner.require_auth();
         if amount < 0 {
-            panic!("amount must be non-negative");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
         let record = AllowanceRecord {
@@ -375,7 +396,7 @@ impl ShareToken {
         require_not_paused(&env);
         owner.require_auth();
         if added_amount <= 0 {
-            panic!("added amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let record = env.storage()
             .persistent()
@@ -386,7 +407,7 @@ impl ShareToken {
             });
         let new_amount = record.amount
             .checked_add(added_amount)
-            .expect("allowance overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, ShareError::AllowanceOverflow));
         let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
         let new_record = AllowanceRecord {
             amount: new_amount,
@@ -407,7 +428,7 @@ impl ShareToken {
         require_not_paused(&env);
         owner.require_auth();
         if subtracted_amount <= 0 {
-            panic!("subtracted amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let record = env.storage()
             .persistent()
@@ -417,7 +438,7 @@ impl ShareToken {
                 expiration_ledger: u32::MAX,
             });
         if record.amount < subtracted_amount {
-            panic!("allowance underflow");
+            panic_with_error!(&env, ShareError::AllowanceUnderflow);
         }
         let new_amount = record.amount - subtracted_amount;
         let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
@@ -440,7 +461,7 @@ impl ShareToken {
         require_not_paused(&env);
         spender.require_auth();
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let record = env.storage()
             .persistent()
@@ -455,11 +476,11 @@ impl ShareToken {
             record.amount
         };
         if allowed < amount {
-            panic!("allowance exceeded");
+            panic_with_error!(&env, ShareError::AllowanceExceeded);
         }
         let balance_from = Self::balance(env.clone(), from.clone());
         if balance_from < amount {
-            panic!("insufficient balance");
+            panic_with_error!(&env, ShareError::InsufficientBalance);
         }
 
         let new_balance_from = balance_from - amount;
@@ -608,11 +629,11 @@ impl token::TokenInterface for ShareToken {
         require_not_paused(&env);
         from.require_auth();
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let balance = ShareToken::balance(env.clone(), from.clone());
         if balance < amount {
-            panic!("insufficient balance");
+            panic_with_error!(&env, ShareError::InsufficientBalance);
         }
         let new_balance = balance - amount;
         env.storage()
@@ -632,7 +653,7 @@ impl token::TokenInterface for ShareToken {
     fn transfer_from_host(env: Env, to: Address, amount: i128) {
         require_not_paused(&env);
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(&env, ShareError::InvalidAmount);
         }
         let balance = ShareToken::balance(env.clone(), to.clone());
         let new_balance = balance + amount;
