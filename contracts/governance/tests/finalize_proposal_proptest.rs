@@ -121,9 +121,7 @@ fn run_proposal(
         .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
 
     let _ = gov.try_execute_proposal(&id);
-    // Belt-and-suspenders: commits lazy finalization even on paths where
-    // execute_proposal's own early-return might not have persisted it.
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
 
     (gov.get_proposal(&id).unwrap().status, snapshot_supply)
 }

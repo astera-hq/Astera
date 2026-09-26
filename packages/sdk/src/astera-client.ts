@@ -7,6 +7,7 @@ import { OracleRegistryClient } from './clients/oracle_registry';
 import { ComplianceClient } from './clients/compliance';
 import { TrancheClient, type TrancheInvestorPosition } from './clients/tranche';
 import { AccessControlClient } from './clients/access_control';
+import { InsuranceClient } from './clients/insurance';
 import type {
   TranchePool,
   TrancheConfig,
@@ -15,6 +16,13 @@ import type {
   WaterfallSimulation,
   TrancheClass,
 } from './generated/tranche';
+import type {
+  PremiumConfig,
+  ReserveFund,
+  CoverageRecord,
+  ClaimHistoryItem,
+  ReserveHealth,
+} from './generated/insurance';
 import type {
   AsteraConfig,
   Invoice,
@@ -59,6 +67,7 @@ export class AsteraClient {
   private complianceClient: ComplianceClient;
   private trancheClient: TrancheClient;
   private accessControlClient: AccessControlClient;
+  private insuranceClient: InsuranceClient;
 
   constructor(config: AsteraConfig) {
     this.invoiceClient = new InvoiceClient({
@@ -105,6 +114,11 @@ export class AsteraClient {
       rpcUrl: config.rpcUrl,
       network: config.network,
       contractId: config.accessControlContractId ?? '',
+    });
+    this.insuranceClient = new InsuranceClient({
+      rpcUrl: config.rpcUrl,
+      network: config.network,
+      contractId: config.insuranceContractId ?? '',
     });
   }
 
@@ -542,8 +556,8 @@ export class AsteraClient {
     ): Promise<TrancheInvestorPosition> =>
       this.trancheClient.getInvestorPosition(investor, token, trancheClass),
 
-    getEffectiveApy: (token: string, trancheClass: TrancheClass): Promise<number> =>
-      this.trancheClient.getEffectiveApy(token, trancheClass),
+    getLifetimeReturnBps: (token: string, trancheClass: TrancheClass): Promise<number> =>
+      this.trancheClient.getLifetimeReturnBps(token, trancheClass),
 
     getInvoiceExposure: (invoiceId: number): Promise<InvoiceTrancheExposure | null> =>
       this.trancheClient.getInvoiceExposure(invoiceId),
@@ -643,5 +657,97 @@ export class AsteraClient {
       onProgress?: (progress: TransactionProgress) => void;
     }): Promise<string> =>
       this.accessControlClient.executeAction(params),
+  };
+
+  /** #1055: default-insurance reserve — coverage purchase, claims, reserve health. */
+  public readonly insurance = {
+    estimatePremium: (
+      principal: bigint,
+      sme: string,
+      tenorDays: number,
+      token: string,
+    ): Promise<bigint> =>
+      this.insuranceClient.estimatePremium(principal, sme, tenorDays, token),
+
+    purchaseCoverage: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      payer: string;
+      invoiceId: bigint | number;
+      principal: bigint;
+      sme: string;
+      dueDate: number;
+      token: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.insuranceClient.purchaseCoverage(params),
+
+    fileClaim: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      caller: string;
+      invoiceId: bigint | number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.insuranceClient.fileClaim(params),
+
+    getReserveStatus: (token: string): Promise<ReserveFund> =>
+      this.insuranceClient.getReserveStatus(token),
+
+    getCoverageRecord: (invoiceId: bigint | number): Promise<CoverageRecord | null> =>
+      this.insuranceClient.getCoverageRecord(invoiceId),
+
+    getClaimHistory: (invoiceId: bigint | number): Promise<ClaimHistoryItem[]> =>
+      this.insuranceClient.getClaimHistory(invoiceId),
+
+    checkReserveHealth: (token: string): Promise<ReserveHealth> =>
+      this.insuranceClient.checkReserveHealth(token),
+
+    getPremiumConfig: (): Promise<PremiumConfig | null> =>
+      this.insuranceClient.getPremiumConfig(),
+
+    getMinReserveAmount: (token: string): Promise<bigint> =>
+      this.insuranceClient.getMinReserveAmount(token),
+
+    setPremiumConfig: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      config: PremiumConfig;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.insuranceClient.setPremiumConfig(params),
+
+    setMinCoverageRatio: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      token: string;
+      minRatioBps: number;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.insuranceClient.setMinCoverageRatio(params),
+
+    setMinReserveAmount: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      token: string;
+      minAmount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.insuranceClient.setMinReserveAmount(params),
+
+    fundReserveFromTreasury: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      token: string;
+      amount: bigint;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.insuranceClient.fundReserveFromTreasury(params),
+
+    setCreditScoreContract: (params: {
+      signer: (txXdr: string) => Promise<string>;
+      admin: string;
+      creditScoreContract: string;
+      onProgress?: (progress: TransactionProgress) => void;
+    }): Promise<string> =>
+      this.insuranceClient.setCreditScoreContract(params),
   };
 }

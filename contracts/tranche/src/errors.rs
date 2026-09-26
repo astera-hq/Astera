@@ -10,10 +10,8 @@ pub enum TrancheError {
     InvalidAmount = 4,
     InsufficientBalance = 5,
     AdvanceRateExceeded = 6,
-    InvalidTranche = 7,
-    ArithmeticOverflow = 8,
-    WaterfallError = 9,
-    LossAllocationError = 10,
     ReentrancyDetected = 11,
     NotInitialized = 12,
+    ExposureNotFound = 13,
+    ContractPaused = 14,
 }

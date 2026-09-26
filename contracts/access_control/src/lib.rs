@@ -46,6 +46,7 @@ const DEFAULT_PROPOSAL_EXECUTION_TIMELOCK_SECS: u64 = 172_800;
 
 /// Maximum number of signers per role to prevent unbounded iteration.
 const MAX_SIGNERS_PER_ROLE: u32 = 32;
+const MAX_PROPOSAL_PAGE_SIZE: u32 = 100;
 
 // ─── Roles ──────────────────────────────────────────────────────────────────
 
@@ -76,6 +77,14 @@ pub struct MultiSigConfig {
 }
 
 // ─── Action payloads ────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProposalCategory {
+    ParameterChange,
+    Treasury,
+    Critical,
+}
 
 /// Every privileged action this system can gate. Each variant mirrors one
 /// real entrypoint on `pool`, `invoice`, or `credit_score` (see each
@@ -134,11 +143,8 @@ pub enum ActionPayload {
     // ── governance ──
     /// (quorum_bps, pass_bps)
     UpdateGovernanceConfig(u32, u32),
-    /// (category discriminant, quorum_bps) — decoded by governance's own
-    /// `ProposalCategory` mapping (0=ParameterChange, 1=Treasury, 2=Critical),
-    /// the same "decode by discriminant" convention `RegisterAttestor` above
-    /// uses for credit_score's `AttestorType`.
-    SetCategoryQuorum(u32, u32),
+    /// (typed category, quorum_bps)
+    SetCategoryQuorum(ProposalCategory, u32),
     // ── referral ──
     SetReferralPaused(bool),
     SetReferralPool(Address),
@@ -227,6 +233,7 @@ pub enum DataKey {
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum AccessControlError {
     AlreadyInitialized = 0,
     NotInitialized = 1,
@@ -380,7 +387,7 @@ pub trait GovernanceContractTrait {
     fn set_category_quorum_via_ac(
         env: Env,
         access_control: Address,
-        category: u32,
+        category: ProposalCategory,
         quorum_bps: u32,
     );
     fn set_access_control_via_ac(env: Env, access_control: Address, new_access_control: Address);
@@ -421,6 +428,12 @@ impl AccessControlContract {
         Self::validate_config(&super_admin_signers, super_admin_threshold)?;
         if proposal_expiry_secs == 0 {
             return Err(AccessControlError::InvalidExpiryWindow);
+        }
+        // #1339: require explicit authorization from every initial SuperAdmin
+        // signer. Without this, anyone observing a deployed-but-uninitialized
+        // contract could front-run initialize and install their own signer set.
+        for i in 0..super_admin_signers.len() {
+            super_admin_signers.get(i).unwrap().require_auth();
         }
 
         env.storage().instance().set(&DataKey::Initialized, &true);
@@ -469,13 +482,46 @@ impl AccessControlContract {
 
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
     }
 
+    /// Read a bounded range of proposals. `start` is inclusive; an optional
+    /// status filter narrows the returned rows without changing stored state.
+    pub fn list_proposals(
+        env: Env,
+        start: u64,
+        limit: u32,
+        status_filter: Option<ProposalStatus>,
+    ) -> Vec<Proposal> {
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(0);
+        let end = start
+            .saturating_add(limit.min(MAX_PROPOSAL_PAGE_SIZE) as u64)
+            .min(next_id);
+        let mut proposals = Vec::new(&env);
+        for id in start..end {
+            if let Some(proposal) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Proposal>(&DataKey::Proposal(id))
+            {
+                if status_filter
+                    .as_ref()
+                    .map_or(true, |status| &proposal.status == status)
+                {
+                    proposals.push_back(proposal);
+                }
+            }
+        }
+        proposals
+    }
+
     /// One past `proposal_id`, i.e. proposals exist for `0..get_next_proposal_id()`.
-    /// Lets a frontend page through the full proposal history/queue without
-    /// this contract needing its own paginated listing entrypoint.
+    /// Useful as an upper bound when paging through the proposal queue.
     pub fn get_next_proposal_id(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -557,12 +603,14 @@ impl AccessControlContract {
             proposer: proposer.clone(),
             approvals,
             created_at: now,
-            expires_at: now + expiry_secs,
+            expires_at: now
+                .checked_add(expiry_secs)
+                .ok_or(AccessControlError::InvalidExpiryWindow)?,
             earliest_execution_time: 0,
             status,
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
         env.storage()
             .instance()
@@ -584,7 +632,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
@@ -619,7 +667,7 @@ impl AccessControlContract {
             proposal.earliest_execution_time = env.ledger().timestamp() + timelock_secs;
         }
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -636,7 +684,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
         // Allowed on Pending or Approved (but not-yet-executed) proposals —
@@ -668,7 +716,7 @@ impl AccessControlContract {
         };
 
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -686,7 +734,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
         if proposal.status != ProposalStatus::Pending && proposal.status != ProposalStatus::Approved
@@ -704,7 +752,7 @@ impl AccessControlContract {
 
         proposal.status = ProposalStatus::Rejected;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events()
@@ -726,7 +774,7 @@ impl AccessControlContract {
 
         let mut proposal: Proposal = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
@@ -747,7 +795,7 @@ impl AccessControlContract {
         // effect actually having happened, or vice versa.
         proposal.status = ProposalStatus::Executed;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
         let this_contract = env.current_contract_address();

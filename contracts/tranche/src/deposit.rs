@@ -3,6 +3,7 @@ use soroban_sdk::{panic_with_error, token, Address, Env, IntoVal, Symbol, Vec};
 use crate::{
     errors::TrancheError,
     events::{DEPOSIT, EVT},
+    math::calculate_shares_to_mint,
     state::{DataKey, InvestorPosition, TrancheAccounting, TrancheClass, TranchePool},
 };
 
@@ -44,12 +45,22 @@ pub fn deposit(env: &Env, investor: Address, token: Address, tranche: TrancheCla
     }
 
     position.deposited += amount;
-    position.shares += amount;
 
-    let share_token = match tranche {
-        TrancheClass::Senior => pool.senior_share_token.clone(),
-        TrancheClass::Junior => pool.junior_share_token.clone(),
+    let (tranche_accounting, share_token) = match tranche {
+        TrancheClass::Senior => (&pool.senior, pool.senior_share_token.clone()),
+        TrancheClass::Junior => (&pool.junior, pool.junior_share_token.clone()),
     };
+
+    let pool_value = tranche_accounting.deposited
+        + tranche_accounting.earned
+        - tranche_accounting.losses;
+    let shares_to_mint = calculate_shares_to_mint(amount, pool_value, tranche_accounting.total_shares);
+    position.shares += shares_to_mint;
+
+    match tranche {
+        TrancheClass::Senior => pool.senior.total_shares += shares_to_mint,
+        TrancheClass::Junior => pool.junior.total_shares += shares_to_mint,
+    }
 
     env.storage().instance().set(&key, &position);
     env.storage()
@@ -58,7 +69,7 @@ pub fn deposit(env: &Env, investor: Address, token: Address, tranche: TrancheCla
 
     let mut mint_args = Vec::new(env);
     mint_args.push_back(investor.clone().into_val(env));
-    mint_args.push_back(amount.into_val(env));
+    mint_args.push_back(shares_to_mint.into_val(env));
     let _: () = env.invoke_contract(&share_token, &Symbol::new(env, "mint"), mint_args);
 
     env.events()

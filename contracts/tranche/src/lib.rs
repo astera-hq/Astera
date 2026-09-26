@@ -64,6 +64,17 @@ impl TrancheContract {
         admin.require_auth();
     }
 
+    fn require_not_paused(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            panic_with_error!(env, TrancheError::ContractPaused);
+        }
+    }
+
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -130,6 +141,7 @@ impl TrancheContract {
         amount: i128,
     ) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::non_reentrant_start(&env);
         deposit::deposit(&env, investor, token, tranche, amount);
         Self::non_reentrant_end(&env);
@@ -143,6 +155,7 @@ impl TrancheContract {
         amount: i128,
     ) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::non_reentrant_start(&env);
         withdraw::withdraw(&env, investor, token, tranche, amount);
         Self::non_reentrant_end(&env);
@@ -174,7 +187,24 @@ impl TrancheContract {
 
         // Largest `amount` such that:
         //   senior + amount <= rate_bps * (junior + senior + amount) / 10_000
-        let numerator = rate_bps * junior - (10_000 - rate_bps) * senior;
+        //
+        // Use checked arithmetic so that a very large deposit base does not
+        // cause an overflow panic (overflow-checks = true in the test/debug
+        // profile).  If either multiplication overflows the capacity available
+        // is effectively unlimited, so we return i128::MAX consistent with the
+        // rate_bps >= 10_000 fast-path above.
+        let junior_term = match rate_bps.checked_mul(junior) {
+            Some(v) => v,
+            None => return i128::MAX,
+        };
+        let senior_term = match (10_000 - rate_bps).checked_mul(senior) {
+            Some(v) => v,
+            None => return i128::MAX,
+        };
+        let numerator = match junior_term.checked_sub(senior_term) {
+            Some(v) => v,
+            None => return 0,
+        };
         if numerator <= 0 {
             return 0;
         }
@@ -257,7 +287,7 @@ impl TrancheContract {
         if env
             .storage()
             .instance()
-            .has(&DataKey::TrancheEnabled(token.clone()))
+            .has(&DataKey::Pool(token.clone()))
         {
             panic_with_error!(&env, TrancheError::AlreadyInitialized);
         }
@@ -304,6 +334,7 @@ impl TrancheContract {
         total_amount: i128,
     ) -> (i128, i128) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         let result = funding::fund_invoice_from_tranches(&env, token, invoice_id, total_amount);
@@ -326,6 +357,7 @@ impl TrancheContract {
         elapsed_secs: u64,
     ) -> (i128, i128) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         let result = repayment::distribute_waterfall_repayment(
@@ -341,6 +373,7 @@ impl TrancheContract {
 
     pub fn allocate_loss(env: Env, token: Address, invoice_id: u64, shortfall: i128) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin_auth(&env);
         Self::non_reentrant_start(&env);
         repayment::allocate_loss(&env, token, invoice_id, shortfall);
@@ -359,7 +392,7 @@ impl TrancheContract {
             .storage()
             .instance()
             .get(&DataKey::InvoiceExposure(invoice_id))
-            .unwrap_or_else(|| panic_with_error!(&env, TrancheError::PoolNotFound));
+            .unwrap_or_else(|| panic_with_error!(&env, TrancheError::ExposureNotFound));
 
         math::calculate_waterfall_split(
             &env,
@@ -370,7 +403,12 @@ impl TrancheContract {
         )
     }
 
-    pub fn get_effective_apy(env: Env, token: Address, tranche: TrancheClass) -> u32 {
+    /// Lifetime return in basis points: (earned - losses) * 10_000 / deposited.
+    /// Not annualized — has no time component, so it is not an APY. A pool
+    /// that returned 5% over one week and one that returned 5% over three
+    /// years both report 500 here. Callers wanting an annual rate must
+    /// weight this by elapsed time themselves.
+    pub fn get_lifetime_return_bps(env: Env, token: Address, tranche: TrancheClass) -> u32 {
         let pool = Self::get_pool(env.clone(), token);
         let accounting = match tranche {
             TrancheClass::Senior => pool.senior,
@@ -381,15 +419,51 @@ impl TrancheContract {
             return 0;
         }
 
-        // Calculate realized APY based on earned vs deposited
-        // This is a simplified calculation - in production would use time-weighted returns
         let total_return = accounting.earned - accounting.losses;
         if total_return <= 0 {
             return 0;
         }
 
-        // Convert to basis points (annualized)
+        // Convert to basis points (lifetime, not annualized — see get_lifetime_return_bps).
         let return_bps = (total_return * 10_000) / accounting.deposited;
-        return_bps as u32
+        return_bps.min(u32::MAX as i128) as u32
+    }
+
+    pub fn pause(env: Env, admin: Address) -> Result<(), TrancheError> {
+        Self::bump_instance(&env);
+        admin.require_auth();
+
+        let stored_admin = Self::get_admin(env.clone())?;
+        if admin != stored_admin {
+            panic_with_error!(&env, TrancheError::Unauthorized);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((EVT, PAUSED), (admin, env.ledger().timestamp()));
+        Ok(())
+    }
+
+    pub fn unpause(env: Env, admin: Address) -> Result<(), TrancheError> {
+        Self::bump_instance(&env);
+        admin.require_auth();
+
+        let stored_admin = Self::get_admin(env.clone())?;
+        if admin != stored_admin {
+            panic_with_error!(&env, TrancheError::Unauthorized);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((EVT, PAUSED), (admin, env.ledger().timestamp()));
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        Self::bump_instance(&env);
+        env.storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 }

@@ -64,6 +64,7 @@ import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
 import EstimatedFee from '@/components/EstimatedFee';
 import BorrowerCreditBadge from '@/components/BorrowerCreditBadge';
+import InsuranceCoverageBadge from '@/components/InsuranceCoverageBadge';
 import { projectedInterestStroops, formatApyPercent } from '@/lib/apy';
 import { parseStellarAddress } from '@/lib/types';
 import type {
@@ -975,6 +976,12 @@ export default function InvoiceDetailPage() {
                 </span>
               </div>
             </div>
+          </div>
+        )}
+
+        {fundedInvoice && (
+          <div className="mb-6">
+            <InsuranceCoverageBadge fundedInvoice={fundedInvoice} />
           </div>
         )}
 

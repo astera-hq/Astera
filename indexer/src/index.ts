@@ -49,6 +49,9 @@ const ORACLE_REGISTRY_CONTRACT_ID = (
 const SECONDARY_MARKET_CONTRACT_ID = (
   process.env.SECONDARY_MARKET_CONTRACT_ID || ""
 ).trim();
+// #1055: also watch the insurance contract, if deployed, so
+// covered/claimed/reserve events are queryable off-chain.
+const INSURANCE_CONTRACT_ID = (process.env.INSURANCE_CONTRACT_ID || "").trim();
 const CONTRACT_IDS = Array.from(
   new Set(
     [
@@ -56,6 +59,7 @@ const CONTRACT_IDS = Array.from(
       CREDIT_SCORE_CONTRACT_ID,
       ORACLE_REGISTRY_CONTRACT_ID,
       SECONDARY_MARKET_CONTRACT_ID,
+      INSURANCE_CONTRACT_ID,
     ].filter(Boolean),
   ),
 );

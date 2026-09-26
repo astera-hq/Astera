@@ -131,17 +131,11 @@ export class InsuranceClient extends BaseClient {
     );
   }
 
-  async estimatePremium(
-    principal: bigint,
-    sme: string,
-    tenorDays: number,
-    token: string,
-  ): Promise<bigint> {
+  async estimatePremium(principal: bigint, sme: string, tenorDays: number): Promise<bigint> {
     const sim = await this.simulate('estimate_premium', [
       nativeToScVal(principal, { type: 'i128' }),
       new Address(sme).toScVal(),
       nativeToScVal(tenorDays, { type: 'u32' }),
-      new Address(token).toScVal(),
     ]);
     if (StellarRpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
     return BigInt(String(scValToNative(sim.result!.retval)));
@@ -181,7 +175,7 @@ export class InsuranceClient extends BaseClient {
     return this.buildAndSendTx(
       params.caller,
       'file_claim',
-      [new Address(params.caller).toScVal(), nativeToScVal(params.invoiceId, { type: 'u64' })],
+      [nativeToScVal(params.invoiceId, { type: 'u64' })],
       params.onProgress,
     );
   }

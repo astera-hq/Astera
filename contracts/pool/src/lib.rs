@@ -180,6 +180,10 @@ pub enum PoolError {
     InvoiceNotCancelled = 96,
     // #1038: governance contract not configured
     GovernanceNotConfigured = 97,
+    // #1367: reentrant call blocked by the non-reentrancy guard. Surfaced
+    // as a typed error (instead of a raw `panic!` string) so frontends can
+    // decode the failure like every other `PoolError`.
+    ReentrantCall = 98,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1889,7 +1893,7 @@ impl FundingPool {
         let token_client = token::Client::new(&env, &initial_token);
         let token_decimals = token_client.decimals();
         if token_decimals != EXPECTED_DECIMALS {
-            panic!("unsupported token decimals");
+            panic_with_error!(&env, PoolError::UnsupportedTokenDecimals);
         }
 
         env.storage().instance().set(&DataKey::Config, &config);
@@ -7450,7 +7454,7 @@ impl FundingPool {
             .get::<DataKey, bool>(&key)
             .unwrap_or(false)
         {
-            panic!("reentrant call");
+            panic_with_error!(env, PoolError::ReentrantCall);
         }
         env.storage().instance().set(&key, &true);
     }
@@ -8354,6 +8358,7 @@ mod test {
         let referral_id = env.register(referral::ReferralContract, ());
         let referral_client = referral::ReferralContractClient::new(&env, &referral_id);
         referral_client.initialize(&admin, &client.address);
+        referral_client.set_lifetime_reward_cap(&admin, &usdc_id, &i128::MAX);
         referral_client.register(&sme, &referrer);
         client.set_referral_registry(&admin, &referral_id);
 

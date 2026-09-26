@@ -2,7 +2,7 @@
 
 use insurance::{
     CollateralDepositView, CreditScoreData, FundedInvoiceView, InsuranceError, InsuranceReserve,
-    InsuranceReserveClient, PremiumConfig, RiskTier,
+    InsuranceReserveClient, PremiumConfig, RiskTier, BPS_DENOM, MAX_RISK_MULTIPLIER_BPS,
 };
 use soroban_sdk::{
     contract, contractimpl, symbol_short, testutils::Address as _, Address, Env, Vec,
@@ -409,8 +409,7 @@ fn test_file_claim_full_payout_when_solvent() {
     h.client
         .fund_reserve_from_treasury(&h.admin, &h.token_id, &100_000i128);
 
-    let caller = Address::generate(&env);
-    let payout = h.client.file_claim(&caller, &1u64);
+    let payout = h.client.file_claim(&1u64);
     assert_eq!(payout, 8_000); // full nominal coverage (80% of 10_000), shortfall is 10_000
 
     let record = h.client.get_coverage_record(&1u64).unwrap();
@@ -439,8 +438,7 @@ fn test_file_claim_partial_payout_when_insolvent_does_not_panic() {
     assert!(status_before.total_reserves < 8_000);
     assert!(status_before.total_reserves > 0);
 
-    let caller = Address::generate(&env);
-    let payout = h.client.file_claim(&caller, &1u64);
+    let payout = h.client.file_claim(&1u64);
 
     // Must pay out exactly total_reserves, not the nominal covered amount.
     assert_eq!(payout, status_before.total_reserves);
@@ -461,9 +459,8 @@ fn test_file_claim_rejects_double_claim() {
     h.client
         .fund_reserve_from_treasury(&h.admin, &h.token_id, &100_000i128);
 
-    let caller = Address::generate(&env);
-    h.client.file_claim(&caller, &1u64);
-    let result = h.client.try_file_claim(&caller, &1u64);
+    h.client.file_claim(&1u64);
+    let result = h.client.try_file_claim(&1u64);
     assert_eq!(result, Err(Ok(InsuranceError::AlreadyClaimed)));
 }
 
@@ -496,8 +493,7 @@ fn test_file_claim_rejects_before_default() {
     );
     // Never marked defaulted.
 
-    let caller = Address::generate(&env);
-    let result = h.client.try_file_claim(&caller, &1u64);
+    let result = h.client.try_file_claim(&1u64);
     assert_eq!(result, Err(Ok(InsuranceError::InvoiceNotDefaulted)));
 }
 
@@ -506,8 +502,7 @@ fn test_file_claim_no_coverage_found() {
     let env = Env::default();
     env.mock_all_auths();
     let h = setup(&env);
-    let caller = Address::generate(&env);
-    let result = h.client.try_file_claim(&caller, &999u64);
+    let result = h.client.try_file_claim(&999u64);
     assert_eq!(result, Err(Ok(InsuranceError::NoCoverageFound)));
 }
 
@@ -537,8 +532,7 @@ fn test_file_claim_accounts_for_collateral_recovery() {
             seized_at: 0,
         });
 
-    let caller = Address::generate(&env);
-    let payout = h.client.file_claim(&caller, &1u64);
+    let payout = h.client.file_claim(&1u64);
     assert_eq!(payout, 4_000);
 }
 
@@ -565,8 +559,7 @@ fn test_file_claim_no_shortfall_after_full_collateral_recovery() {
             seized_at: 0,
         });
 
-    let caller = Address::generate(&env);
-    let result = h.client.try_file_claim(&caller, &1u64);
+    let result = h.client.try_file_claim(&1u64);
     assert_eq!(result, Err(Ok(InsuranceError::NoShortfall)));
 }
 
@@ -661,4 +654,202 @@ fn test_purchase_coverage_rejects_dust_principal_flooring_to_zero() {
     );
     assert_eq!(result, Err(Ok(InsuranceError::InvalidAmount)));
     assert!(h.client.get_coverage_record(&2u64).is_none());
+}
+
+// ── premium config validation ────────────────────────────────────────────────
+
+fn tier(min_score: u32, max_score: u32, risk_multiplier_bps: u32) -> RiskTier {
+    RiskTier {
+        min_score,
+        max_score,
+        risk_multiplier_bps,
+    }
+}
+
+fn config_with_tiers(env: &Env, tiers: &[RiskTier]) -> PremiumConfig {
+    let mut cfg = default_premium_config(env);
+    let mut v = Vec::new(env);
+    for t in tiers {
+        v.push_back(t.clone());
+    }
+    cfg.risk_tiers = v;
+    cfg
+}
+
+fn assert_config_rejected(h: &Harness<'_>, cfg: &PremiumConfig) {
+    let result = h.client.try_set_premium_config(&h.admin, cfg);
+    assert_eq!(result, Err(Ok(InsuranceError::InvalidPremiumConfig)));
+}
+
+#[test]
+fn test_set_premium_config_rejects_inverted_tier_range() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let cfg = config_with_tiers(&env, &[tier(600, 500, 10_000)]);
+    assert_config_rejected(&h, &cfg);
+}
+
+#[test]
+fn test_set_premium_config_rejects_overlapping_tiers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    // Overlap on 600..=650, supplied out of order.
+    let cfg = config_with_tiers(&env, &[tier(600, 750, 10_000), tier(200, 650, 20_000)]);
+    assert_config_rejected(&h, &cfg);
+    // A tier fully containing another is also an overlap.
+    let cfg = config_with_tiers(&env, &[tier(200, 850, 10_000), tier(600, 650, 20_000)]);
+    assert_config_rejected(&h, &cfg);
+    // Sharing a single boundary score overlaps too (bounds are inclusive).
+    let cfg = config_with_tiers(&env, &[tier(200, 500, 10_000), tier(500, 850, 20_000)]);
+    assert_config_rejected(&h, &cfg);
+}
+
+#[test]
+fn test_set_premium_config_rejects_zero_tier_multiplier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let cfg = config_with_tiers(&env, &[tier(200, 850, 0)]);
+    assert_config_rejected(&h, &cfg);
+}
+
+#[test]
+fn test_set_premium_config_rejects_oversized_tier_multiplier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let cfg = config_with_tiers(&env, &[tier(200, 850, MAX_RISK_MULTIPLIER_BPS + 1)]);
+    assert_config_rejected(&h, &cfg);
+}
+
+#[test]
+fn test_set_premium_config_allows_gaps_between_tiers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    // Scores 501..=599 are uncovered and price at default_risk_multiplier_bps.
+    let cfg = config_with_tiers(&env, &[tier(200, 500, 30_000), tier(600, 850, 10_000)]);
+    h.client.set_premium_config(&h.admin, &cfg);
+    assert_eq!(h.client.get_premium_config(), Some(cfg));
+}
+
+#[test]
+fn test_set_premium_config_accepts_boundary_values() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let mut cfg = default_premium_config(&env);
+    cfg.base_rate_bps = BPS_DENOM;
+    cfg.tenor_bps_per_day = BPS_DENOM;
+    cfg.min_premium_bps = BPS_DENOM;
+    cfg.max_premium_bps = BPS_DENOM;
+    cfg.default_risk_multiplier_bps = MAX_RISK_MULTIPLIER_BPS;
+    h.client.set_premium_config(&h.admin, &cfg);
+}
+
+#[test]
+fn test_set_premium_config_rejects_out_of_range_rate_fields() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+
+    let mut cfg = default_premium_config(&env);
+    cfg.base_rate_bps = BPS_DENOM + 1;
+    assert_config_rejected(&h, &cfg);
+
+    let mut cfg = default_premium_config(&env);
+    cfg.tenor_bps_per_day = BPS_DENOM + 1;
+    assert_config_rejected(&h, &cfg);
+
+    let mut cfg = default_premium_config(&env);
+    cfg.min_premium_bps = BPS_DENOM + 1;
+    cfg.max_premium_bps = BPS_DENOM + 1;
+    assert_config_rejected(&h, &cfg);
+
+    let mut cfg = default_premium_config(&env);
+    cfg.max_premium_bps = BPS_DENOM + 1;
+    assert_config_rejected(&h, &cfg);
+
+    let mut cfg = default_premium_config(&env);
+    cfg.default_risk_multiplier_bps = 0;
+    assert_config_rejected(&h, &cfg);
+
+    let mut cfg = default_premium_config(&env);
+    cfg.default_risk_multiplier_bps = MAX_RISK_MULTIPLIER_BPS + 1;
+    assert_config_rejected(&h, &cfg);
+}
+
+#[test]
+fn test_rejected_premium_config_leaves_existing_config_untouched() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let before = h.client.get_premium_config();
+    let mut cfg = default_premium_config(&env);
+    cfg.base_rate_bps = 1_000_000;
+    assert_config_rejected(&h, &cfg);
+    assert_eq!(h.client.get_premium_config(), before);
+}
+
+// ── missing credit score must not be priced as a real score ──────────────────
+
+// Default config: base 200 bps, min 10 bps, max 5_000 bps, and a 200..=549
+// tier at 3.0x. On a 1_000_000 principal with zero tenor the base premium is
+// 20_000, so a real score of 300 prices at 60_000 (3.0x) while a missing score
+// must price at default_risk_multiplier_bps (4.0x) = 80_000.
+const PRINCIPAL: i128 = 1_000_000;
+const PREMIUM_AT_TIER_300: i128 = 60_000;
+const PREMIUM_AT_DEFAULT_MULTIPLIER: i128 = 80_000;
+
+fn insurance_without_credit_score<'a>(
+    env: &'a Env,
+    h: &Harness<'_>,
+) -> (InsuranceReserveClient<'a>, Address) {
+    let admin = Address::generate(env);
+    let id = env.register(InsuranceReserve, ());
+    let client = InsuranceReserveClient::new(env, &id);
+    client.initialize(&admin, &h.pool_id, &Address::generate(env));
+    client.set_premium_config(&admin, &default_premium_config(env));
+    (client, admin)
+}
+
+#[test]
+fn test_real_score_of_300_uses_tier_multiplier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let sme = Address::generate(&env);
+    h.credit_client.set_score(&sme, &300);
+    assert_eq!(h.client.estimate_premium(&PRINCIPAL, &sme, &0u32), PREMIUM_AT_TIER_300);
+}
+
+#[test]
+fn test_unset_credit_score_contract_uses_default_multiplier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let (client, _admin) = insurance_without_credit_score(&env, &h);
+    let sme = Address::generate(&env);
+    assert_eq!(
+        client.estimate_premium(&PRINCIPAL, &sme, &0u32),
+        PREMIUM_AT_DEFAULT_MULTIPLIER
+    );
+}
+
+#[test]
+fn test_failed_credit_score_call_uses_default_multiplier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let (client, admin) = insurance_without_credit_score(&env, &h);
+    // A contract with no `get_credit_score` makes the cross-contract call fail.
+    let not_a_credit_contract = env.register(DummyPool, ());
+    client.set_credit_score_contract(&admin, &not_a_credit_contract);
+    let sme = Address::generate(&env);
+    assert_eq!(
+        client.estimate_premium(&PRINCIPAL, &sme, &0u32),
+        PREMIUM_AT_DEFAULT_MULTIPLIER
+    );
 }

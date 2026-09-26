@@ -22,6 +22,21 @@ fn setup_token(env: &Env) -> Address {
         .address()
 }
 
+#[test]
+fn test_initialize_requires_admin_authorization() {
+    let env = Env::default();
+    let contract_id = env.register(ReferralContract, ());
+    let client = ReferralContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let pool = Address::generate(&env);
+
+    assert!(client.try_initialize(&admin, &pool).is_err());
+
+    env.mock_all_auths();
+    client.initialize(&admin, &pool);
+    assert_eq!(client.get_pool(), pool);
+}
+
 fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
     token::StellarAssetClient::new(env, token_id).mint(to, &amount);
 }
@@ -121,13 +136,36 @@ fn test_record_activity_no_referrer_returns_zero_reward() {
 }
 
 #[test]
-fn test_record_activity_activates_on_zero_fee_first_deposit() {
+fn test_record_activity_requires_a_token_lifetime_cap() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _admin, pool) = setup(&env);
     let referee = Address::generate(&env);
     let referrer = Address::generate(&env);
     let token = setup_token(&env);
+    client.register(&referee, &referrer);
+
+    let reward = client.record_activity(
+        &pool,
+        &referee,
+        &Symbol::new(&env, "borrow"),
+        &1_000_0000000i128,
+        &token,
+    );
+
+    assert_eq!(reward, 0);
+    assert_eq!(client.get_stats(&referrer).referral_count, 1);
+}
+
+#[test]
+fn test_record_activity_activates_on_zero_fee_first_deposit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, pool) = setup(&env);
+    let referee = Address::generate(&env);
+    let referrer = Address::generate(&env);
+    let token = setup_token(&env);
+    client.set_lifetime_reward_cap(&admin, &token, &60_0000000i128);
     client.register(&referee, &referrer);
 
     // A $0-fee first deposit still activates (counts) the referral, even
@@ -148,10 +186,11 @@ fn test_record_activity_activates_on_zero_fee_first_deposit() {
 fn test_record_activity_credits_borrow_reward_and_activates_once() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, pool) = setup(&env);
+    let (client, admin, pool) = setup(&env);
     let referee = Address::generate(&env);
     let referrer = Address::generate(&env);
     let token = setup_token(&env);
+    client.set_lifetime_reward_cap(&admin, &token, &60_0000000i128);
     client.register(&referee, &referrer);
 
     // Default borrow bps is 500 (5%): 5% of 1_000_0000000 = 50_0000000.
@@ -178,16 +217,27 @@ fn test_record_activity_credits_borrow_reward_and_activates_once() {
     assert_eq!(reward2, 10_0000000i128);
     assert_eq!(client.get_stats(&referrer).referral_count, 1);
     assert_eq!(client.get_pending_reward(&referrer, &token), 60_0000000i128);
+    assert_eq!(
+        client.record_activity(
+            &pool,
+            &referee,
+            &Symbol::new(&env, "borrow"),
+            &200_0000000i128,
+            &token,
+        ),
+        0
+    );
 }
 
 #[test]
 fn test_record_activity_uses_deposit_bps_for_deposit_kind() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, pool) = setup(&env);
+    let (client, admin, pool) = setup(&env);
     let referee = Address::generate(&env);
     let referrer = Address::generate(&env);
     let token = setup_token(&env);
+    client.set_lifetime_reward_cap(&admin, &token, &i128::MAX);
     client.register(&referee, &referrer);
 
     // Default deposit bps is 1_000 (10%): 10% of 500_0000000 = 50_0000000.
@@ -209,6 +259,7 @@ fn test_admin_can_configure_reward_bps() {
     let referee = Address::generate(&env);
     let referrer = Address::generate(&env);
     let token = setup_token(&env);
+    client.set_lifetime_reward_cap(&admin, &token, &i128::MAX);
     client.register(&referee, &referrer);
 
     client.set_borrow_reward_bps(&admin, &1_000u32); // 10%
@@ -243,10 +294,11 @@ fn test_set_reward_bps_above_max_rejected() {
 fn test_claim_rewards_transfers_token_and_resets_pending() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, pool) = setup(&env);
+    let (client, admin, pool) = setup(&env);
     let referee = Address::generate(&env);
     let referrer = Address::generate(&env);
     let token = setup_token(&env);
+    client.set_lifetime_reward_cap(&admin, &token, &i128::MAX);
     client.register(&referee, &referrer);
 
     let reward = client.record_activity(
@@ -286,7 +338,7 @@ fn test_get_top_referrers_empty_by_default() {
 fn test_get_top_referrers_ranks_by_referral_count_descending() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, pool) = setup(&env);
+    let (client, admin, pool) = setup(&env);
     let token = setup_token(&env);
 
     let referrer_a = Address::generate(&env);
@@ -341,7 +393,7 @@ fn test_get_top_referrers_ranks_by_referral_count_descending() {
 fn test_get_top_referrers_respects_limit() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, pool) = setup(&env);
+    let (client, admin, pool) = setup(&env);
     let token = setup_token(&env);
 
     for _ in 0..4 {
@@ -469,6 +521,7 @@ fn test_pause_blocks_register_and_claim() {
     let referee = Address::generate(&env);
     let referrer = Address::generate(&env);
     let token = setup_token(&env);
+    client.set_lifetime_reward_cap(&admin, &token, &i128::MAX);
 
     client.pause(&admin);
 
@@ -521,10 +574,11 @@ fn test_record_activity_rejects_unrecognised_kind() {
     // of silently pricing at the (2x larger) deposit rate.
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, pool) = setup(&env);
+    let (client, admin, pool) = setup(&env);
     let referee = Address::generate(&env);
     let referrer = Address::generate(&env);
     let token = setup_token(&env);
+    client.set_lifetime_reward_cap(&admin, &token, &i128::MAX);
     client.register(&referee, &referrer);
 
     let result = client.try_record_activity(

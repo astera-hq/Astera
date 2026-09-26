@@ -601,7 +601,7 @@ fn apply_verification_outcome(
         .storage()
         .persistent()
         .get(&DataKey::Invoice(id))
-        .expect("invoice not found");
+        .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
     if invoice.status != InvoiceStatus::AwaitingVerification {
         panic_with_error!(env, InvoiceError::InvalidStatusTransition);
     }
@@ -695,7 +695,7 @@ fn remove_invoice_from_owner(env: &Env, owner: &Address, invoice_id: u64) {
         .unwrap_or_else(|| Vec::new(env));
     let mut new_ids: Vec<u64> = Vec::new(env);
     for i in 0..ids.len() {
-        let id = ids.get(i).unwrap();
+        let id = ids.get(i).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if id != invoice_id {
             new_ids.push_back(id);
         }
@@ -737,7 +737,7 @@ fn remove_invoice_from_debtor(env: &Env, debtor: &String, invoice_id: u64) {
         .unwrap_or_else(|| Vec::new(env));
     let mut new_ids: Vec<u64> = Vec::new(env);
     for i in 0..ids.len() {
-        let id = ids.get(i).unwrap();
+        let id = ids.get(i).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if id != invoice_id {
             new_ids.push_back(id);
         }
@@ -949,9 +949,9 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         let current: u32 = env
             .storage()
@@ -978,7 +978,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1012,15 +1012,15 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         let mut record: DebtorRecord = env
             .storage()
             .persistent()
             .get(&DataKey::DebtorRecord(debtor_id.clone()))
-            .expect("debtor not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         record.is_active = false;
         env.storage()
             .persistent()
@@ -1031,7 +1031,7 @@ impl InvoiceContract {
         env.storage()
             .persistent()
             .get(&DataKey::DebtorRecord(debtor_id))
-            .expect("debtor not found")
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound))
     }
 
     pub fn list_debtors(env: Env) -> Vec<String> {
@@ -1047,9 +1047,9 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         let old_required: bool = env
             .storage()
@@ -1072,7 +1072,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1103,7 +1103,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1121,7 +1121,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1148,9 +1148,9 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         let old_oracle: Option<Address> = env.storage().instance().get(&DataKey::Oracle);
         env.storage().instance().set(&DataKey::Oracle, &oracle);
@@ -1171,7 +1171,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1197,7 +1197,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1234,7 +1234,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1264,7 +1264,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1289,7 +1289,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1319,7 +1319,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1352,7 +1352,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1375,7 +1375,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1480,7 +1480,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::DebtorRecord(debtor_id.clone()))
-            .expect("debtor not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         record.is_active = false;
         env.storage()
             .persistent()
@@ -1633,7 +1633,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if governance != stored_admin {
             panic_with_error!(env, InvoiceError::Unauthorized);
         }
@@ -1885,7 +1885,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -1896,7 +1896,7 @@ impl InvoiceContract {
             .unwrap_or_else(|| Vec::new(&env));
         let mut remaining: Vec<Address> = Vec::new(&env);
         for i in 0..keepers.len() {
-            let k = keepers.get(i).unwrap();
+            let k = keepers.get(i).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
             if k != keeper {
                 remaining.push_back(k);
             }
@@ -1932,7 +1932,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -2003,7 +2003,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::MaxInvoiceAmount)
-            .expect("max invoice amount not set");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvalidAmount));
         if amount > max_invoice_amount {
             panic_with_error!(&env, InvoiceError::AmountOverflow);
         }
@@ -2031,7 +2031,7 @@ impl InvoiceContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::DebtorRecord(debtor.clone()))
-                .expect("debtor not registered");
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
             if !record.is_active {
                 panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
             }
@@ -2066,7 +2066,7 @@ impl InvoiceContract {
         let window_start = now.saturating_sub(SECS_PER_DAY);
         let mut fresh: Vec<u64> = Vec::new(&env);
         for i in 0..timestamps.len() {
-            let ts = timestamps.get(i).unwrap();
+            let ts = timestamps.get(i).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
             if ts > window_start {
                 fresh.push_back(ts);
             }
@@ -2101,7 +2101,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("pool not configured");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         let empty_str = String::from_str(&env, "");
         let has_oracle = env.storage().instance().has(&DataKey::Oracle);
         let initial_status = if has_oracle {
@@ -2237,7 +2237,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         let oracle: Option<Address> = env.storage().instance().get(&DataKey::Oracle);
         let is_authorized = approver == admin || oracle.as_ref() == Some(&approver);
         if !is_authorized {
@@ -2295,7 +2295,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -2353,7 +2353,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Oracle)
-            .expect("oracle not configured");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::OracleRegistryNotConfigured));
         // Accept verification from either the primary or secondary oracle (if configured).
         // This provides a fallback if the primary oracle is unavailable.
         let secondary_oracle: Option<Address> =
@@ -2404,7 +2404,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if invoice.status != InvoiceStatus::Disputed {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
@@ -2412,12 +2412,12 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         let oracle: Address = env
             .storage()
             .instance()
             .get(&DataKey::Oracle)
-            .expect("oracle not configured");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::OracleRegistryNotConfigured));
         if caller == oracle {
             // Oracle can always resolve
         } else if caller == admin {
@@ -2469,9 +2469,9 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         let old_window: u64 = env
             .storage()
@@ -2505,9 +2505,9 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -2531,9 +2531,9 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         if threshold < 0 {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
@@ -2561,7 +2561,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if pool != authorized_pool {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -2569,7 +2569,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         invoice = maybe_expire_pending_invoice(&env, invoice);
         if invoice.status == InvoiceStatus::Expired {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
@@ -2634,7 +2634,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if pool != authorized_pool {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -2645,7 +2645,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         // #934: fundable states include Pending, Verified, and already Funded
         // (for partial funding accumulations).
         let is_fundable = invoice.status == InvoiceStatus::Pending
@@ -2701,7 +2701,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if pool != authorized_pool {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -2709,7 +2709,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if invoice.status != InvoiceStatus::Funded {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
@@ -2758,7 +2758,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if pool != authorized_pool {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -2766,7 +2766,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         let is_fundable =
             invoice.status == InvoiceStatus::Pending || invoice.status == InvoiceStatus::Verified;
         if !is_fundable {
@@ -2780,7 +2780,7 @@ impl InvoiceContract {
         let new_funded = funded_so_far
             .checked_add(amount)
             .ok_or(InvoiceError::AmountOverflow)
-            .expect("funding overflow");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::AmountOverflow));
         if new_funded > invoice.amount {
             panic_with_error!(&env, InvoiceError::AmountOverflow);
         }
@@ -2798,7 +2798,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if pool != authorized_pool && !is_keeper(&env, &pool) {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -2806,7 +2806,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if invoice.status != InvoiceStatus::Funded {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
@@ -2851,15 +2851,15 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if pool != authorized_pool {
-            panic!("unauthorized: only pool can mark cancelled");
+            panic_with_error!(&env, InvoiceError::Unauthorized);
         }
         let mut invoice: Invoice = env
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if invoice.status != InvoiceStatus::Funded {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
@@ -2920,7 +2920,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if invoice.status != InvoiceStatus::Defaulted {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
@@ -3050,7 +3050,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != authorized_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3059,7 +3059,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if invoice.status != InvoiceStatus::Disputed {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
@@ -3068,7 +3068,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Dispute(id))
-            .expect("dispute not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::DisputeNotFound));
 
         if dispute_record.outcome != DisputeResolution::Pending {
             panic_with_error!(&env, InvoiceError::DisputeAlreadyResolved);
@@ -3200,13 +3200,13 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         invoice = maybe_expire_pending_invoice(&env, invoice);
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         let can_cancel = if caller == invoice.owner {
             matches!(
                 invoice.status,
@@ -3273,14 +3273,14 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
 
         // Authorization: invoice owner (SME) or admin can call this function
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         let is_authorized = caller == invoice.owner || caller == admin;
         if !is_authorized {
             panic_with_error!(&env, InvoiceError::Unauthorized);
@@ -3339,7 +3339,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3347,7 +3347,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         let is_completed = invoice.status == InvoiceStatus::Paid
             || invoice.status == InvoiceStatus::Defaulted
             || invoice.status == InvoiceStatus::Cancelled
@@ -3408,7 +3408,7 @@ impl InvoiceContract {
         let mut removed: u32 = 0;
 
         for i in 0..ids.len() {
-            let id = ids.get(i).unwrap();
+            let id = ids.get(i).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
             let key = DataKey::Invoice(id);
 
             // Idempotent: skip IDs that no longer exist in storage.
@@ -3510,7 +3510,7 @@ impl InvoiceContract {
         bump_instance(&env);
         let mut invoices: Vec<Invoice> = Vec::new(&env);
         for i in 0..ids.len() {
-            let inv = load_invoice(&env, ids.get(i).unwrap());
+            let inv = load_invoice(&env, ids.get(i).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound)));
             invoices.push_back(inv);
         }
         invoices
@@ -3616,11 +3616,11 @@ impl InvoiceContract {
         bump_instance(&env);
         let batch_size = ids.len();
         if batch_size > 20 {
-            panic!("batch_check_expiration: max 20 IDs per call");
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
         let mut expired_count = 0u32;
         for i in 0..batch_size {
-            let id = ids.get(i).unwrap();
+            let id = ids.get(i).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
             if Self::check_expiration(env.clone(), id) {
                 expired_count += 1;
             }
@@ -3635,7 +3635,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3662,7 +3662,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3694,7 +3694,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3720,7 +3720,7 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .get(&DataKey::MaxInvoiceAmount)
-            .expect("max invoice amount not set")
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvalidAmount))
     }
 
     pub fn set_max_sme_outstanding(env: Env, admin: Address, max: i128) {
@@ -3731,7 +3731,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3758,7 +3758,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3801,7 +3801,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3840,7 +3840,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3849,7 +3849,7 @@ impl InvoiceContract {
         }
         let mut invoice: Invoice = load_invoice(&env, id);
         if invoice.status != InvoiceStatus::Funded {
-            panic!("grace period override only allowed on Funded invoices");
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
         let global_grace: u32 = env
             .storage()
@@ -3871,7 +3871,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         let global_grace: u32 = env
             .storage()
             .instance()
@@ -3888,7 +3888,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3903,7 +3903,7 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .get(&DataKey::Pool)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized))
     }
 
     /// Returns true if the invoice with `id` has status Defaulted (#386).
@@ -3925,7 +3925,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3962,7 +3962,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -3994,7 +3994,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -4002,7 +4002,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::UpgradeScheduledAt)
-            .expect("no upgrade proposed");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvalidUpgradeTimelock));
         let timelock: u64 = env
             .storage()
             .instance()
@@ -4016,7 +4016,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::ProposedWasmHash)
-            .expect("no wasm hash proposed");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvalidWasmHash));
         env.deployer().update_current_contract_wasm(wasm_hash);
         env.events()
             .publish((EVT, symbol_short!("upgraded")), (admin, now));
@@ -4034,7 +4034,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -4064,7 +4064,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -4106,7 +4106,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         if admin != stored_admin {
             panic_with_error!(&env, InvoiceError::Unauthorized);
         }
@@ -4126,7 +4126,7 @@ impl InvoiceContract {
             .storage()
             .persistent()
             .get(&DataKey::Invoice(id))
-            .expect("invoice not found");
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
         if invoice.status != InvoiceStatus::Funded {
             return false;
         }

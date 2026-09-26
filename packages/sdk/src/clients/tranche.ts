@@ -92,8 +92,9 @@ export class TrancheClient extends BaseClient {
     return accountingFromRaw(scValToNative(sim.result!.retval) as Record<string, unknown>);
   }
 
-  async getEffectiveApy(token: string, trancheClass: TrancheClass): Promise<number> {
-    const sim = await this.simulate('get_effective_apy', [
+  /** Lifetime return in basis points — not annualized. See contract doc comment on get_lifetime_return_bps. */
+  async getLifetimeReturnBps(token: string, trancheClass: TrancheClass): Promise<number> {
+    const sim = await this.simulate('get_lifetime_return_bps', [
       new Address(token).toScVal(),
       trancheClassToScVal(trancheClass),
     ]);

@@ -25,7 +25,7 @@ pub fn distribute_waterfall_repayment(
         .storage()
         .instance()
         .get(&DataKey::InvoiceExposure(invoice_id))
-        .unwrap_or_else(|| panic_with_error!(env, TrancheError::PoolNotFound));
+        .unwrap_or_else(|| panic_with_error!(env, TrancheError::ExposureNotFound));
 
     // Calculate waterfall split
     let (senior_amount, junior_amount) = calculate_waterfall_split(
@@ -74,7 +74,7 @@ pub fn allocate_loss(env: &Env, token: Address, invoice_id: u64, shortfall: i128
         .storage()
         .instance()
         .get(&DataKey::InvoiceExposure(invoice_id))
-        .unwrap_or_else(|| panic_with_error!(env, TrancheError::PoolNotFound));
+        .unwrap_or_else(|| panic_with_error!(env, TrancheError::ExposureNotFound));
 
     // Calculate loss allocation
     let junior_remaining = pool.junior.deployed + pool.junior.available;

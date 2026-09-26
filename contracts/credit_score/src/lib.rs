@@ -553,6 +553,33 @@ fn require_not_paused(env: &Env) {
     }
 }
 
+// #1363: ledger TTL constants. Payment history, SME score data,
+// attestations and scoring config live in persistent storage and must
+// outlive short default TTLs — a borrower's on-chain credit history is
+// the protocol's core value ("Every paid invoice builds an on-chain
+// credit history") and must never be archived into a default/base score.
+// 1 year matches the invoice contract's ACTIVE_INVOICE_TTL.
+const LEDGERS_PER_DAY: u32 = 17_280;
+const CREDIT_DATA_TTL: u32 = LEDGERS_PER_DAY * 365;
+const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
+const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
+
+// #1363: keep instance storage (admin, counters, index heads) alive,
+// mirroring pool/invoice `bump_instance`.
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+// #1363: extend a persistent key's TTL after every write so credit
+// history, attestations and scoring config survive long-term.
+fn extend_credit_ttl(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, CREDIT_DATA_TTL, CREDIT_DATA_TTL);
+}
+
 #[contract]
 pub struct CreditScoreContract;
 
@@ -858,6 +885,7 @@ fn compute_trend_adjustment(
 #[contractimpl]
 impl CreditScoreContract {
     pub fn initialize(env: Env, admin: Address, invoice_contract: Address, pool_contract: Address) {
+        bump_instance(&env);
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, CreditScoreError::AlreadyInitialized);
         }
@@ -877,6 +905,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::ScoringConfig, &ScoringConfig::defaults());
+        extend_credit_ttl(&env, &DataKey::ScoringConfig);
         // Store compile-time version (#237)
         env.storage()
             .instance()
@@ -976,6 +1005,7 @@ impl CreditScoreContract {
                 &DataKey::PaymentRecordIdx(sme.clone(), history_len),
                 &record,
             );
+            extend_credit_ttl(env, &DataKey::PaymentRecordIdx(sme.clone(), history_len));
             env.storage()
                 .instance()
                 .set(&DataKey::PaymentHistory(sme.clone()), &(history_len + 1));
@@ -983,6 +1013,7 @@ impl CreditScoreContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::PaymentRecordIdx(sme.clone(), start_idx), &record);
+            extend_credit_ttl(env, &DataKey::PaymentRecordIdx(sme.clone(), start_idx));
             let new_start = (start_idx + 1) % max_history;
             env.storage()
                 .instance()
@@ -992,6 +1023,7 @@ impl CreditScoreContract {
             &DataKey::PaymentRecordScoreVersion(invoice_id),
             &scoring_config.core.score_version,
         );
+        extend_credit_ttl(env, &DataKey::PaymentRecordScoreVersion(invoice_id));
 
         // Capture previous paid count before incrementing, for the running average.
         let prev_paid = (credit_data.paid_on_time + credit_data.paid_late) as i64;
@@ -1026,6 +1058,7 @@ impl CreditScoreContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::MilestoneCount(sme.clone()), &milestone_count);
+            extend_credit_ttl(env, &DataKey::MilestoneCount(sme.clone()));
         }
         // Only paid (on-time + late) invoices contribute to the average; defaults are excluded.
         // Running sum = previous_average * previous_paid_count + new_days_late
@@ -1044,6 +1077,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::SmeLateThreshold(sme.clone()), &late_threshold);
+        extend_credit_ttl(env, &DataKey::SmeLateThreshold(sme.clone()));
         credit_data.score = calculate_score_with_config(
             env,
             &scoring_config,
@@ -1062,9 +1096,11 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::CreditScore(sme.clone()), &credit_data);
+        extend_credit_ttl(env, &DataKey::CreditScore(sme.clone()));
         env.storage()
             .persistent()
             .set(&DataKey::InvoiceProcessed(invoice_id), &true);
+        extend_credit_ttl(env, &DataKey::InvoiceProcessed(invoice_id));
 
         credit_data
     }
@@ -1102,6 +1138,7 @@ impl CreditScoreContract {
         due_date: u64,
         paid_at: u64,
     ) {
+        bump_instance(&env);
         let pool: Address = env
             .storage()
             .instance()
@@ -1160,6 +1197,7 @@ impl CreditScoreContract {
     ///
     /// Idempotent: duplicate calls for the same invoice_id are silently ignored.
     pub fn record_funding(env: Env, _caller: Address, invoice_id: u64, sme: Address, amount: i128) {
+        bump_instance(&env);
         let pool: Address = env
             .storage()
             .instance()
@@ -1185,6 +1223,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::CreditScore(sme.clone()), &credit_data);
+        extend_credit_ttl(&env, &DataKey::CreditScore(sme.clone()));
 
         env.events().publish(
             (EVT, symbol_short!("funded")),
@@ -1200,6 +1239,7 @@ impl CreditScoreContract {
         amount: i128,
         due_date: u64,
     ) {
+        bump_instance(&env);
         let pool: Address = env
             .storage()
             .instance()
@@ -1405,6 +1445,7 @@ impl CreditScoreContract {
     }
 
     pub fn set_score_thresholds(env: Env, admin: Address, thresholds: ScoreThresholds) {
+        bump_instance(&env);
         admin.require_auth();
         Self::require_admin(&env, &admin);
         require_not_paused(&env);
@@ -1420,6 +1461,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::ScoreThresholds, &thresholds);
+        extend_credit_ttl(&env, &DataKey::ScoreThresholds);
         env.events().publish(
             (EVT, symbol_short!("thresh")),
             (old.excellent, old.very_good, old.good, old.fair),
@@ -1431,6 +1473,7 @@ impl CreditScoreContract {
     }
 
     pub fn set_scoring_config(env: Env, admin: Address, config: ScoringConfig) {
+        bump_instance(&env);
         admin.require_auth();
         Self::require_admin(&env, &admin);
         require_not_paused(&env);
@@ -1479,6 +1522,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::ScoringConfig, &config);
+        extend_credit_ttl(&env, &DataKey::ScoringConfig);
         env.storage()
             .instance()
             .set(&DataKey::ScoreVersion, &config.core.score_version);
@@ -1548,6 +1592,7 @@ impl CreditScoreContract {
         debtor_concentration_bps: u32,
         invoice_size_risk_bps: u32,
     ) {
+        bump_instance(&env);
         admin.require_auth();
         Self::require_admin(&env, &admin);
         require_not_paused(&env);
@@ -1559,6 +1604,7 @@ impl CreditScoreContract {
             &DataKey::RiskSignal(sme.clone()),
             &pack_risk_signal(debtor_concentration_bps, invoice_size_risk_bps),
         );
+        extend_credit_ttl(&env, &DataKey::RiskSignal(sme.clone()));
         env.events().publish(
             (EVT, symbol_short!("risk_sig")),
             (sme, debtor_concentration_bps, invoice_size_risk_bps),
@@ -1568,6 +1614,7 @@ impl CreditScoreContract {
     /// Set the late-payment threshold (in days) used in score calculation.
     /// Default is 30 days. Valid range: 1–365.
     pub fn set_late_threshold(env: Env, admin: Address, days: i64) {
+        bump_instance(&env);
         admin.require_auth();
         Self::require_admin(&env, &admin);
         if !(1..=365).contains(&days) {
@@ -1576,6 +1623,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::LateThreshold, &days);
+        extend_credit_ttl(&env, &DataKey::LateThreshold);
         env.events().publish((EVT, symbol_short!("lt_upd")), days);
     }
 
@@ -1624,6 +1672,7 @@ impl CreditScoreContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::SmeByIndex(count), &sme.clone());
+            extend_credit_ttl(env, &DataKey::SmeByIndex(count));
             let scoring_config = load_scoring_config(env);
             CreditScoreData {
                 sme: sme.clone(),
@@ -1717,6 +1766,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::LateThreshold, &days);
+        extend_credit_ttl(&env, &DataKey::LateThreshold);
         env.events().publish((EVT, symbol_short!("ac_lt")), days);
     }
 
@@ -1748,6 +1798,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::ScoreThresholds, &thresholds);
+        extend_credit_ttl(&env, &DataKey::ScoreThresholds);
         env.events().publish(
             (EVT, symbol_short!("ac_thresh")),
             (old.excellent, old.very_good, old.good, old.fair),
@@ -1788,6 +1839,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::Attestor(address.clone()), &info);
+        extend_credit_ttl(&env, &DataKey::Attestor(address.clone()));
         env.events()
             .publish((EVT, symbol_short!("ac_attest")), (access_control, address));
     }
@@ -1978,6 +2030,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::Attestor(address.clone()), &info);
+        extend_credit_ttl(&env, &DataKey::Attestor(address.clone()));
 
         if !was_active {
             Self::add_active_attestor(&env, &address);
@@ -2005,6 +2058,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::Attestor(address.clone()), &info);
+        extend_credit_ttl(&env, &DataKey::Attestor(address.clone()));
         Self::remove_active_attestor(&env, &address);
 
         env.events()
@@ -2023,6 +2077,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::ActiveAttestorList, &list);
+        extend_credit_ttl(env, &DataKey::ActiveAttestorList);
     }
 
     fn remove_active_attestor(env: &Env, address: &Address) {
@@ -2040,6 +2095,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::ActiveAttestorList, &filtered);
+        extend_credit_ttl(env, &DataKey::ActiveAttestorList);
     }
 
     pub fn get_attestor_info(env: Env, address: Address) -> Option<AttestorInfo> {
@@ -2076,6 +2132,7 @@ impl CreditScoreContract {
         evidence_hash: String,
         expires_at: u64,
     ) -> u64 {
+        bump_instance(&env);
         attestor.require_auth();
         require_not_paused(&env);
 
@@ -2118,6 +2175,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::Attestation(id), &attestation);
+        extend_credit_ttl(&env, &DataKey::Attestation(id));
 
         let mut sme_attestations: Vec<u64> = env
             .storage()
@@ -2128,6 +2186,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::SmeAttestations(sme.clone()), &sme_attestations);
+        extend_credit_ttl(&env, &DataKey::SmeAttestations(sme.clone()));
 
         env.events().publish(
             (EVT, Symbol::new(&env, "att_sub")),
@@ -2149,6 +2208,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::Attestation(attestation.id), &attestation);
+        extend_credit_ttl(env, &DataKey::Attestation(attestation.id));
         attestation
     }
 
@@ -2270,12 +2330,13 @@ impl CreditScoreContract {
         );
 
         env.storage().persistent().set(
-            &DataKey::SimulateScoreCache(sme, cache_key),
+            &DataKey::SimulateScoreCache(sme.clone(), cache_key),
             &SimulateScoreCacheEntry {
                 result,
                 cached_at: now,
             },
         );
+        extend_credit_ttl(&env, &DataKey::SimulateScoreCache(sme.clone(), cache_key));
         result
     }
 
@@ -2287,6 +2348,7 @@ impl CreditScoreContract {
         attestation_id: u64,
         reason_hash: String,
     ) {
+        bump_instance(&env);
         caller.require_auth();
         require_not_paused(&env);
 
@@ -2309,10 +2371,12 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::Attestation(attestation.id), &attestation);
+        extend_credit_ttl(&env, &DataKey::Attestation(attestation.id));
         env.storage().persistent().set(
             &DataKey::AttestationDisputeReason(attestation_id),
             &reason_hash,
         );
+        extend_credit_ttl(&env, &DataKey::AttestationDisputeReason(attestation_id));
         Self::bump_attestation_generation(&env, &attestation.sme);
 
         env.events().publish(
@@ -2330,6 +2394,7 @@ impl CreditScoreContract {
         attestation_id: u64,
         upheld: bool,
     ) {
+        bump_instance(&env);
         admin.require_auth();
         Self::require_admin(&env, &admin);
         require_not_paused(&env);
@@ -2348,6 +2413,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::Attestation(attestation.id), &attestation);
+        extend_credit_ttl(&env, &DataKey::Attestation(attestation.id));
         Self::bump_attestation_generation(&env, &attestation.sme);
 
         env.events().publish(
@@ -2376,6 +2442,7 @@ impl CreditScoreContract {
         env.storage()
             .persistent()
             .set(&DataKey::AttestationGeneration(sme.clone()), &next);
+        extend_credit_ttl(env, &DataKey::AttestationGeneration(sme.clone()));
     }
 }
 

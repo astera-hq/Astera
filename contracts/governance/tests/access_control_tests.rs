@@ -97,9 +97,11 @@ fn test_via_ac_entrypoints_apply_the_same_effects_as_their_legacy_admin_counterp
     assert_eq!(cfg.quorum_bps, 4_000);
     assert_eq!(cfg.pass_bps, 8_000);
 
-    // category 1 = Treasury (see access_control's discriminant mapping).
-    f.client
-        .set_category_quorum_via_ac(&access_control, &1u32, &5_500u32);
+    f.client.set_category_quorum_via_ac(
+        &access_control,
+        &governance::ProposalCategory::Treasury,
+        &5_500u32,
+    );
     assert_eq!(f.client.get_config().treasury_quorum_bps, 5_500);
 
     // Rotating the trust anchor itself must also go through the currently

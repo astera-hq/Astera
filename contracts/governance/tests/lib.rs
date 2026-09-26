@@ -218,8 +218,11 @@ fn test_post_creation_minting_cannot_manufacture_quorum() {
     let result = gov.try_execute_proposal(&id);
     assert!(result.is_err(), "proposal below quorum must be rejected");
 
-    // execute_proposal rolls back storage on error; list_proposals commits finalization
-    gov.list_proposals();
+    assert_eq!(
+        gov.list_proposals().get(0).unwrap().status,
+        ProposalStatus::Active
+    );
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
@@ -278,7 +281,7 @@ fn test_proposal_rejected_when_quorum_not_met() {
     let result = gov.try_execute_proposal(&id);
     assert!(result.is_err());
 
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
@@ -312,7 +315,7 @@ fn test_proposal_rejected_when_pass_threshold_not_met() {
     let result = gov.try_execute_proposal(&id);
     assert!(result.is_err());
 
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
@@ -438,7 +441,7 @@ fn test_proposer_cannot_cancel_passed_proposal() {
     // (finalization happens lazily on the next touch), then attempt an
     // early proposer cancellation before execution/timelock.
     env.ledger().with_mut(|l| l.timestamp += VOTING_PERIOD + 1);
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Passed);
 
@@ -470,7 +473,7 @@ fn test_admin_can_cancel_passed_proposal() {
     gov.vote(&id, &voter, &true);
 
     env.ledger().with_mut(|l| l.timestamp += VOTING_PERIOD + 1);
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     assert_eq!(
         gov.get_proposal(&id).unwrap().status,
         ProposalStatus::Passed
@@ -675,7 +678,7 @@ fn test_passed_proposal_expires_if_not_executed_within_seven_days() {
     // Past voting period + execution delay, proposal is Passed but not yet executed.
     env.ledger()
         .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Passed);
 
@@ -685,7 +688,7 @@ fn test_passed_proposal_expires_if_not_executed_within_seven_days() {
     let result = gov.try_execute_proposal(&id);
     assert!(result.is_err(), "expired proposal must not be executable");
 
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&id);
     let proposal = gov.get_proposal(&id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Expired);
 }
@@ -1009,7 +1012,7 @@ fn test_critical_category_requires_higher_quorum() {
 
     let critical_result = gov.try_execute_proposal(&critical_id);
     assert!(critical_result.is_err());
-    gov.list_proposals();
+    gov.finalize_proposal_if_due(&critical_id);
     assert_eq!(
         gov.get_proposal(&critical_id).unwrap().status,
         ProposalStatus::Rejected
@@ -1037,6 +1040,97 @@ fn test_set_category_quorum_rejects_non_admin_and_invalid() {
         .is_err());
 }
 
+#[test]
+fn test_voting_period_change_only_affects_new_proposals() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, admin, target_id) = setup_governance(&env, &share_id);
+    let proposer = Address::generate(&env);
+    share.mint(&proposer, &10_000i128);
+
+    let existing_id = make_proposal(&env, &gov, &proposer, &target_id);
+    let old_end = gov.get_proposal(&existing_id).unwrap().voting_ends_at;
+    gov.set_voting_period(&admin, &(2 * VOTING_PERIOD));
+    assert_eq!(gov.get_config().voting_period_secs, 2 * VOTING_PERIOD);
+    assert_eq!(
+        gov.get_proposal(&existing_id).unwrap().voting_ends_at,
+        old_end
+    );
+
+    let new_id = make_proposal(&env, &gov, &proposer, &target_id);
+    assert_eq!(
+        gov.get_proposal(&new_id).unwrap().voting_ends_at,
+        1_000 + 2 * VOTING_PERIOD
+    );
+    assert!(gov
+        .try_set_voting_period(&admin, &(VOTING_PERIOD - 1))
+        .is_err());
+}
+
+#[test]
+fn test_execution_expiry_is_configurable_and_applies_to_passed_proposals() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, admin, target_id) = setup_governance(&env, &share_id);
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    share.mint(&proposer, &1_000i128);
+    share.mint(&voter, &200_000i128);
+
+    gov.set_execution_expiry(&admin, &3_600);
+    assert_eq!(gov.get_execution_expiry(), 3_600);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
+    gov.vote(&id, &voter, &true);
+    env.ledger()
+        .with_mut(|l| l.timestamp += VOTING_PERIOD + EXEC_DELAY + 2);
+    gov.finalize_proposal_if_due(&id);
+    assert_eq!(
+        gov.get_proposal(&id).unwrap().status,
+        ProposalStatus::Passed
+    );
+
+    env.ledger().with_mut(|l| l.timestamp += 3_601);
+    let result = gov.try_execute_proposal(&id);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
+    assert_eq!(
+        gov.get_proposal(&id).unwrap().status,
+        ProposalStatus::Expired
+    );
+    assert!(gov.try_set_execution_expiry(&admin, &0).is_err());
+}
+
+#[test]
+fn test_pause_blocks_mutations_and_admin_can_resume_governance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    let (share, share_id, _) = setup_share(&env);
+    let (gov, admin, target_id) = setup_governance(&env, &share_id);
+    let proposer = Address::generate(&env);
+    share.mint(&proposer, &10_000i128);
+    let id = make_proposal(&env, &gov, &proposer, &target_id);
+
+    gov.set_paused(&admin, &true);
+    assert!(gov.is_paused());
+    assert_eq!(
+        gov.try_vote(&id, &proposer, &true).unwrap_err().unwrap(),
+        GovernanceError::Paused
+    );
+    assert_eq!(
+        gov.try_set_category_quorum(&admin, &ProposalCategory::Treasury, &3_000)
+            .unwrap_err()
+            .unwrap(),
+        GovernanceError::Paused
+    );
+    gov.set_paused(&admin, &false);
+    assert!(!gov.is_paused());
+    gov.vote(&id, &proposer, &true);
+}
+
 // ── #1405: list_proposals at scale ───────────────────────────────────────────
 
 #[test]
@@ -1051,23 +1145,26 @@ fn test_list_proposals_succeeds_with_many_proposals() {
     let proposer = Address::generate(&env);
     share.mint(&proposer, &1_000_000i128);
 
-    // Enough proposals to show the linear scan cost growth in
-    // `list_proposals` (it iterates every proposal ever created) while
-    // still completing — a live DAO must not hit a ceiling here first.
-    const N: u64 = 50;
+    // A bounded first page remains inexpensive at the current page limit.
+    const N: u64 = 60;
     for _ in 0..N {
         make_proposal(&env, &gov, &proposer, &target_id);
     }
 
     let proposals = gov.list_proposals();
-    assert_eq!(proposals.len(), N as u32);
-    // IDs stay sequential so no proposal is skipped or duplicated.
+    assert_eq!(proposals.len(), 50);
+    // The default view is bounded; clients can fetch the remaining proposals.
     for (i, proposal) in proposals.iter().enumerate() {
         assert_eq!(proposal.id, (i as u64) + 1);
     }
+    let first_page = gov.list_proposals_page(&1, &20);
+    let second_page = gov.list_proposals_page(&21, &40);
+    assert_eq!(first_page.len(), 20);
+    assert_eq!(second_page.len(), 40);
+    assert_eq!(first_page.get(0).unwrap().id, 1);
+    assert_eq!(second_page.get(0).unwrap().id, 21);
     assert!(gov.get_proposal(&N).is_some());
 }
-
 
 // ── #1357: `initialize` reports typed errors instead of panicking ────────────
 

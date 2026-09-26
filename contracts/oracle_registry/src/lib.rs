@@ -532,6 +532,13 @@ impl OracleRegistryContract {
         evidence: String,
         caller: Address,
     ) -> Result<(), OracleRegistryError> {
+        // #1371: slashing burns a portion of the operator's stake, so it must
+        // be refused while the registry is paused. Pausing is the natural first
+        // response to a suspected bug in vote accounting or reputation tracking
+        // — exactly when a slash decision is most likely to be wrong. Guarding
+        // the shared internal helper covers both `slash_oracle` (admin) and
+        // `slash_oracle_via_ac` (access-control) entrypoints.
+        require_not_paused(env);
         if bps == 0 || bps > 10_000 {
             return Err(OracleRegistryError::InvalidBps);
         }
@@ -824,7 +831,11 @@ impl OracleRegistryContract {
     /// reaching quorum, moving it to `Expired` so `admin_resolve_round` (or a
     /// fresh `open_verification_round`) can take over. Also invoked lazily
     /// from `submit_vote` when a stale vote arrives after the deadline.
+    ///
+    /// #1370: refused while the registry is paused, so a round awaiting
+    /// consensus can't be moved to a terminal state during a pause.
     pub fn expire_round(env: Env, invoice_id: u64) -> Result<(), OracleRegistryError> {
+        require_not_paused(&env);
         let round_key = DataKey::Round(invoice_id);
         let mut round: VerificationRound = env
             .storage()
@@ -1024,7 +1035,7 @@ impl OracleRegistryContract {
         env.storage().instance().get(&DataKey::AccessControl)
     }
 
-     // #1038: Bootstrap the governance contract address. Admin-gated one-time setup.
+    // #1038: Bootstrap the governance contract address. Admin-gated one-time setup.
     pub fn set_governance_address(
         env: Env,
         admin: Address,
@@ -1179,8 +1190,10 @@ impl OracleRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::InvoiceContract, &invoice_contract);
-        env.events()
-            .publish((EVT, symbol_short!("gov_inv")), (governance, invoice_contract));
+        env.events().publish(
+            (EVT, symbol_short!("gov_inv")),
+            (governance, invoice_contract),
+        );
         Ok(())
     }
 

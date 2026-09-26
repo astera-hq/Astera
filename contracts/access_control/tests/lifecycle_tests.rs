@@ -67,6 +67,53 @@ fn test_initialize_can_only_be_called_once() {
 }
 
 #[test]
+fn test_list_proposals_is_bounded_and_filters_status() {
+    let f = setup();
+    for _ in 0..3 {
+        f.client.propose_action(
+            &Role::SuperAdmin,
+            &f.s1,
+            &f.contract_id,
+            &ActionPayload::SetProposalExpiry(3_600),
+        );
+    }
+
+    let page = f.client.list_proposals(&0, &2, &None);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap().id, 0);
+    assert_eq!(page.get(1).unwrap().id, 1);
+    assert_eq!(f.client.list_proposals(&2, &10, &None).len(), 1);
+    assert!(f
+        .client
+        .list_proposals(&0, &10, &Some(ProposalStatus::Approved))
+        .is_empty());
+}
+
+#[test]
+fn test_propose_action_rejects_expiry_timestamp_overflow() {
+    let f = setup();
+    f.env.ledger().with_mut(|ledger| ledger.timestamp = 100);
+    let expiry_update = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(u64::MAX),
+    );
+    f.client.approve_action(&f.s2, &expiry_update);
+    f.client.execute_action(&f.s1, &expiry_update);
+    let result = f.client.try_propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(3_600),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::InvalidExpiryWindow.into()
+    );
+}
+
+#[test]
 fn test_initialize_rejects_threshold_above_signer_count() {
     let env = Env::default();
     env.mock_all_auths();

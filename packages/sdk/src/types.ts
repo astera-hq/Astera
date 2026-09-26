@@ -244,6 +244,8 @@ export interface AsteraConfig {
   trancheContractId?: string;
   /** #864: role-based multisig access-control contract, if deployed. */
   accessControlContractId?: string;
+  /** #1055: default-insurance reserve contract, if deployed. */
+  insuranceContractId?: string;
 }
 
 // ─── #864: role-based multisig access control ──────────────────────────────

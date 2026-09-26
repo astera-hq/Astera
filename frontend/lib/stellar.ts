@@ -69,6 +69,9 @@ export const ARBITRATION_CONTRACT_ID = process.env.NEXT_PUBLIC_ARBITRATION_CONTR
 // wasm deploy limit.
 export const AUCTION_CONTRACT_ID = process.env.NEXT_PUBLIC_AUCTION_CONTRACT_ID ?? '';
 
+// #1055: default-insurance reserve — optional, unset until deployed.
+export const INSURANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_INSURANCE_CONTRACT_ID ?? '';
+
 export const SHARE_TOKEN_ID = process.env.NEXT_PUBLIC_SHARE_TOKEN_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
 export const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
