@@ -452,3 +452,119 @@ fn test_two_large_mints_total_supply_correct() {
     assert_eq!(client.total_supply(), quarter * 2);
     assert_eq!(client.balance(&alice) + client.balance(&bob), quarter * 2);
 }
+
+// ── #1322: `total_supply` must share the balances' storage class and TTL ─────
+
+fn setup_with_contract_id(env: &Env) -> (ShareTokenClient<'_>, Address) {
+    let contract_id = env.register(ShareToken, ());
+    let client = ShareTokenClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(env, "Pool Shares"),
+        &String::from_str(env, "POOL"),
+    );
+    (client, contract_id)
+}
+
+/// Pre-fix, the supply lived in the contract's single instance entry while
+/// balances lived in per-holder persistent entries. Different storage classes
+/// have different archival behaviour, so the two could age out independently.
+#[test]
+fn test_total_supply_is_a_persistent_entry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, contract_id) = setup_with_contract_id(&env);
+    let holder = Address::generate(&env);
+
+    client.mint(&holder, &1_000i128);
+
+    env.as_contract(&contract_id, || {
+        let key = share::DataKey::TotalSupply;
+        assert!(
+            env.storage().persistent().has(&key),
+            "total supply must live in persistent storage"
+        );
+        assert!(
+            !env.storage().instance().has(&key),
+            "total supply must not be an instance entry"
+        );
+        assert_eq!(
+            env.storage().persistent().get::<share::DataKey, i128>(&key),
+            Some(1_000)
+        );
+    });
+    assert_eq!(client.total_supply(), 1_000);
+}
+
+/// The supply entry and the balances it is the sum of must be extended by the
+/// same operations, otherwise one can archive while the other is still live.
+#[test]
+fn test_total_supply_ttl_tracks_balance_ttl() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, contract_id) = setup_with_contract_id(&env);
+    let holder = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    client.mint(&holder, &1_000i128);
+    // A balance-only path: it must keep the supply entry alive in lockstep.
+    client.transfer(&holder, &other, &400i128);
+
+    env.as_contract(&contract_id, || {
+        let supply_ttl = env
+            .storage()
+            .persistent()
+            .get_ttl(&share::DataKey::TotalSupply);
+        let holder_ttl = env
+            .storage()
+            .persistent()
+            .get_ttl(&share::DataKey::Balance(holder.clone()));
+        let other_ttl = env
+            .storage()
+            .persistent()
+            .get_ttl(&share::DataKey::Balance(other.clone()));
+        assert_eq!(supply_ttl, holder_ttl);
+        assert_eq!(supply_ttl, other_ttl);
+    });
+}
+
+/// A deployment that predates the move still holds the supply in instance
+/// storage. Reads must keep working and the first write must migrate it, so
+/// the value can never be silently read back as zero.
+#[test]
+fn test_legacy_instance_total_supply_is_migrated_on_write() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, contract_id) = setup_with_contract_id(&env);
+    let holder = Address::generate(&env);
+
+    client.mint(&holder, &1_000i128);
+
+    // Rewind storage to the pre-fix layout.
+    env.as_contract(&contract_id, || {
+        let key = share::DataKey::TotalSupply;
+        env.storage().persistent().remove(&key);
+        env.storage().instance().set(&key, &1_000i128);
+    });
+
+    // Reads fall back to the legacy entry instead of reporting 0.
+    assert_eq!(client.total_supply(), 1_000);
+
+    // The next mutation migrates it and clears the stale copy.
+    client.mint(&holder, &500i128);
+    assert_eq!(client.total_supply(), 1_500);
+    assert_eq!(client.balance(&holder), 1_500);
+
+    env.as_contract(&contract_id, || {
+        let key = share::DataKey::TotalSupply;
+        assert_eq!(
+            env.storage().persistent().get::<share::DataKey, i128>(&key),
+            Some(1_500)
+        );
+        assert!(!env.storage().instance().has(&key));
+    });
+}
