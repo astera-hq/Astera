@@ -33,6 +33,7 @@ pub fn distribute_waterfall_repayment(
         total_due,
         exposure.senior_deployed,
         pool.config.senior_target_yield_bps,
+        pool.config.junior_first_loss_bps,
         elapsed_secs,
     );
 
@@ -78,7 +79,11 @@ pub fn allocate_loss(env: &Env, token: Address, invoice_id: u64, shortfall: i128
 
     // Calculate loss allocation
     let junior_remaining = pool.junior.deployed + pool.junior.available;
-    let (junior_loss, senior_loss) = calculate_loss_allocation(shortfall, junior_remaining);
+    let (junior_loss, senior_loss) = calculate_loss_allocation(
+        shortfall,
+        junior_remaining,
+        pool.config.junior_first_loss_bps,
+    );
 
     // Apply junior loss
     if junior_loss > 0 {

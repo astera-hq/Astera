@@ -10,7 +10,7 @@ pub mod state;
 pub mod withdraw;
 
 use errors::TrancheError;
-use events::{CONFIG, EVT};
+use events::{CONFIG, EVT, PAUSED};
 use state::{DataKey, TrancheAccounting, TrancheClass, TrancheConfig, TranchePool};
 
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env};
@@ -90,6 +90,7 @@ impl TrancheContract {
         }
 
         admin.require_auth();
+        Self::validate_config(&env, &config);
 
         env.storage().instance().set(&DataKey::Admin, &admin);
 
@@ -102,7 +103,8 @@ impl TrancheContract {
             junior: TrancheAccounting::default(),
         };
 
-        env.storage().instance().set(&DataKey::Pool(token), &pool);
+        env.storage().instance().set(&DataKey::Pool(token.clone()), &pool);
+        env.storage().instance().set(&DataKey::TrancheEnabled(token), &true);
     }
 
     pub fn get_pool(env: Env, token: Address) -> TranchePool {
@@ -284,21 +286,25 @@ impl TrancheContract {
 
         Self::validate_config(&env, &config);
 
-        if env
+        let pool = if let Some(existing) = env
             .storage()
             .instance()
-            .has(&DataKey::Pool(token.clone()))
+            .get::<DataKey, TranchePool>(&DataKey::Pool(token.clone()))
         {
-            panic_with_error!(&env, TrancheError::AlreadyInitialized);
-        }
-
-        let pool = TranchePool {
-            token: token.clone(),
-            senior_share_token,
-            junior_share_token,
-            config,
-            senior: TrancheAccounting::default(),
-            junior: TrancheAccounting::default(),
+            let mut p = existing;
+            p.senior_share_token = senior_share_token;
+            p.junior_share_token = junior_share_token;
+            p.config = config;
+            p
+        } else {
+            TranchePool {
+                token: token.clone(),
+                senior_share_token,
+                junior_share_token,
+                config,
+                senior: TrancheAccounting::default(),
+                junior: TrancheAccounting::default(),
+            }
         };
 
         env.storage()
@@ -399,6 +405,7 @@ impl TrancheContract {
             hypothetical_repayment,
             exposure.senior_deployed,
             pool.config.senior_target_yield_bps,
+            pool.config.junior_first_loss_bps,
             elapsed_secs,
         )
     }
