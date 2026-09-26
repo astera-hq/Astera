@@ -420,7 +420,7 @@ impl AccessControlContract {
         super_admin_signers: Vec<Address>,
         super_admin_threshold: u32,
         proposal_expiry_secs: u64,
-        proposal_execution_timelock_secs: u64,
+        proposal_timelock_secs: u64,
     ) -> Result_ {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(AccessControlError::AlreadyInitialized);
@@ -447,10 +447,9 @@ impl AccessControlContract {
         env.storage()
             .instance()
             .set(&DataKey::ProposalExpirySecs, &proposal_expiry_secs);
-        env.storage().instance().set(
-            &DataKey::ProposalExecutionTimelock,
-            &proposal_execution_timelock_secs,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalExecutionTimelock, &proposal_timelock_secs);
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &0u64);
@@ -1176,7 +1175,7 @@ impl AccessControlContract {
     }
 
     fn validate_config(signers: &Vec<Address>, threshold: u32) -> Result_ {
-        if signers.len() > MAX_SIGNERS_PER_ROLE as usize {
+        if signers.len() as u32 > MAX_SIGNERS_PER_ROLE {
             return Err(AccessControlError::MaxSignersExceeded);
         }
         if threshold == 0 || threshold > signers.len() {
@@ -1199,18 +1198,23 @@ impl AccessControlContract {
     pub fn prune_proposal(env: Env, proposal_id: u64) -> Result_ {
         bump_instance(&env);
         let proposal: Proposal = env
+            .storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)?;
 
         match proposal.status {
             ProposalStatus::Executed | ProposalStatus::Rejected => {
-                env.persistent().remove(&DataKey::Proposal(proposal_id));
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::Proposal(proposal_id));
                 Ok(())
             }
             ProposalStatus::Pending | ProposalStatus::Approved => {
                 if env.ledger().timestamp() > proposal.expires_at {
-                    env.persistent().remove(&DataKey::Proposal(proposal_id));
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::Proposal(proposal_id));
                     Ok(())
                 } else {
                     Err(AccessControlError::ProposalNotPending)

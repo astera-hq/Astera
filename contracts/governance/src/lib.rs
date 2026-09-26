@@ -79,8 +79,8 @@ pub enum PoolAction {
     SetPoolOracleContract(Address),
     SetPoolOracleStaleThreshold(u64),
     SetPoolFallbackPrice(Address, i128),
-    SetPoolRateBounds(Address, i128, i128),
-    SetPoolExchangeRate(Address, i128),
+    SetPoolRateBounds(Address, u32, u32),
+    SetPoolExchangeRate(Address, u32),
     SetPoolComplianceRegistry(Address),
     SetPoolRequireComplianceCheck(bool),
     SetPoolReferralRegistry(Address),
@@ -246,66 +246,47 @@ pub enum DataKey {
 // #1038: Cross-contract client traits for governance-gated parameter changes
 #[contractclient(name = "PoolClient")]
 pub trait PoolContract {
+    // Names mirror the pool contract's entrypoints. Long `_via_governance`
+    // names were shortened to `_gov` to fit Soroban's 32-char limit.
     fn set_yield_via_governance(env: Env, governance: Address, new_yield_bps: u32);
-    fn set_yield_change_policy_via_governance(env: Env, governance: Address, cooldown_secs: u64);
+    fn set_yield_change_policy_gov(env: Env, governance: Address, cooldown_secs: u64);
     fn set_factoring_fee_via_governance(env: Env, governance: Address, factoring_fee_bps: u32);
     fn set_treasury_via_governance(env: Env, governance: Address, treasury: Address);
-    fn set_max_utilization_via_governance(env: Env, governance: Address, max_bps: u32);
-    fn set_oracle_contract_via_governance(env: Env, governance: Address, oracle: Address);
+    fn set_max_utilization_gov(env: Env, governance: Address, max_bps: u32);
+    fn set_oracle_contract_gov(env: Env, governance: Address, oracle: Address);
     fn set_kyc_required_via_governance(env: Env, governance: Address, required: bool);
-    fn set_compliance_registry_via_governance(env: Env, governance: Address, registry: Address);
-    fn set_require_compliance_check_via_governance(env: Env, governance: Address, required: bool);
-    fn set_referral_registry_via_governance(env: Env, governance: Address, registry: Address);
-    fn set_credit_score_contract_via_governance(
-        env: Env,
-        governance: Address,
-        credit_score_contract: Address,
-    );
-    fn set_insurance_contract_via_governance(
-        env: Env,
-        governance: Address,
-        insurance_contract: Address,
-    );
-    fn set_compound_interest_via_governance(env: Env, governance: Address, compound: bool);
-    fn set_secondary_market_contract_via_governance(
+    fn set_compliance_registry_gov(env: Env, governance: Address, registry: Address);
+    fn set_require_compliance_check_gov(env: Env, governance: Address, required: bool);
+    fn set_referral_registry_gov(env: Env, governance: Address, registry: Address);
+    fn set_credit_score_contract_gov(env: Env, governance: Address, credit_score_contract: Address);
+    fn set_insurance_contract_gov(env: Env, governance: Address, insurance_contract: Address);
+    fn set_compound_interest_gov(env: Env, governance: Address, compound: bool);
+    fn set_secondary_market_gov(
         env: Env,
         governance: Address,
         secondary_market_contract: Address,
     );
     fn set_risk_contract_via_governance(env: Env, governance: Address, risk_contract: Address);
     fn set_min_deposit_via_governance(env: Env, governance: Address, min_amount: i128);
-    fn set_max_investor_concentration_via_governance(env: Env, governance: Address, max_bps: u32);
-    fn set_upgrade_timelock_via_governance(env: Env, governance: Address, secs: u64);
-    fn set_operation_delay_via_governance(env: Env, governance: Address, secs: u64);
-    fn set_withdrawal_limits_via_governance(env: Env, governance: Address, max_bps: u32);
-    fn set_max_withdrawal_queue_age_via_governance(env: Env, governance: Address, days: u32);
-    fn set_max_withdrawal_queue_depth_via_governance(env: Env, governance: Address, depth: u32);
-    fn set_oracle_stale_threshold_via_governance(
-        env: Env,
-        governance: Address,
-        threshold_secs: u64,
-    );
+    fn set_max_investor_conc_gov(env: Env, governance: Address, max_bps: u32);
+    fn set_upgrade_timelock_gov(env: Env, governance: Address, secs: u64);
+    fn set_operation_delay_gov(env: Env, governance: Address, secs: u64);
+    fn set_withdrawal_limits_gov(env: Env, governance: Address, max_bps: u32);
+    fn set_max_wd_queue_age_gov(env: Env, governance: Address, days: u32);
+    fn set_max_wd_queue_depth_gov(env: Env, governance: Address, depth: u32);
+    fn set_oracle_stale_thresh_gov(env: Env, governance: Address, threshold_secs: u64);
     fn set_fee_tier_via_governance(env: Env, governance: Address, tier_id: u32, tier: FeeTier);
     fn set_loyalty_tiers_via_governance(env: Env, governance: Address, tiers: Vec<LoyaltyTier>);
-    fn set_fallback_price_via_governance(
-        env: Env,
-        governance: Address,
-        token: Address,
-        price: i128,
-    );
+    fn set_fallback_price_gov(env: Env, governance: Address, token: Address, price: i128);
     fn set_rate_bounds_via_governance(
         env: Env,
         governance: Address,
         token: Address,
-        min_rate: i128,
-        max_rate: i128,
+        min_bps: u32,
+        max_bps: u32,
     );
-    fn set_exchange_rate_via_governance(env: Env, governance: Address, token: Address, rate: i128);
-    fn set_collateral_config_via_governance(
-        env: Env,
-        governance: Address,
-        config: CollateralConfig,
-    );
+    fn set_exchange_rate_via_governance(env: Env, governance: Address, token: Address, rate_bps: u32);
+    fn set_collateral_config_gov(env: Env, governance: Address, config: CollateralConfig);
 }
 
 #[contractclient(name = "InvoiceClient")]
@@ -346,13 +327,11 @@ pub trait InvoiceContract {
 
 #[contractclient(name = "OracleRegistryClient")]
 pub trait OracleRegistryContract {
-    fn set_invoice_contract_via_governance(
-        env: Env,
-        governance: Address,
-        invoice_contract: Address,
-    );
+    // Names mirror the oracle_registry contract's entrypoints (shortened to
+    // fit Soroban's 32-char function-name limit).
+    fn set_invoice_contract_gov(env: Env, governance: Address, invoice_contract: Address);
     fn set_treasury_via_governance(env: Env, governance: Address, treasury: Option<Address>);
-    fn set_registry_config_via_governance(
+    fn set_registry_config_gov(
         env: Env,
         governance: Address,
         min_stake: i128,
@@ -366,8 +345,10 @@ pub trait OracleRegistryContract {
 
 #[contractclient(name = "ComplianceClient")]
 pub trait ComplianceContract {
-    fn set_rescreening_interval_via_governance(env: Env, governance: Address, secs: u64);
-    fn set_screener_timelock_via_governance(env: Env, governance: Address, secs: u64);
+    // Names mirror the compliance contract's entrypoints (shortened to fit
+    // Soroban's 32-char function-name limit).
+    fn set_rescreening_interval_gov(env: Env, governance: Address, secs: u64);
+    fn set_screener_timelock_gov(env: Env, governance: Address, secs: u64);
     // Add remaining compliance client methods as needed
 }
 
@@ -796,7 +777,7 @@ impl Governance {
                 }
                 PoolAction::SetPoolYieldChangePolicy(cooldown_secs) => {
                     PoolClient::new(env, target_contract)
-                        .set_yield_change_policy_via_governance(&this_contract, cooldown_secs);
+                        .set_yield_change_policy_gov(&this_contract, cooldown_secs);
                 }
                 PoolAction::SetPoolFactoringFee(fee_bps) => {
                     PoolClient::new(env, target_contract)
@@ -808,11 +789,11 @@ impl Governance {
                 }
                 PoolAction::SetPoolMaxUtilization(max_bps) => {
                     PoolClient::new(env, target_contract)
-                        .set_max_utilization_via_governance(&this_contract, max_bps);
+                        .set_max_utilization_gov(&this_contract, max_bps);
                 }
                 PoolAction::SetPoolOracleContract(oracle) => {
                     PoolClient::new(env, target_contract)
-                        .set_oracle_contract_via_governance(&this_contract, oracle);
+                        .set_oracle_contract_gov(&this_contract, oracle);
                 }
                 PoolAction::SetPoolKycRequired(required) => {
                     PoolClient::new(env, target_contract)
@@ -820,31 +801,31 @@ impl Governance {
                 }
                 PoolAction::SetPoolComplianceRegistry(registry) => {
                     PoolClient::new(env, target_contract)
-                        .set_compliance_registry_via_governance(&this_contract, registry);
+                        .set_compliance_registry_gov(&this_contract, registry);
                 }
                 PoolAction::SetPoolRequireComplianceCheck(required) => {
                     PoolClient::new(env, target_contract)
-                        .set_require_compliance_check_via_governance(&this_contract, required);
+                        .set_require_compliance_check_gov(&this_contract, required);
                 }
                 PoolAction::SetPoolReferralRegistry(registry) => {
                     PoolClient::new(env, target_contract)
-                        .set_referral_registry_via_governance(&this_contract, registry);
+                        .set_referral_registry_gov(&this_contract, registry);
                 }
                 PoolAction::SetPoolCreditScoreContract(credit_score) => {
                     PoolClient::new(env, target_contract)
-                        .set_credit_score_contract_via_governance(&this_contract, credit_score);
+                        .set_credit_score_contract_gov(&this_contract, credit_score);
                 }
                 PoolAction::SetPoolInsuranceContract(insurance) => {
                     PoolClient::new(env, target_contract)
-                        .set_insurance_contract_via_governance(&this_contract, insurance);
+                        .set_insurance_contract_gov(&this_contract, insurance);
                 }
                 PoolAction::SetPoolCompoundInterest(compound) => {
                     PoolClient::new(env, target_contract)
-                        .set_compound_interest_via_governance(&this_contract, compound);
+                        .set_compound_interest_gov(&this_contract, compound);
                 }
                 PoolAction::SetPoolSecondaryMarketContract(sm) => {
                     PoolClient::new(env, target_contract)
-                        .set_secondary_market_contract_via_governance(&this_contract, sm);
+                        .set_secondary_market_gov(&this_contract, sm);
                 }
                 PoolAction::SetPoolRiskContract(risk) => {
                     PoolClient::new(env, target_contract)
@@ -856,31 +837,31 @@ impl Governance {
                 }
                 PoolAction::SetPoolMaxInvestorConcentration(max_bps) => {
                     PoolClient::new(env, target_contract)
-                        .set_max_investor_concentration_via_governance(&this_contract, max_bps);
+                        .set_max_investor_conc_gov(&this_contract, max_bps);
                 }
                 PoolAction::SetPoolUpgradeTimelock(secs) => {
                     PoolClient::new(env, target_contract)
-                        .set_upgrade_timelock_via_governance(&this_contract, secs);
+                        .set_upgrade_timelock_gov(&this_contract, secs);
                 }
                 PoolAction::SetPoolOperationDelay(secs) => {
                     PoolClient::new(env, target_contract)
-                        .set_operation_delay_via_governance(&this_contract, secs);
+                        .set_operation_delay_gov(&this_contract, secs);
                 }
                 PoolAction::SetPoolWithdrawalLimits(max_bps) => {
                     PoolClient::new(env, target_contract)
-                        .set_withdrawal_limits_via_governance(&this_contract, max_bps);
+                        .set_withdrawal_limits_gov(&this_contract, max_bps);
                 }
                 PoolAction::SetPoolMaxWithdrawalQueueAge(days) => {
                     PoolClient::new(env, target_contract)
-                        .set_max_withdrawal_queue_age_via_governance(&this_contract, days);
+                        .set_max_wd_queue_age_gov(&this_contract, days);
                 }
                 PoolAction::SetPoolMaxWithdrawalQueueDepth(depth) => {
                     PoolClient::new(env, target_contract)
-                        .set_max_withdrawal_queue_depth_via_governance(&this_contract, depth);
+                        .set_max_wd_queue_depth_gov(&this_contract, depth);
                 }
                 PoolAction::SetPoolOracleStaleThreshold(threshold_secs) => {
                     PoolClient::new(env, target_contract)
-                        .set_oracle_stale_threshold_via_governance(&this_contract, threshold_secs);
+                        .set_oracle_stale_thresh_gov(&this_contract, threshold_secs);
                 }
                 PoolAction::SetPoolFeeTier(tier_id, tier) => {
                     PoolClient::new(env, target_contract).set_fee_tier_via_governance(
@@ -894,18 +875,18 @@ impl Governance {
                         .set_loyalty_tiers_via_governance(&this_contract, tiers);
                 }
                 PoolAction::SetPoolFallbackPrice(token, price) => {
-                    PoolClient::new(env, target_contract).set_fallback_price_via_governance(
+                    PoolClient::new(env, target_contract).set_fallback_price_gov(
                         &this_contract,
                         token,
                         price,
                     );
                 }
-                PoolAction::SetPoolRateBounds(token, min_rate, max_rate) => {
+                PoolAction::SetPoolRateBounds(token, min_bps, max_bps) => {
                     PoolClient::new(env, target_contract).set_rate_bounds_via_governance(
                         &this_contract,
                         token,
-                        min_rate,
-                        max_rate,
+                        min_bps,
+                        max_bps,
                     );
                 }
                 PoolAction::SetPoolExchangeRate(token, rate) => {
@@ -917,7 +898,7 @@ impl Governance {
                 }
                 PoolAction::SetPoolCollateralConfig(config) => {
                     PoolClient::new(env, target_contract)
-                        .set_collateral_config_via_governance(&this_contract, config);
+                        .set_collateral_config_gov(&this_contract, config);
                 }
             },
 
@@ -1005,7 +986,7 @@ impl Governance {
             GovernanceAction::OracleRegistry(oracle_action) => match oracle_action {
                 OracleRegistryAction::SetOracleRegistryInvoiceContract(invoice_contract) => {
                     OracleRegistryClient::new(env, target_contract)
-                        .set_invoice_contract_via_governance(&this_contract, invoice_contract);
+                        .set_invoice_contract_gov(&this_contract, invoice_contract);
                 }
                 OracleRegistryAction::SetOracleRegistryTreasury(treasury) => {
                     OracleRegistryClient::new(env, target_contract)
@@ -1019,7 +1000,7 @@ impl Governance {
                     deregister_cooldown_secs,
                 ) => {
                     OracleRegistryClient::new(env, target_contract)
-                        .set_registry_config_via_governance(
+                        .set_registry_config_gov(
                             &this_contract,
                             min_stake,
                             required_votes,
@@ -1038,11 +1019,11 @@ impl Governance {
             GovernanceAction::Compliance(compliance_action) => match compliance_action {
                 ComplianceAction::SetComplianceRescreeningInterval(secs) => {
                     ComplianceClient::new(env, target_contract)
-                        .set_rescreening_interval_via_governance(&this_contract, secs);
+                        .set_rescreening_interval_gov(&this_contract, secs);
                 }
                 ComplianceAction::SetComplianceScreenerTimelock(secs) => {
                     ComplianceClient::new(env, target_contract)
-                        .set_screener_timelock_via_governance(&this_contract, secs);
+                        .set_screener_timelock_gov(&this_contract, secs);
                 }
             },
         }
