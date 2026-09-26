@@ -483,6 +483,11 @@ fn test_append_history_fifo_trim_at_max_entries() {
     env.mock_all_auths();
     let (client, admin) = setup(&env);
     client.set_screener_timelock(&admin, &0u64);
+    // The rescreening-interval guard rejects re-screening the same subject
+    // within the interval (default: 180 days). Use the minimum interval so
+    // the back-to-back submissions below (100 secs apart) are accepted and
+    // the FIFO trimming itself is what's under test.
+    client.set_rescreening_interval(&admin, &1u64);
     let screener = Address::generate(&env);
     client.register_screener(&admin, &screener);
     let subject = Address::generate(&env);
@@ -504,7 +509,7 @@ fn test_append_history_fifo_trim_at_max_entries() {
     }
 
     // Get history and verify we have exactly 64 entries
-    let history1 = client.get_address_history(&subject);
+    let history1 = client.get_screening_history(&subject);
     assert_eq!(history1.len(), 64);
     assert_eq!(history1.get(0).unwrap().reason_code, 0u32); // First entry is entry 0
 
@@ -521,7 +526,7 @@ fn test_append_history_fifo_trim_at_max_entries() {
     );
 
     // Verify history still has 64 entries (oldest dropped)
-    let history2 = client.get_address_history(&subject);
+    let history2 = client.get_screening_history(&subject);
     assert_eq!(history2.len(), 64);
     // First entry should now be entry 1 (entry 0 was dropped)
     assert_eq!(history2.get(0).unwrap().reason_code, 1u32);
