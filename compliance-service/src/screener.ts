@@ -92,6 +92,13 @@ export class MockScreener implements ScreenerProvider {
   }
 
   async screen(address: string, context: ScreenContext = {}): Promise<ScreenResult> {
+    if (!address || !address.trim()) {
+      throw new Error('address is required');
+    }
+
+    // A silent false negative is the highest-risk failure mode: it lets a sanctioned
+    // address through as if it were clean. Upstream errors must therefore surface as
+    // real exceptions instead of being converted to a "Cleared" result.
     const upper = address.toUpperCase();
 
     if (this.runtimeBlocked.has(upper) || this.blocked.has(upper)) {
