@@ -14,4 +14,5 @@ pub enum TrancheError {
     NotInitialized = 12,
     ExposureNotFound = 13,
     InvalidShareTokens = 14,
+    ContractPaused = 15,
 }
