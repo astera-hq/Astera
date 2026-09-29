@@ -6,6 +6,16 @@ use soroban_sdk::{
     Env, String, Symbol, Vec,
 };
 
+#[contracterror]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GovernanceError {
+    AlreadyInitialized = 1,
+    InvalidQuorum = 2,
+    InvalidThreshold = 3,
+    VotingPeriodTooShort = 4,
+    InvalidMinShareBalance = 5,
+}
+
 const LEDGERS_PER_DAY: u32 = 17_280;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
