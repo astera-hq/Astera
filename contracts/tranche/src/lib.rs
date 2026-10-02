@@ -64,6 +64,19 @@ impl TrancheContract {
         admin.require_auth();
     }
 
+    /// Persist a pool together with its `TrancheEnabled` flag. Both
+    /// pool-creation paths (`initialize` and `open_tranche_for_token`) go
+    /// through here so a live pool can never report
+    /// `is_tranche_enabled == false`. (#1295)
+    fn store_enabled_pool(env: &Env, token: &Address, pool: &TranchePool) {
+        env.storage()
+            .instance()
+            .set(&DataKey::Pool(token.clone()), pool);
+        env.storage()
+            .instance()
+            .set(&DataKey::TrancheEnabled(token.clone()), &true);
+    }
+
     fn require_not_paused(env: &Env) {
         if env
             .storage()
@@ -105,8 +118,7 @@ impl TrancheContract {
             junior: TrancheAccounting::default(),
         };
 
-        env.storage().instance().set(&DataKey::Pool(token.clone()), &pool);
-        env.storage().instance().set(&DataKey::TrancheEnabled(token), &true);
+        Self::store_enabled_pool(&env, &token, &pool);
     }
 
     pub fn get_pool(env: Env, token: Address) -> TranchePool {
@@ -321,12 +333,7 @@ impl TrancheContract {
             }
         };
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Pool(token.clone()), &pool);
-        env.storage()
-            .instance()
-            .set(&DataKey::TrancheEnabled(token.clone()), &true);
+        Self::store_enabled_pool(&env, &token, &pool);
 
         env.events().publish(
             (EVT, CONFIG),
