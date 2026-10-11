@@ -133,7 +133,7 @@ async function main() {
   }
 
   // #973: Store indexer state for health endpoint
-  const state = { lastProcessedLedger: (await getLatestLedger(pool)) || "0" };
+  const state = { lastProcessedLedger: (await getLatestLedger(pool)) || "0", indexerActive: true };
 
   // Start API server with state reference
   startApiServer(pool, API_PORT, state);
@@ -148,7 +148,7 @@ async function main() {
   });
 }
 
-async function pollLoop(pool: Pool, state: { lastProcessedLedger: string }) {
+async function pollLoop(pool: Pool, state: { lastProcessedLedger: string; indexerActive?: boolean }) {
   let cursor = await getLatestLedger(pool);
 
   // #976: Apply lookback window on startup to catch any events missed during downtime
@@ -171,6 +171,7 @@ async function pollLoop(pool: Pool, state: { lastProcessedLedger: string }) {
   const ALERT_THRESHOLD = 10;
 
   let consecutiveFailures = 0;
+      state.indexerActive = true;
 
   while (true) {
     try {
@@ -270,10 +271,12 @@ async function pollLoop(pool: Pool, state: { lastProcessedLedger: string }) {
       }
 
       consecutiveFailures = 0;
+      state.indexerActive = true;
 
       await new Promise((resolve) => setTimeout(resolve, POLLING_INTERVAL_MS));
     } catch (error) {
       consecutiveFailures++;
+      state.indexerActive = consecutiveFailures < ALERT_THRESHOLD;
       pollErrorsTotal.inc();
 
       const delay = Math.min(
