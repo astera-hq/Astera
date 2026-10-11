@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { notificationService } from '@/lib/notifications';
 import type { NotificationAlert } from '@/lib/notifications';
 import { useTranslations } from 'next-intl';
@@ -28,6 +28,8 @@ export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [hasNew, setHasNew] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const bellButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const unsub = notificationService.subscribe((alert) => {
@@ -50,6 +52,57 @@ export default function NotificationBell() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open]);
 
+  // Manage focus when dialog opens or closes
+  useEffect(() => {
+    if (open) {
+      const firstFocusable = dialogRef.current?.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (firstFocusable) {
+        firstFocusable.focus();
+      } else {
+        dialogRef.current?.focus();
+      }
+    }
+  }, [open]);
+
+  // Keyboard navigation & accessibility (Escape dismiss and focus trap)
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (!open) return;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setOpen(false);
+        bellButtonRef.current?.focus();
+        return;
+      }
+
+      if (e.key === 'Tab' && dialogRef.current) {
+        const focusableElements = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusableElements.length === 0) return;
+
+        const firstElement = focusableElements[0];
+        const lastElement = focusableElements[focusableElements.length - 1];
+
+        if (e.shiftKey) {
+          if (document.activeElement === firstElement) {
+            e.preventDefault();
+            lastElement.focus();
+          }
+        } else {
+          if (document.activeElement === lastElement) {
+            e.preventDefault();
+            firstElement.focus();
+          }
+        }
+      }
+    },
+    [open]
+  );
+
   function handleOpen() {
     setOpen((prev) => !prev);
     setHasNew(false);
@@ -58,17 +111,19 @@ export default function NotificationBell() {
   function clearAll() {
     setNotifications([]);
     setOpen(false);
+    bellButtonRef.current?.focus();
   }
 
   const unreadCount = notifications.length;
 
   return (
-    <div className="relative" ref={panelRef}>
+    <div className="relative" ref={panelRef} onKeyDown={handleKeyDown}>
       {/* Bell button */}
       <button
+        ref={bellButtonRef}
         onClick={handleOpen}
         aria-label={unreadCount > 0 ? t('buttonUnread', { count: unreadCount }) : t('button')}
-        aria-haspopup="true"
+        aria-haspopup="dialog"
         aria-expanded={open}
         className="relative p-2 rounded-lg text-brand-muted hover:text-white hover:bg-brand-card transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold"
       >
@@ -103,9 +158,12 @@ export default function NotificationBell() {
       {/* Dropdown panel */}
       {open && (
         <div
+          ref={dialogRef}
           role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
           aria-label={t('dialog')}
-          className="absolute right-0 mt-2 w-80 max-h-[420px] flex flex-col bg-brand-card border border-brand-border rounded-2xl shadow-2xl z-[200] overflow-hidden"
+          className="absolute right-0 mt-2 w-80 max-h-[420px] flex flex-col bg-brand-card border border-brand-border rounded-2xl shadow-2xl z-[200] overflow-hidden focus:outline-none"
         >
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-brand-border shrink-0">
@@ -113,7 +171,7 @@ export default function NotificationBell() {
             {notifications.length > 0 && (
               <button
                 onClick={clearAll}
-                className="text-xs text-brand-muted hover:text-white transition-colors"
+                className="text-xs text-brand-muted hover:text-white transition-colors focus:outline-none focus-visible:underline"
               >
                 {t('clearAll')}
               </button>
