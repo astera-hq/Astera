@@ -37,7 +37,7 @@ async function getAllEvents(
 export function startApiServer(
   pool: Pool,
   port: number,
-  state?: { lastProcessedLedger: string },
+  state?: { lastProcessedLedger: string; indexerActive?: boolean },
 ): void {
   const app = express();
   app.use(express.json());
@@ -71,12 +71,13 @@ export function startApiServer(
       const lastProcessedLedger =
         state?.lastProcessedLedger || latestStoredLedger || null;
 
+      const isIndexerActive = state?.indexerActive !== undefined ? state.indexerActive : true;
       res.json({
-        status: "ok",
+        status: isIndexerActive ? "ok" : "degraded",
         timestamp: new Date().toISOString(),
         lastProcessedLedger,
         latestStoredLedger: latestStoredLedger ? Number(latestStoredLedger) : null,
-        indexerActive: true,
+        indexerActive: isIndexerActive,
       });
     } catch (err: any) {
       res.status(500).json({
