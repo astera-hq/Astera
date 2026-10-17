@@ -1,16 +1,23 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
+import { setStoredLocale } from '@/lib/i18n';
 
-// Mock usePathname from next/navigation to control the active link.
+// Mock usePathname and useRouter from next/navigation
 const mockPathname = jest.fn();
+const mockRefresh = jest.fn();
 jest.mock('next/navigation', () => ({
   usePathname: () => mockPathname(),
-  useRouter: () => ({ refresh: jest.fn() }),
+  useRouter: () => ({ refresh: mockRefresh }),
 }));
 
+jest.mock('@/lib/i18n', () => ({
+  setStoredLocale: jest.fn(),
+}));
+
+let currentLocale = 'en';
 jest.mock('next-intl', () => ({
-  useLocale: () => 'en',
+  useLocale: () => currentLocale,
   useTranslations: () => (key: string) => {
     const map: Record<string, string> = {
       dashboard: 'Dashboard',
@@ -57,6 +64,14 @@ jest.mock('@/components/ThemeToggle', () => ({
   __esModule: true,
   default: () => <div data-testid="stub-theme-toggle" />,
 }));
+jest.mock('@/components/NetworkIndicator', () => ({
+  __esModule: true,
+  default: () => <div data-testid="stub-network-indicator" />,
+}));
+jest.mock('@/components/NetworkMismatchBanner', () => ({
+  __esModule: true,
+  default: () => <div data-testid="stub-network-mismatch-banner" />,
+}));
 
 // Don't pull in Freighter/contracts via the store consumers above.
 jest.mock('@/lib/contracts', () => ({}));
@@ -93,5 +108,38 @@ describe('Navbar', () => {
     expect(screen.getAllByRole('link', { name: 'Invest' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('link', { name: 'Portfolio' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('link', { name: 'New Invoice' }).length).toBeGreaterThan(0);
+  });
+
+  describe('LanguageSelector (#1529)', () => {
+    it('renders EN, FR, and ES language selector buttons', () => {
+      mockPathname.mockReturnValue('/');
+      render(<Navbar />);
+      const enButtons = screen.getAllByRole('button', { name: 'English' });
+      const frButtons = screen.getAllByRole('button', { name: 'Français' });
+      const esButtons = screen.getAllByRole('button', { name: 'Español' });
+      expect(enButtons.length).toBeGreaterThan(0);
+      expect(frButtons.length).toBeGreaterThan(0);
+      expect(esButtons.length).toBeGreaterThan(0);
+      expect(esButtons[0]).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('sets stored locale to es and refreshes router on Spanish button click', () => {
+      mockPathname.mockReturnValue('/');
+      render(<Navbar />);
+      const esButtons = screen.getAllByRole('button', { name: 'Español' });
+      fireEvent.click(esButtons[0]);
+      expect(setStoredLocale).toHaveBeenCalledWith('es');
+      expect(mockRefresh).toHaveBeenCalled();
+    });
+
+    it('applies active styling to the ES button when current locale is es', () => {
+      currentLocale = 'es';
+      mockPathname.mockReturnValue('/');
+      render(<Navbar />);
+      const esButtons = screen.getAllByRole('button', { name: 'Español' });
+      expect(esButtons[0]).toHaveAttribute('aria-pressed', 'true');
+      expect(esButtons[0].className).toContain('bg-brand-gold text-brand-dark');
+      currentLocale = 'en';
+    });
   });
 });

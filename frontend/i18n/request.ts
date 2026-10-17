@@ -1,9 +1,9 @@
 import { getRequestConfig } from 'next-intl/server';
 
-const SUPPORTED_LOCALES = ['en', 'fr'] as const;
-type SupportedLocale = (typeof SUPPORTED_LOCALES)[number];
+export const SUPPORTED_LOCALES = ['en', 'fr', 'es'] as const;
+export type SupportedLocale = (typeof SUPPORTED_LOCALES)[number];
 
-function normalizeLocale(locale: string | undefined): SupportedLocale {
+export function normalizeLocale(locale: string | undefined): SupportedLocale {
   if (locale && (SUPPORTED_LOCALES as readonly string[]).includes(locale)) {
     return locale as SupportedLocale;
   }
