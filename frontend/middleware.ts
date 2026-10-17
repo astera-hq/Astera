@@ -20,7 +20,7 @@ const CSRF_COOKIE = 'csrf_token';
 const CSRF_HEADER = 'x-csrf-token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const WALLET_SIGNATURE_EXEMPT = new Set(['/api/auth/challenge', '/api/auth/token']);
-const SUPPORTED_LOCALES = new Set(['en', 'fr']);
+const SUPPORTED_LOCALES = new Set(['en', 'fr', 'es']);
 
 function generateToken(): string {
   return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');

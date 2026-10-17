@@ -82,16 +82,33 @@ describe('CSRF middleware (#770)', () => {
     },
   );
 
-  describe('locale preservation on deep links (#971)', () => {
+  describe('locale preservation on deep links (#971, #1529)', () => {
     it('sets NEXT_LOCALE cookie matching locale-prefixed deep link path', () => {
       const res = middleware(makeRequest('/fr/invoice/new'));
       expect(res.cookies.get('NEXT_LOCALE')?.value).toBe('fr');
+    });
+
+    it('sets NEXT_LOCALE cookie matching Spanish (es) locale-prefixed deep link path (#1529)', () => {
+      const res = middleware(makeRequest('/es/invoice/new'));
+      expect(res.cookies.get('NEXT_LOCALE')?.value).toBe('es');
     });
 
     it('does not overwrite NEXT_LOCALE cookie if it already matches deep link path', () => {
       const res = middleware(
         makeRequest('/fr/invoice/new', { cookie: 'NEXT_LOCALE=fr; csrf_token=test' }),
       );
+      expect(res.cookies.get('NEXT_LOCALE')).toBeUndefined();
+    });
+
+    it('does not overwrite NEXT_LOCALE cookie if it already matches Spanish deep link path', () => {
+      const res = middleware(
+        makeRequest('/es/invoice/new', { cookie: 'NEXT_LOCALE=es; csrf_token=test' }),
+      );
+      expect(res.cookies.get('NEXT_LOCALE')).toBeUndefined();
+    });
+
+    it('ignores unsupported locale prefixes', () => {
+      const res = middleware(makeRequest('/de/invoice/new'));
       expect(res.cookies.get('NEXT_LOCALE')).toBeUndefined();
     });
   });

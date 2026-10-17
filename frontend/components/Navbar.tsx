@@ -46,6 +46,16 @@ function LanguageSelector() {
       >
         FR
       </button>
+      <button
+        onClick={() => handleLanguageChange('es')}
+        aria-pressed={locale === 'es'}
+        aria-label="Español"
+        className={`px-2 py-1 text-[10px] font-bold rounded transition-colors ${
+          locale === 'es' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-white'
+        }`}
+      >
+        ES
+      </button>
     </div>
   );
 }
