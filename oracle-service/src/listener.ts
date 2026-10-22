@@ -12,6 +12,12 @@ export class Listener {
   private consensusTracker?: ConsensusTracker;
   private stakingTracker?: StakingMetricsTracker;
   public processedCount = 0;
+  /**
+   * #1551: effects received but not yet fully handled, in stream order. The
+   * persisted cursor only advances past an effect once it and every effect
+   * before it have settled, so a restart replays anything still in flight.
+   */
+  private inFlight: Array<{ pagingToken?: string; settled: boolean }> = [];
 
   constructor(
     config: OracleConfig,
@@ -45,15 +51,38 @@ export class Listener {
       .cursor(cursor)
       .stream({
         onmessage: (effect: any) => {
-          this.handleEffect(effect);
-          if (effect.paging_token) {
-            this.saveCursor(effect.paging_token);
-          }
+          void this.trackEffect(effect);
         },
         onerror: (error: any) => {
           console.error('[Listener] Stream error:', error);
         }
       });
+  }
+
+  /**
+   * Handles one streamed effect and commits its paging token only after the
+   * work it triggered (e.g. an invoice verdict submission) has finished and
+   * all earlier effects have been committed too.
+   */
+  private async trackEffect(effect: any): Promise<void> {
+    const entry = { pagingToken: effect.paging_token as string | undefined, settled: false };
+    this.inFlight.push(entry);
+    try {
+      await this.handleEffect(effect);
+    } finally {
+      entry.settled = true;
+      this.commitSettledCursor();
+    }
+  }
+
+  private commitSettledCursor(): void {
+    let latest: string | undefined;
+    while (this.inFlight.length > 0 && this.inFlight[0]!.settled) {
+      latest = this.inFlight.shift()!.pagingToken ?? latest;
+    }
+    if (latest) {
+      this.saveCursor(latest);
+    }
   }
 
   private loadCursor(): string {
@@ -76,7 +105,7 @@ export class Listener {
     }
   }
 
-  private handleEffect(effect: any) {
+  private async handleEffect(effect: any): Promise<void> {
     // Check if it's a contract event
     if (effect.type !== 'contract_event' && effect.type !== 'contract') {
       return;
@@ -119,7 +148,9 @@ export class Listener {
         if (Array.isArray(value)) {
           const invoiceId = BigInt(value[0]);
           console.log(`[Listener] New invoice detected! ID: ${invoiceId}`);
-          this.verifier.verifyInvoice(invoiceId);
+          // #1551: await the verdict so the cursor is not persisted past this
+          // event until verification has actually completed.
+          await this.verifier.verifyInvoice(invoiceId);
         }
         return;
       }

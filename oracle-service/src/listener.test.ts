@@ -284,6 +284,9 @@ describe("Listener cursor persistence", () => {
     errorStub.mock.restore();
   });
 
+  // Lets the async effect handling (and its cursor commit) settle.
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
   function stubStream(listener: Listener) {
     const cursor = mock.fn((_c: string) => builder);
     const stream = mock.fn(
@@ -333,6 +336,7 @@ describe("Listener cursor persistence", () => {
         paging_token: "555-2",
       }),
     );
+    await flush();
 
     assert.equal(h.verifyInvoice.mock.calls[0].arguments[0], 77n);
     assert.equal(fs.readFileSync(cursorPath, "utf-8"), "555-2");
@@ -340,7 +344,66 @@ describe("Listener cursor persistence", () => {
     // Effects the listener ignores still advance the cursor, so a restart
     // does not re-scan them.
     onmessage({ type: "account_credited", paging_token: "556-1" });
+    await flush();
     assert.equal(fs.readFileSync(cursorPath, "utf-8"), "556-1");
+  });
+
+  it("does not persist the cursor until the invoice verification completes (#1551)", async () => {
+    const cursorPath = path.join(dir, "cursor");
+    fs.writeFileSync(cursorPath, "100-1");
+    const h = makeHarness({ listenerCursorPath: cursorPath });
+    let release!: () => void;
+    h.verifyInvoice.mock.mockImplementation(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    const { stream } = stubStream(h.listener);
+    await h.listener.start();
+
+    stream.mock.calls[0].arguments[0].onmessage(
+      effect({
+        topic: [symbol("INVOICE"), symbol("created")],
+        value: createdPayload(88n),
+        paging_token: "200-1",
+      }),
+    );
+    await flush();
+
+    // A crash here must replay the created event on restart.
+    assert.equal(h.verifyInvoice.mock.callCount(), 1);
+    assert.equal(fs.readFileSync(cursorPath, "utf-8"), "100-1");
+
+    release();
+    await flush();
+    assert.equal(fs.readFileSync(cursorPath, "utf-8"), "200-1");
+  });
+
+  it("does not advance the cursor past an earlier effect that is still in flight (#1551)", async () => {
+    const cursorPath = path.join(dir, "cursor");
+    fs.writeFileSync(cursorPath, "100-1");
+    const h = makeHarness({ listenerCursorPath: cursorPath });
+    let release!: () => void;
+    h.verifyInvoice.mock.mockImplementation(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    const { stream } = stubStream(h.listener);
+    await h.listener.start();
+    const { onmessage } = stream.mock.calls[0].arguments[0];
+
+    onmessage(
+      effect({
+        topic: [symbol("INVOICE"), symbol("created")],
+        value: createdPayload(90n),
+        paging_token: "300-1",
+      }),
+    );
+    // A later, instantly-handled effect must not skip over the pending one.
+    onmessage({ type: "account_credited", paging_token: "301-1" });
+    await flush();
+    assert.equal(fs.readFileSync(cursorPath, "utf-8"), "100-1");
+
+    release();
+    await flush();
+    assert.equal(fs.readFileSync(cursorPath, "utf-8"), "301-1");
   });
 
   it("does not overwrite the cursor for effects without a paging token", async () => {
@@ -351,6 +414,7 @@ describe("Listener cursor persistence", () => {
     await h.listener.start();
 
     stream.mock.calls[0].arguments[0].onmessage({ type: "account_credited" });
+    await flush();
     assert.equal(fs.readFileSync(cursorPath, "utf-8"), "100-1");
   });
 
@@ -367,6 +431,7 @@ describe("Listener cursor persistence", () => {
         paging_token: "1-1",
       }),
     );
+    await flush();
     assert.equal(errorStub.mock.callCount(), 1);
   });
 

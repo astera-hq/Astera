@@ -21,7 +21,11 @@ function isRegistryPausedError(error: unknown): boolean {
 
 /** Simple queue for managing concurrent invoice verification jobs */
 class VerificationQueue {
-  private queue: bigint[] = [];
+  private queue: Array<{
+    invoiceId: bigint;
+    handler: (id: bigint) => Promise<void>;
+    done: () => void;
+  }> = [];
   private running: number = 0;
   private readonly maxConcurrency: number;
 
@@ -29,29 +33,32 @@ class VerificationQueue {
     this.maxConcurrency = maxConcurrency;
   }
 
-  async enqueue(invoiceId: bigint, handler: (id: bigint) => Promise<void>): Promise<void> {
-    this.queue.push(invoiceId);
-    await this.process(handler);
+  /**
+   * Resolves once this invoice's handler has finished (#1551), even when the
+   * job had to wait for a free slot, so callers can tell when it is safe to
+   * treat the triggering event as processed.
+   */
+  enqueue(invoiceId: bigint, handler: (id: bigint) => Promise<void>): Promise<void> {
+    return new Promise((resolve) => {
+      this.queue.push({ invoiceId, handler, done: resolve });
+      this.process();
+    });
   }
 
-  private async process(handler: (id: bigint) => Promise<void>): Promise<void> {
-    if (this.running >= this.maxConcurrency || this.queue.length === 0) {
-      return;
-    }
-
-    this.running += 1;
-    const invoiceId = this.queue.shift()!;
-
-    try {
-      await handler(invoiceId);
-    } catch (error) {
-      console.error(`[VerificationQueue] Error verifying invoice ${invoiceId}:`, error);
-    } finally {
-      this.running -= 1;
-      // Process next item if there's anything in the queue
-      if (this.queue.length > 0) {
-        setImmediate(() => this.process(handler));
-      }
+  private process(): void {
+    while (this.running < this.maxConcurrency && this.queue.length > 0) {
+      const { invoiceId, handler, done } = this.queue.shift()!;
+      this.running += 1;
+      handler(invoiceId)
+        .catch((error) => {
+          console.error(`[VerificationQueue] Error verifying invoice ${invoiceId}:`, error);
+        })
+        .finally(() => {
+          this.running -= 1;
+          done();
+          // Process next item if there's anything in the queue
+          this.process();
+        });
     }
   }
 }
