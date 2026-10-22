@@ -3598,11 +3598,14 @@ export async function buildSubmitScreeningResultTx(params: {
 export async function fetchComplianceServiceFlags(): Promise<
   Array<{ id: string; address: string; reason: string; at: string; pattern: string }>
 > {
-  const base = process.env.NEXT_PUBLIC_COMPLIANCE_SERVICE_URL ?? 'http://localhost:8081';
-  const token = process.env.NEXT_PUBLIC_COMPLIANCE_ADMIN_TOKEN ?? '';
+  // #1550: go through the server-side proxy so the compliance admin token
+  // never ships in the client bundle; it authorizes via the SEP-10 JWT.
+  const { getToken } = await import('@/lib/auth');
+  const jwt = getToken();
+  if (!jwt) return [];
   try {
-    const res = await fetch(`${base}/flags`, {
-      headers: token ? { 'x-admin-token': token } : {},
+    const res = await fetch('/api/compliance/flags', {
+      headers: { Authorization: `Bearer ${jwt}` },
       cache: 'no-store',
     });
     if (!res.ok) return [];
