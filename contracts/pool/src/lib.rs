@@ -6306,8 +6306,13 @@ impl FundingPool {
             // caught by this crate's own co-funding integration test: a
             // stuck guard makes every subsequent call, including unrelated
             // ones like `withdraw`, panic with "reentrant call").
-            if !target_met && round.committed_principal < round.min_commitment {
-                // Deadline passed, under minimum — refund everyone, no SME payout.
+            if !target_met {
+                // #904: a round that misses its principal target must never
+                // create a partially funded invoice, even if it collected
+                // more than min_commitment (including when that minimum is 0).
+                // Return each investor's exact commitment to available shares.
+                // This branch only executes after the funding deadline.
+                // No SME payout or FundedInvoice record is created.
                 let token_totals_key = DataKey::TokenTotals(round.token.clone());
                 let mut tt: PoolTokenTotals = env
                     .storage()

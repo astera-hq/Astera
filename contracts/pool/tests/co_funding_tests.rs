@@ -330,6 +330,110 @@ fn test_deadline_expiry_below_minimum_refunds_everyone() {
     );
 }
 
+
+#[test]
+fn test_deadline_expiry_above_minimum_but_below_target_refunds_everyone() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, usdc_id) = setup(&env);
+    let sme = Address::generate(&env);
+    let investors = seed_investors(&env, &client, &usdc_id, 2, 100_000);
+    let invoice_id = 904u64;
+    let deadline = env.ledger().timestamp() + 10_000;
+    let due_date = deadline + 1_000_000;
+    let mut request = default_request(
+        invoice_id,
+        usdc_id.clone(),
+        10_000,
+        sme.clone(),
+        due_date,
+        deadline,
+    );
+    request.min_commitment = 5_000;
+    client.open_co_funding(&admin, &request);
+
+    let initial_pool_value = client.get_token_totals(&usdc_id).pool_value;
+    let investor_0_before = client.get_investor_position(&investors[0], &usdc_id).0;
+    let investor_1_before = client.get_investor_position(&investors[1], &usdc_id).0;
+    let sme_before = token::Client::new(&env, &usdc_id).balance(&sme);
+
+    client.commit_to_invoice(&investors[0], &invoice_id, &2_000);
+    client.commit_to_invoice(&investors[1], &invoice_id, &4_000);
+    assert_eq!(
+        client.get_co_funding_round(&invoice_id).unwrap().committed_principal,
+        6_000,
+    );
+    env.ledger().with_mut(|l| l.timestamp = deadline + 1);
+    client.finalize_co_funding(&admin, &invoice_id);
+
+    let round = client.get_co_funding_round(&invoice_id).unwrap();
+    assert_eq!(round.status, pool::CoFundingStatus::Expired);
+    assert_eq!(round.committed_principal, 0);
+    assert_eq!(round.participants.len(), 0);
+    assert!(client.get_funded_invoice(&invoice_id).is_none());
+    assert_eq!(token::Client::new(&env, &usdc_id).balance(&sme), sme_before);
+    assert_eq!(client.get_token_totals(&usdc_id).pool_value, initial_pool_value);
+    assert_eq!(
+        client.get_investor_position(&investors[0], &usdc_id).0,
+        investor_0_before,
+    );
+    assert_eq!(
+        client.get_investor_position(&investors[1], &usdc_id).0,
+        investor_1_before,
+    );
+    for investor in &investors {
+        assert_eq!(client.get_co_fund_share(&invoice_id, investor), 0);
+        assert_eq!(client.get_investor_co_fund_positions(investor).len(), 0);
+    }
+    // Once expired, no second call can re-credit already refunded capital.
+    assert_eq!(
+        client.try_finalize_co_funding(&admin, &invoice_id),
+        Err(Ok(PoolError::CoFundingRoundAlreadyFinalized)),
+    );
+    assert_eq!(client.get_token_totals(&usdc_id).pool_value, initial_pool_value);
+}
+
+#[test]
+fn test_deadline_expiry_with_zero_minimum_refunds_partial_commitment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, usdc_id) = setup(&env);
+    let sme = Address::generate(&env);
+    let investors = seed_investors(&env, &client, &usdc_id, 1, 100_000);
+    let invoice_id = 905u64;
+    let deadline = env.ledger().timestamp() + 10_000;
+    // default_request uses min_commitment = 0. This is the regression:
+    // the old condition treated every positive partial commitment as funded.
+    client.open_co_funding(
+        &admin,
+        &default_request(
+            invoice_id,
+            usdc_id.clone(),
+            10_000,
+            sme.clone(),
+            deadline + 1_000_000,
+            deadline,
+        ),
+    );
+    let available_before = client.get_investor_position(&investors[0], &usdc_id).0;
+    let pool_value_before = client.get_token_totals(&usdc_id).pool_value;
+    let sme_before = token::Client::new(&env, &usdc_id).balance(&sme);
+    client.commit_to_invoice(&investors[0], &invoice_id, &1_000);
+
+    env.ledger().with_mut(|l| l.timestamp = deadline + 1);
+    client.finalize_co_funding(&admin, &invoice_id);
+
+    assert_eq!(
+        client.get_co_funding_round(&invoice_id).unwrap().status,
+        pool::CoFundingStatus::Expired,
+    );
+    assert_eq!(client.get_investor_position(&investors[0], &usdc_id).0, available_before);
+    assert_eq!(client.get_co_fund_share(&invoice_id, &investors[0]), 0);
+    assert_eq!(client.get_token_totals(&usdc_id).pool_value, pool_value_before);
+    assert_eq!(token::Client::new(&env, &usdc_id).balance(&sme), sme_before);
+    assert!(client.get_funded_invoice(&invoice_id).is_none());
+}
+
 #[test]
 fn test_double_finalize_does_not_double_pay() {
     let env = Env::default();
