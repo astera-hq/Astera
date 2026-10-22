@@ -4,7 +4,9 @@
 // idempotent finalization, per-investor caps, secondary-market transfer
 // gating, and incremental partial-repayment distribution.
 
-use pool::{FundingPool, FundingPoolClient, OpenCoFundingRequest, PoolError};
+use pool::{
+    DataKey, FundingPool, FundingPoolClient, OpenCoFundingRequest, PoolError, PoolTokenTotals,
+};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
@@ -124,6 +126,59 @@ fn default_request(
         min_commitment: 0,
         max_investor_bps: 0,
     }
+}
+
+#[test]
+fn test_investor_position_summary_aggregates_deposit_yield_and_co_funding() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, usdc_id) = setup(&env);
+    let investor = Address::generate(&env);
+    let sme = Address::generate(&env);
+
+    mint(&env, &usdc_id, &investor, 1_000);
+    client.deposit(&investor, &usdc_id, &1_000, &None);
+    client.open_co_funding(
+        &admin,
+        &default_request(
+            42,
+            usdc_id.clone(),
+            500,
+            sme,
+            env.ledger().timestamp() + 30 * 86_400,
+            env.ledger().timestamp() + 86_400,
+        ),
+    );
+    client.commit_to_invoice(&investor, &42, &400);
+
+    env.as_contract(&client.address, || {
+        let mut totals: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(usdc_id.clone()))
+            .unwrap();
+        totals.reward_per_share = 1_000_000_000_000;
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenTotals(usdc_id.clone()), &totals);
+    });
+
+    let summary = client.get_investor_position_summary(&investor);
+    assert_eq!(summary.deposits.len(), 1);
+    let deposit = summary.deposits.get(0).unwrap();
+    assert_eq!(deposit.token, usdc_id);
+    assert_eq!(deposit.deposited, 1_000);
+    assert_eq!(
+        deposit.pending_yield,
+        DummyShareClient::new(&env, &client.get_share_token(&usdc_id).unwrap()).balance(&investor)
+    );
+
+    assert_eq!(summary.co_funding.len(), 1);
+    let commitment = summary.co_funding.get(0).unwrap();
+    assert_eq!(commitment.invoice_id, 42);
+    assert_eq!(commitment.token, usdc_id);
+    assert_eq!(commitment.principal_share, 400);
+    assert_eq!(commitment.share_bps, 8_000);
 }
 
 #[test]
