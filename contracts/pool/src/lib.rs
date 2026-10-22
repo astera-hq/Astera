@@ -436,6 +436,33 @@ pub struct DepositInfo {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvestorTokenPositionSummary {
+    pub token: Address,
+    pub deposited: i128,
+    pub available_shares: i128,
+    pub deployed_shares: i128,
+    pub earned: i128,
+    pub pending_yield: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvestorCoFundingPositionSummary {
+    pub invoice_id: u64,
+    pub token: Address,
+    pub principal_share: i128,
+    pub share_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvestorPositionSummary {
+    pub deposits: Vec<InvestorTokenPositionSummary>,
+    pub co_funding: Vec<InvestorCoFundingPositionSummary>,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct FundedInvoice {
     pub invoice_id: u64,
@@ -1167,6 +1194,73 @@ fn loyalty_days_active(env: &Env, loyalty_start_at: u64) -> u64 {
         return 0;
     }
     env.ledger().timestamp().saturating_sub(loyalty_start_at) / SECS_PER_DAY
+}
+
+fn calculate_pending_yield(
+    env: &Env,
+    investor: &Address,
+    token: &Address,
+    totals: &PoolTokenTotals,
+) -> PoolResult<(i128, i128)> {
+    let last_rps: i128 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::InvestorRewardSnapshot(
+            investor.clone(),
+            token.clone(),
+        ))
+        .unwrap_or(0);
+    let share_token: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::ShareToken(token.clone()))
+        .ok_or(PoolError::ShareTokenNotConfigured)?;
+    let investor_shares: i128 = env.invoke_contract(
+        &share_token,
+        &Symbol::new(env, "balance"),
+        {
+            let mut args = Vec::new(env);
+            args.push_back(investor.clone().into_val(env));
+            args
+        },
+    );
+    let claimable = if investor_shares > 0 && totals.reward_per_share > last_rps {
+        (totals.reward_per_share - last_rps)
+            .checked_mul(investor_shares)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(REWARD_PRECISION)
+            .ok_or(PoolError::AmountOverflow)?
+    } else {
+        0
+    };
+
+    let mut bonus = 0;
+    if claimable > 0 {
+        let position: InvestorPosition = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InvestorPosition(
+                investor.clone(),
+                token.clone(),
+            ))
+            .unwrap_or_default();
+        let config = get_config_cached(env)?;
+        if config.yield_bps > 0 {
+            let tiers = get_loyalty_tiers_cached(env);
+            let days_active = loyalty_days_active(env, position.loyalty_start_at);
+            let (_, bonus_bps, _) = resolve_loyalty_tier(&tiers, days_active);
+            if bonus_bps > 0 {
+                bonus = claimable
+                    .checked_mul(bonus_bps as i128)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .checked_div(config.yield_bps as i128)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .min(totals.protocol_revenue)
+                    .max(0);
+            }
+        }
+    }
+    Ok((claimable, bonus))
 }
 
 fn resolve_loyalty_tier(tiers: &Vec<LoyaltyTier>, days_active: u64) -> (u32, u32, Option<u32>) {
@@ -3080,56 +3174,7 @@ impl FundingPool {
                 .unwrap_or_default();
 
             let snapshot_key = DataKey::InvestorRewardSnapshot(investor.clone(), token.clone());
-            let last_rps: i128 = env.storage().persistent().get(&snapshot_key).unwrap_or(0);
-
-            let share_token: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::ShareToken(token.clone()))
-                .ok_or(PoolError::ShareTokenNotConfigured)?;
-
-            let investor_shares: i128 =
-                env.invoke_contract(&share_token, &Symbol::new(&env, "balance"), {
-                    let mut args = Vec::new(&env);
-                    args.push_back(investor.clone().into_val(&env));
-                    args
-                });
-
-            let claimable = if investor_shares > 0 && tt.reward_per_share > last_rps {
-                ((tt.reward_per_share - last_rps) * investor_shares) / REWARD_PRECISION
-            } else {
-                0
-            };
-
-            // #773: loyalty bonus — scales the yield just claimed by
-            // (bonus_bps / base yield_bps), i.e. a long-term depositor's
-            // realized yield is boosted in the same proportion their
-            // effective APY is above the pool's base rate. Funded out of
-            // protocol_revenue (the same fee pool #784's treasury draws
-            // from) and capped by whatever is actually available there, so
-            // this can never draw down other investors' principal.
-            let mut bonus: i128 = 0;
-            if claimable > 0 {
-                let position: InvestorPosition = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::InvestorPosition(investor.clone(), token.clone()))
-                    .unwrap_or_default();
-                let config = get_config_cached(&env)?;
-                if config.yield_bps > 0 {
-                    let tiers = get_loyalty_tiers_cached(&env);
-                    let days_active = loyalty_days_active(&env, position.loyalty_start_at);
-                    let (_, bonus_bps, _) = resolve_loyalty_tier(&tiers, days_active);
-                    if bonus_bps > 0 {
-                        let raw_bonus = claimable
-                            .checked_mul(bonus_bps as i128)
-                            .ok_or(PoolError::AmountOverflow)?
-                            .checked_div(config.yield_bps as i128)
-                            .ok_or(PoolError::AmountOverflow)?;
-                        bonus = raw_bonus.min(tt.protocol_revenue).max(0);
-                    }
-                }
-            }
+            let (claimable, bonus) = calculate_pending_yield(&env, &investor, &token, &tt)?;
             let total_claim = claimable
                 .checked_add(bonus)
                 .ok_or(PoolError::AmountOverflow)?;
@@ -6409,6 +6454,98 @@ impl FundingPool {
             }
         }
         out
+    }
+
+    pub fn get_investor_position_summary(
+        env: Env,
+        investor: Address,
+    ) -> Result<InvestorPositionSummary, PoolError> {
+        bump_instance(&env);
+        let tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AcceptedTokens)
+            .ok_or(PoolError::NotInitialized)?;
+        let mut deposits = Vec::new(&env);
+        for i in 0..tokens.len() {
+            let token = tokens.get(i).ok_or(PoolError::StorageCorrupted)?;
+            let position: InvestorPosition = env
+                .storage()
+                .persistent()
+                .get(&DataKey::InvestorPosition(investor.clone(), token.clone()))
+                .unwrap_or_default();
+            let totals: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&DataKey::TokenTotals(token.clone()))
+                .unwrap_or_default();
+            let (claimable, bonus) = calculate_pending_yield(&env, &investor, &token, &totals)?;
+            let pending_yield = claimable
+                .checked_add(bonus)
+                .ok_or(PoolError::AmountOverflow)?;
+            if position.deposited != 0
+                || position.available != 0
+                || position.deployed != 0
+                || position.earned != 0
+                || pending_yield != 0
+            {
+                deposits.push_back(InvestorTokenPositionSummary {
+                    token,
+                    deposited: position.deposited,
+                    available_shares: position.available,
+                    deployed_shares: position.deployed,
+                    earned: position.earned,
+                    pending_yield,
+                });
+            }
+        }
+
+        let ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoFundingRoundIds)
+            .unwrap_or(Vec::new(&env));
+        let mut co_funding = Vec::new(&env);
+        for i in 0..ids.len() {
+            let invoice_id = ids.get(i).ok_or(PoolError::StorageCorrupted)?;
+            let share_bps: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CoFundShare(invoice_id, investor.clone()))
+                .unwrap_or(0);
+            if share_bps == 0 {
+                continue;
+            }
+            let round: CoFundingRound = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CoFundingRound(invoice_id))
+                .ok_or(PoolError::StorageCorrupted)?;
+            let principal_share = if round.status == CoFundingStatus::Filled {
+                round
+                    .target_principal
+                    .checked_mul(share_bps as i128)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .checked_div(BPS_DENOM as i128)
+                    .ok_or(PoolError::AmountOverflow)?
+            } else {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::CoFundCommitted(invoice_id, investor.clone()))
+                    .unwrap_or(0)
+            };
+            co_funding.push_back(InvestorCoFundingPositionSummary {
+                invoice_id,
+                token: round.token,
+                principal_share,
+                share_bps,
+            });
+        }
+
+        Ok(InvestorPositionSummary {
+            deposits,
+            co_funding,
+        })
     }
 
     pub fn get_co_fund_share(env: Env, invoice_id: u64, investor: Address) -> u32 {

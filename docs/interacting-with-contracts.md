@@ -162,6 +162,7 @@ The main contract managing pool operations, investor positions, and capital depl
 - `estimate_repayment(invoice_id)` — View the current amount owed including accrued interest
 - `estimate_deposit_yield(token, amount, horizon_secs)` — Preview the interest a deposit would earn over a horizon at the current utilization and rate, before calling `deposit`
 - `claim_yield(investor, token)` — Claim accrued yield for an investor's token position
+- `get_investor_position_summary(investor)` — Read all non-empty token deposit positions, claimable yield per token, and co-funding principal shares in one call
 - `get_token_totals(token)` — Get pool value, deployed amount, and fee totals for a token
 - `get_funded_invoice(invoice_id)` — Retrieve a funded invoice record
 - `available_liquidity(token)` — Get uninvested token balance available for new invoices
@@ -171,6 +172,8 @@ The main contract managing pool operations, investor positions, and capital depl
 - `get_config()` — Retrieve pool configuration (fees, yield, rate model settings)
 - `set_factoring_fee(admin, fee_bps)` — Update the factoring fee in basis points
 - `get_storage_stats()` — Get funded invoice counts and totals
+
+`get_investor_position_summary(investor)` returns `deposits` (one entry per token with a non-empty position or pending yield) and `co_funding` (one entry per invoice). Each deposit entry includes the token's pending yield; amounts remain denominated in their respective tokens.
 
 ## Tranche Contract
 
