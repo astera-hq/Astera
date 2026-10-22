@@ -33,6 +33,8 @@ const config: ComplianceConfig = {
   screeningProviderApiKey: process.env.SCREENING_PROVIDER_API_KEY || '',
   screeningProviderTimeoutMs: parseInt(process.env.SCREENING_PROVIDER_TIMEOUT_MS || '5000', 10),
   rescreenCheckIntervalMs: parseInt(process.env.RESCREEN_CHECK_INTERVAL_MS || String(60 * 60 * 1000), 10),
+  horizonTimeoutMs: parseInt(process.env.HORIZON_TIMEOUT_MS || '10000', 10),
+  trackedSubjectsPath: process.env.TRACKED_SUBJECTS_PATH || '.compliance-tracked-subjects.json',
 };
 
 const screener: ScreenerProvider = config.screeningProviderUrl

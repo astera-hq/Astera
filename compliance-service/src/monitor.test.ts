@@ -1,3 +1,5 @@
+import * as os from 'os';
+import * as path from 'path';
 import { Monitor } from './monitor';
 import type { ComplianceConfig } from './types';
 
@@ -19,6 +21,8 @@ describe('Monitor', () => {
     screeningProviderApiKey: '',
     screeningProviderTimeoutMs: 5000,
     rescreenCheckIntervalMs: 60000,
+    horizonTimeoutMs: 50,
+    trackedSubjectsPath: path.join(os.tmpdir(), 'unused-tracked-subjects.json'),
   };
 
   it('calls request_review with the expected arguments when a flagged pattern is detected', async () => {

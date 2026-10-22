@@ -20,9 +20,12 @@ fires.
     errors surface as errors rather than being treated as "Cleared".
 - **Monitor** (`src/monitor.ts`) — polls Horizon `/operations` every 5s for
   `invoke_host_function` calls against the pool contract and applies the
-  structuring / rapid-cycle heuristics. It also re-screens subjects that were
-  screened on-chain through this service once their clearance expires
-  (#982). The monitor only starts when both `COMPLIANCE_SCREENER_SECRET_KEY`
+  structuring / rapid-cycle heuristics. Each poll is aborted after
+  `HORIZON_TIMEOUT_MS` so a hung Horizon endpoint cannot stall the loop
+  (#1552). It also re-screens subjects that were screened on-chain through
+  this service once their clearance expires (#982). The re-screening list is
+  persisted to `TRACKED_SUBJECTS_PATH` and, on startup, rebuilt from that file
+  plus this screener's on-chain `get_screener_submissions` history (#1553). The monitor only starts when both `COMPLIANCE_SCREENER_SECRET_KEY`
   and `COMPLIANCE_CONTRACT_ID` are set; otherwise the REST API still runs and
   screening works offline, but nothing is submitted on-chain.
 
@@ -66,6 +69,8 @@ npm test
 | `SCREENING_PROVIDER_API_KEY`     | no              | —                                     | Sent to the provider as `Authorization: Bearer <key>`                                                          |
 | `SCREENING_PROVIDER_TIMEOUT_MS`  | no              | `5000`                                | Hard timeout on upstream provider calls                                                                        |
 | `RESCREEN_CHECK_INTERVAL_MS`     | no              | `3600000` (1h)                        | How often the monitor checks tracked subjects against `get_rescreening_interval` / their record's `expires_at` |
+| `HORIZON_TIMEOUT_MS`             | no              | `10000`                               | Hard timeout on each Horizon `/operations` poll; a timed-out poll is logged and retried on the next tick       |
+| `TRACKED_SUBJECTS_PATH`          | no              | `.compliance-tracked-subjects.json`   | File where the monitor persists the addresses it periodically re-screens, so they survive a restart            |
 
 ## Admin authentication
 

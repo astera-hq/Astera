@@ -50,3 +50,6 @@ contracts/**/test_snapshots/
 
 # Proptest regression artifacts (generated)
 contracts/**/*.proptest-regressions/
+
+# Compliance service runtime state (#1553)
+compliance-service/.compliance-tracked-subjects.json

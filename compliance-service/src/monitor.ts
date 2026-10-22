@@ -3,6 +3,7 @@
  * patterns and calls compliance.request_review on-chain when triggered.
  */
 
+import * as fs from 'fs';
 import { Keypair, TransactionBuilder, BASE_FEE, Contract, rpc as StellarRpc, Address, nativeToScVal, scValToNative } from '@stellar/stellar-sdk';
 import type { ComplianceConfig, MonitorAlert } from './types';
 
@@ -37,7 +38,74 @@ export class Monitor {
 
   /** Register an address whose clearance should be periodically re-checked. */
   trackSubject(address: string): void {
+    if (this.trackedSubjects.has(address)) return;
     this.trackedSubjects.add(address);
+    this.saveTrackedSubjects();
+  }
+
+  /** Addresses currently covered by periodic re-screening. */
+  listTrackedSubjects(): string[] {
+    return [...this.trackedSubjects];
+  }
+
+  /**
+   * #1553: rebuilds the re-screening set after a restart from the persisted
+   * file plus this screener's on-chain submission history, so coverage for
+   * previously screened addresses is not silently dropped.
+   */
+  async restoreTrackedSubjects(): Promise<void> {
+    const fromDisk = this.loadTrackedSubjects();
+    for (const address of fromDisk) this.trackedSubjects.add(address);
+
+    let fromChain = 0;
+    if (this.config.complianceContractId) {
+      try {
+        const submissions = (await this.readContract('get_screener_submissions', [
+          new Address(this.keypair.publicKey()).toScVal(),
+        ])) as Array<Record<string, unknown>> | null;
+        for (const entry of submissions ?? []) {
+          const address = String(entry.subject_address ?? '');
+          if (address && !this.trackedSubjects.has(address)) {
+            this.trackedSubjects.add(address);
+            fromChain += 1;
+          }
+        }
+      } catch (err) {
+        console.error('[monitor] could not reseed tracked subjects from on-chain submissions:', err);
+      }
+    }
+
+    if (fromChain > 0) this.saveTrackedSubjects();
+    console.log(
+      `[monitor] tracking ${this.trackedSubjects.size} subject(s) for re-screening ` +
+        `(${fromDisk.length} from ${this.config.trackedSubjectsPath}, ${fromChain} reseeded from chain)`,
+    );
+  }
+
+  private loadTrackedSubjects(): string[] {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.config.trackedSubjectsPath, 'utf-8');
+    } catch {
+      // No file yet (first run, or it was deleted) — start empty.
+      return [];
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((a): a is string => typeof a === 'string' && a !== '');
+      console.error(`[monitor] ignoring malformed tracked subjects file ${this.config.trackedSubjectsPath}`);
+    } catch (err) {
+      console.error(`[monitor] ignoring unreadable tracked subjects file ${this.config.trackedSubjectsPath}:`, err);
+    }
+    return [];
+  }
+
+  private saveTrackedSubjects(): void {
+    try {
+      fs.writeFileSync(this.config.trackedSubjectsPath, JSON.stringify([...this.trackedSubjects]), 'utf-8');
+    } catch (err) {
+      console.error('[monitor] failed to persist tracked subjects:', err);
+    }
   }
 
   /** Install the callback invoked when a tracked subject is due for re-screening. */
@@ -50,6 +118,7 @@ export class Monitor {
   }
 
   async start(): Promise<void> {
+    await this.restoreTrackedSubjects();
     this.running = true;
     console.log('[monitor] starting Horizon poll loop');
     void this.pollLoop();
@@ -78,11 +147,23 @@ export class Monitor {
     url.searchParams.set('cursor', this.cursor);
     url.searchParams.set('include_failed', 'false');
 
-    const res = await fetch(url.toString());
-    if (!res.ok) return;
-    const body = (await res.json()) as {
-      _embedded?: { records?: Array<Record<string, unknown>> };
-    };
+    // #1552: bound the request so a slow or hung Horizon endpoint cannot
+    // stall the poll loop indefinitely (mirrors HttpScreenerProvider.screen).
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.config.horizonTimeoutMs);
+    let body: { _embedded?: { records?: Array<Record<string, unknown>> } };
+    try {
+      const res = await fetch(url.toString(), { signal: controller.signal });
+      if (!res.ok) return;
+      body = (await res.json()) as typeof body;
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`Horizon poll timed out after ${this.config.horizonTimeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
     const records = body._embedded?.records ?? [];
     for (const rec of records) {
       this.cursor = String(rec.paging_token ?? this.cursor);

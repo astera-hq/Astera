@@ -23,6 +23,10 @@ export interface ComplianceConfig {
   screeningProviderTimeoutMs: number;
   /** How often (ms) the monitor checks tracked subjects against get_rescreening_interval. */
   rescreenCheckIntervalMs: number;
+  /** Hard timeout (ms) on each Horizon `/operations` poll made by the monitor. */
+  horizonTimeoutMs: number;
+  /** File where the monitor persists the set of subjects it periodically re-screens. */
+  trackedSubjectsPath: string;
 }
 
 export type RiskTier = 'Low' | 'Medium' | 'High';
