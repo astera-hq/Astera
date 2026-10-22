@@ -1083,8 +1083,9 @@ mod test {
         // so a query at or before it now finds no surviving entry.
         assert_eq!(client.balance_at(&alice, &1_000), 0);
 
-        // The oldest surviving checkpoint (ts = 1_001) still resolves.
-        assert_eq!(client.balance_at(&alice, &1_001), 1);
+        // The oldest surviving checkpoint (ts = 1_001) still resolves. It holds
+        // the balance after the second mint (the first mint at ts = 1_000 was evicted).
+        assert_eq!(client.balance_at(&alice, &1_001), 2);
 
         // Recent history is untouched by eviction.
         let last_ts = 1_000 + MAX_CHECKPOINTS as u64;
