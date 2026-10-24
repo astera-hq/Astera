@@ -531,3 +531,23 @@ fn test_get_listing_nonexistent_returns_none() {
     let (_pool_client, market_client, _admin, _usdc) = setup(&env);
     assert!(market_client.get_listing(&9999u64).is_none());
 }
+
+#[test]
+#[should_panic]
+fn test_initialize_requires_admin_auth() {
+    let env = Env::default(); // no mock_all_auths: admin has not authorized
+    let admin = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let id = env.register(SecondaryMarket, ());
+    SecondaryMarketClient::new(&env, &id).initialize(&admin, &pool);
+}
+
+#[test]
+fn test_initialize_succeeds_with_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let id = env.register(SecondaryMarket, ());
+    SecondaryMarketClient::new(&env, &id).initialize(&admin, &pool);
+}

@@ -6,11 +6,13 @@
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "build": "node init && tsup src/index.ts --format cjs,esm --dts",
     "test": "jest",
     "lint": "eslint src/**/*.ts"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0"
   },
