@@ -1,10 +1,10 @@
 {
   "name": "astera-credit-score-backtest",
   "version": "1.0.0",
-  "description": "Backtesting harness for the credit_score contract's scoring formula (#1041) — replays indexed payment/default events and reports whether score correlated with actual repayment outcomes.",
+  "description": "Backtesting harness for the credit_score contract's scoring formula (#1041) \u2014 replays indexed payment/default events and reports whether score correlated with actual repayment outcomes.",
   "main": "src/cli.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "node init && tsc",
     "backtest": "ts-node src/cli.ts",
     "test": "ts-node test/backtest.test.ts"
   },
