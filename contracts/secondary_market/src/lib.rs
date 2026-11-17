@@ -764,6 +764,7 @@ pub struct SecondaryMarket;
 #[contractimpl]
 impl SecondaryMarket {
     pub fn initialize(env: Env, admin: Address, pool_contract: Address) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, MarketError::AlreadyInitialized);
         }
