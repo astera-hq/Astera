@@ -70,8 +70,6 @@ class InvoiceMonitor {
   private readonly keypair: Keypair;
   private readonly server: StellarRpc.Server;
   private readonly contract: Contract;
-  private lastSeenInvoiceCount: number = 0;
-  private checkedInvoiceIds: Set<number> = new Set();
 
   constructor(config: Config) {
     this.config = config;
@@ -85,24 +83,19 @@ class InvoiceMonitor {
     const globalGraceDays = await this.readGraceDays();
     const nowSecs = Math.floor(Date.now() / 1000);
 
-    // Only check invoices beyond what we've already seen, or if count decreased
-    const startId = invoiceCount < this.lastSeenInvoiceCount ? 1 : this.lastSeenInvoiceCount + 1;
-    this.lastSeenInvoiceCount = invoiceCount;
-
-    for (let id = startId; id <= invoiceCount; id++) {
-      // Skip invoices we've already checked unless count was reset
-      if (startId > 1 && this.checkedInvoiceIds.has(id)) continue;
-
+    // Re-scan the full ID range on every sweep. An invoice can become
+    // overdue long after it was first observed, and transient read failures
+    // must not permanently mark an ID as handled. Non-Funded statuses are
+    // cheap to skip; successful defaulting changes the status so later sweeps
+    // naturally avoid submitting the same transition again.
+    for (let id = 1; id <= invoiceCount; id++) {
       let invoice: any;
       try {
         invoice = await this.readInvoice(id);
       } catch (err) {
-        console.error(`[monitor] failed to read invoice ${id}:`, err);
-        this.checkedInvoiceIds.add(id);
+        console.error(`[monitor] failed to read invoice ${id}; it will be retried next sweep:`, err);
         continue;
       }
-
-      this.checkedInvoiceIds.add(id);
       if (invoice.status !== INVOICE_STATUS_FUNDED) continue;
 
       const graceDays: number = invoice.grace_period_override ?? globalGraceDays;
