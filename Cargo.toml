@@ -1,12 +1,26 @@
 [workspace]
 members = [
+    "contracts/access_control",
     "contracts/invoice",
-    "contracts/pool", 
+    "contracts/pool",
     "contracts/credit_score",
     "contracts/share",
+    "contracts/governance",
+    "contracts/oracle_registry",
+    "contracts/compliance",
+    "contracts/referral",
+    "contracts/auction",
+    "contracts/tests",
     "benchmarks",
+    "contracts/tranche",
+    "contracts/secondary_market",
+    "contracts/arbitration",
+    "contracts/insurance",
 ]
 resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
 
 [workspace.dependencies]
 criterion = "0.5"

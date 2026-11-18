@@ -1,6 +1,7 @@
 'use client';
 
 import { useStore } from '@/lib/store';
+import { formatNetworkName } from '@/lib/network-label';
 
 export default function NetworkIndicator() {
   const { networkMismatch } = useStore();
@@ -9,7 +10,8 @@ export default function NetworkIndicator() {
     return null;
   }
 
-  const walletNetworkName = networkMismatch.walletNetwork === 'PUBLIC' ? 'Mainnet' : 'Testnet';
+  const walletNetworkName = formatNetworkName(networkMismatch.walletNetwork);
+  const isMainnet = walletNetworkName === 'Mainnet';
   const isMismatched = networkMismatch.isMismatched;
 
   return (
@@ -18,18 +20,14 @@ export default function NetworkIndicator() {
         className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
           isMismatched
             ? 'bg-red-900/30 border-red-800/50 text-red-400'
-            : networkMismatch.walletNetwork === 'PUBLIC'
+            : isMainnet
               ? 'bg-blue-900/30 border-blue-800/50 text-blue-400'
               : 'bg-green-900/30 border-green-800/50 text-green-400'
         }`}
       >
         <span
           className={`w-1.5 h-1.5 rounded-full ${
-            isMismatched
-              ? 'bg-red-400'
-              : networkMismatch.walletNetwork === 'PUBLIC'
-                ? 'bg-blue-400'
-                : 'bg-green-400'
+            isMismatched ? 'bg-red-400' : isMainnet ? 'bg-blue-400' : 'bg-green-400'
           }`}
           aria-hidden="true"
         />

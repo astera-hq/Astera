@@ -2,24 +2,45 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import type { FormEvent } from 'react';
+import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
-import { ChartSkeleton } from '@/components/Skeleton';
+import { PoolStatsSkeleton } from '@/components/PoolStats';
 import PoolStats from '@/components/PoolStats';
 import { APYCalculator } from '@/components/APYCalculator';
+import { ScenarioModeler } from '@/components/ScenarioModeler';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
 import {
   getPoolConfig,
   getInvestorPosition,
   getAcceptedTokens,
   getPoolTokenTotals,
+  getTokenDepositCap,
   buildDepositTx,
   buildWithdrawTx,
   submitTx,
   getKycRequired,
   getInvestorKyc,
+  getRateModelConfig,
+  getCurrentRate,
 } from '@/lib/contracts';
-import { toStroops, formatUSDC, stablecoinLabel, USDC_TOKEN_ID } from '@/lib/stellar';
-import type { PoolTokenTotals } from '@/lib/types';
+import { parseStellarAddress } from '@/lib/types';
+import {
+  NETWORK,
+  toStroops,
+  formatUSDC,
+  stablecoinLabel,
+  USDC_TOKEN_ID,
+  POOL_CONTRACT_ID,
+  nativeToScVal,
+  Address,
+  xdr,
+} from '@/lib/stellar';
+import type { PoolTokenTotals, RateModelConfig } from '@/lib/types';
+import { simulateContractCall } from '@/lib/simulateFee';
+import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
+import EstimatedFee from '@/components/EstimatedFee';
+import { RateCurveChart } from '@/components/analytics';
 import { useTranslations } from 'next-intl';
 
 export default function InvestPage() {
@@ -32,10 +53,20 @@ export default function InvestPage() {
   const [txStatus, setTxStatus] = useState<'idle' | 'pending' | 'confirmed' | 'failed'>('idle');
   const [txHash, setTxHash] = useState<string | null>(null);
   const [txError, setTxError] = useState<string | null>(null);
+  // #780: withdrawals sign and submit immediately with no chance to back out —
+  // route them through a confirmation dialog first (deposits stay direct, since
+  // they're easily reversed by a later withdrawal).
+  const [confirmWithdrawOpen, setConfirmWithdrawOpen] = useState(false);
 
   const [acceptedTokens, setAcceptedTokens] = useState<string[]>([]);
   const [selectedToken, setSelectedToken] = useState<string>('');
   const [tokenTotals, setTokenTotals] = useState<PoolTokenTotals | null>(null);
+  const [tokenDepositCap, setTokenDepositCap] = useState<bigint>(0n);
+
+  // #863: utilization-driven rate model for the selected token (null when
+  // the token has no curve configured — the static yield_bps applies).
+  const [rateModel, setRateModel] = useState<RateModelConfig | null>(null);
+  const [liveRateBps, setLiveRateBps] = useState<number | null>(null);
 
   // #109: KYC status
   const [kycRequired, setKycRequired] = useState(false);
@@ -48,6 +79,7 @@ export default function InvestPage() {
   useEffect(() => {
     if (!selectedToken) return;
     loadTokenTotals(selectedToken);
+    loadRateModel(selectedToken);
   }, [selectedToken, poolConfig]);
 
   useEffect(() => {
@@ -62,7 +94,7 @@ export default function InvestPage() {
         const required = await getKycRequired();
         setKycRequired(required);
         if (required && wallet.address) {
-          const approved = await getInvestorKyc(wallet.address);
+          const approved = await getInvestorKyc(parseStellarAddress(wallet.address));
           setKycApproved(approved);
         } else {
           setKycApproved(true);
@@ -78,7 +110,7 @@ export default function InvestPage() {
   function pickDefaultToken(tokens: string[]): string {
     if (tokens.length === 0) return '';
     if (USDC_TOKEN_ID && tokens.includes(USDC_TOKEN_ID)) return USDC_TOKEN_ID;
-    return tokens[0];
+    return tokens[0] ?? '';
   }
 
   async function loadPool() {
@@ -101,10 +133,26 @@ export default function InvestPage() {
   async function loadTokenTotals(token: string) {
     if (!POOL_CONFIGURED) return;
     try {
-      const tt = await getPoolTokenTotals(token);
+      const [tt, cap] = await Promise.all([getPoolTokenTotals(token), getTokenDepositCap(token)]);
       setTokenTotals(tt);
+      setTokenDepositCap(cap);
     } catch {
       setTokenTotals(null);
+      setTokenDepositCap(0n);
+    }
+  }
+
+  // #863: live curve for the selected token; falls back to the static yield
+  // when no rate model is configured for it.
+  async function loadRateModel(token: string) {
+    if (!POOL_CONFIGURED) return;
+    try {
+      const model = await getRateModelConfig(token);
+      setRateModel(model);
+      setLiveRateBps(model ? await getCurrentRate(token) : null);
+    } catch {
+      setRateModel(null);
+      setLiveRateBps(null);
     }
   }
 
@@ -118,6 +166,58 @@ export default function InvestPage() {
   }
 
   const POOL_CONFIGURED = Boolean(process.env.NEXT_PUBLIC_POOL_CONTRACT_ID);
+  const remainingTokenCapacity =
+    tokenDepositCap > 0n && tokenTotals
+      ? tokenDepositCap > tokenTotals.totalDeposited
+        ? tokenDepositCap - tokenTotals.totalDeposited
+        : 0n
+      : null;
+  const depositAtCapacity =
+    mode === 'deposit' && tokenDepositCap > 0n && tokenTotals
+      ? tokenTotals.totalDeposited >= tokenDepositCap
+      : false;
+  const depositExceedsCap =
+    mode === 'deposit' &&
+    tokenDepositCap > 0n &&
+    remainingTokenCapacity !== null &&
+    amount !== '' &&
+    toStroops(parseFloat(amount)) > remainingTokenCapacity;
+
+  const showDepositWarning = mode === 'deposit' && kycRequired && !kycApproved;
+
+  const simulateDeposit = useCallback(() => {
+    if (
+      !wallet.address ||
+      !selectedToken ||
+      !amount ||
+      parseFloat(amount) <= 0 ||
+      depositExceedsCap
+    )
+      return null;
+    if (mode !== 'deposit') return null;
+    const stroops = toStroops(parseFloat(amount));
+    return simulateContractCall(
+      POOL_CONTRACT_ID,
+      'deposit',
+      [
+        new Address(wallet.address).toScVal(),
+        new Address(selectedToken).toScVal(),
+        nativeToScVal(stroops, { type: 'i128' }),
+      ],
+      wallet.address,
+    );
+  }, [wallet.address, selectedToken, amount, mode, depositExceedsCap]);
+
+  const simulation = useTransactionSimulation(
+    simulateDeposit,
+    !!wallet.address &&
+      !!selectedToken &&
+      !!amount &&
+      parseFloat(amount) > 0 &&
+      mode === 'deposit' &&
+      !depositExceedsCap &&
+      !showDepositWarning,
+  );
 
   async function submitTransaction() {
     if (!wallet.address || !amount || !selectedToken) return;
@@ -137,7 +237,7 @@ export default function InvestPage() {
 
       const freighter = await import('@stellar/freighter-api');
       const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-        networkPassphrase: 'Test SDF Network ; September 2015',
+        networkPassphrase: NETWORK,
         address: wallet.address,
       });
       if (signError) throw new Error(signError.message);
@@ -168,21 +268,47 @@ export default function InvestPage() {
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (mode === 'withdraw') {
+      setConfirmWithdrawOpen(true);
+      return;
+    }
+    await submitTransaction();
+  }
+
+  async function handleConfirmWithdraw() {
+    setConfirmWithdrawOpen(false);
     await submitTransaction();
   }
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
       <div className="max-w-5xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
-          <p className="text-brand-muted">{t('description')}</p>
+        <div className="mb-8 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
+            <p className="text-brand-muted">{t('description')}</p>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <Link
+              href="/invest/co-funding"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-semibold hover:border-brand-gold hover:text-brand-gold transition-colors whitespace-nowrap"
+            >
+              Browse Co-Funding Rounds →
+            </Link>
+            <Link
+              href="/invest/secondary-market"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-semibold hover:border-brand-gold hover:text-brand-gold transition-colors whitespace-nowrap"
+            >
+              Browse Secondary Market →
+            </Link>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* ── Top grid: Pool stats + deposit form ── */}
+        <div className="flex flex-col lg:flex-row gap-6">
           <div className="space-y-6">
             {loading ? (
-              <ChartSkeleton />
+              <PoolStatsSkeleton />
             ) : poolConfig ? (
               <PoolStats
                 config={poolConfig}
@@ -193,6 +319,24 @@ export default function InvestPage() {
               <div className="p-6 bg-brand-card border border-brand-border rounded-2xl text-brand-muted text-sm">
                 {t('poolNotDeployed')}
               </div>
+            )}
+
+            {/* Earnings calculator — uses the live curve rate when the
+                selected token has a rate model configured (#863). */}
+            <APYCalculator token={selectedToken || undefined} />
+
+            {/* #863: live utilization-driven rate curve for the selected token */}
+            {rateModel && (
+              <RateCurveChart
+                config={rateModel}
+                currentUtilizationBps={
+                  tokenTotals && tokenTotals.totalDeposited > 0n
+                    ? Number((tokenTotals.totalDeployed * 10_000n) / tokenTotals.totalDeposited)
+                    : 0
+                }
+                currentRateBps={liveRateBps ?? undefined}
+                title={`Rate Curve — ${stablecoinLabel(selectedToken)}`}
+              />
             )}
 
             {wallet.connected && position && selectedToken && (
@@ -228,6 +372,7 @@ export default function InvestPage() {
             )}
           </div>
 
+          {/* ── Deposit / Withdraw form ── */}
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl h-fit">
             {!wallet.connected ? (
               <div className="text-center py-12">
@@ -251,9 +396,7 @@ export default function InvestPage() {
                   {(['deposit', 'withdraw'] as const).map((m) => (
                     <button
                       key={m}
-                      onClick={() => {
-                        setMode(m);
-                      }}
+                      onClick={() => setMode(m)}
                       className={`flex-1 py-2.5 text-sm font-medium capitalize transition-colors ${
                         mode === m
                           ? 'bg-brand-gold text-brand-dark'
@@ -270,18 +413,16 @@ export default function InvestPage() {
                     <label className="block text-sm text-brand-muted mb-2">{t('stablecoin')}</label>
                     <select
                       value={selectedToken}
-                      onChange={(e) => {
-                        setSelectedToken(e.target.value);
-                      }}
+                      onChange={(e) => setSelectedToken(e.target.value)}
                       disabled={acceptedTokens.length === 0}
                       className="w-full bg-brand-dark border border-brand-border rounded-xl px-4 py-3 text-white focus:outline-none focus:border-brand-gold"
                     >
                       {acceptedTokens.length === 0 ? (
                         <option value="">{t('noTokens')}</option>
                       ) : (
-                        acceptedTokens.map((t) => (
-                          <option key={t} value={t}>
-                            {stablecoinLabel(t)}
+                        acceptedTokens.map((tok) => (
+                          <option key={tok} value={tok}>
+                            {stablecoinLabel(tok)}
                           </option>
                         ))
                       )}
@@ -311,6 +452,66 @@ export default function InvestPage() {
                           token: stablecoinLabel(selectedToken),
                         })}
                       </p>
+                    )}
+                    {mode === 'withdraw' &&
+                      tokenTotals &&
+                      // #782: pool_value minus deployed capital is the actual
+                      // ceiling on any single withdrawal — a user's own share
+                      // balance can exceed this when most of the pool is
+                      // deployed in active invoices.
+                      (() => {
+                        const poolLiquidity =
+                          tokenTotals.totalDeposited > tokenTotals.totalDeployed
+                            ? tokenTotals.totalDeposited - tokenTotals.totalDeployed
+                            : 0n;
+                        const exceedsLiquidity =
+                          !!amount && toStroops(parseFloat(amount || '0')) > poolLiquidity;
+                        return (
+                          <p
+                            className={`text-xs mt-1 ${exceedsLiquidity ? 'text-red-400' : 'text-brand-muted'}`}
+                          >
+                            {exceedsLiquidity
+                              ? t('exceedsLiquidity', {
+                                  amount: formatUSDC(poolLiquidity),
+                                  token: stablecoinLabel(selectedToken),
+                                })
+                              : t('poolLiquidity', {
+                                  amount: formatUSDC(poolLiquidity),
+                                  token: stablecoinLabel(selectedToken),
+                                })}
+                          </p>
+                        );
+                      })()}
+                    {mode === 'deposit' && tokenDepositCap > 0n && tokenTotals && (
+                      <div className="mt-3">
+                        <div className="flex justify-between text-xs text-brand-muted mb-1">
+                          <span>Pool capacity</span>
+                          <span>
+                            {formatUSDC(tokenTotals.totalDeposited)} / {formatUSDC(tokenDepositCap)}
+                          </span>
+                        </div>
+                        <div className="h-2 bg-brand-border rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-brand-gold rounded-full transition-all"
+                            style={{
+                              width: `${Math.min(100, Number((tokenTotals.totalDeposited * 10000n) / tokenDepositCap) / 100)}%`,
+                            }}
+                          />
+                        </div>
+                        {amount && remainingTokenCapacity !== null && (
+                          <p
+                            className={`mt-1 text-xs ${
+                              toStroops(parseFloat(amount || '0')) > remainingTokenCapacity
+                                ? 'text-red-400'
+                                : 'text-brand-muted'
+                            }`}
+                          >
+                            {toStroops(parseFloat(amount || '0')) > remainingTokenCapacity
+                              ? `Exceeds remaining capacity of ${formatUSDC(remainingTokenCapacity)}`
+                              : `${formatUSDC(remainingTokenCapacity)} remaining`}
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
 
@@ -342,13 +543,18 @@ export default function InvestPage() {
                     </div>
                   )}
 
+                  <EstimatedFee simulation={simulation} />
+
                   <button
                     type="submit"
                     disabled={
                       txLoading ||
                       !amount ||
                       !selectedToken ||
-                      (mode === 'deposit' && kycRequired && !kycApproved)
+                      showDepositWarning ||
+                      depositAtCapacity ||
+                      depositExceedsCap ||
+                      simulation.status === 'loading'
                     }
                     className="w-full py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors disabled:opacity-60 capitalize"
                   >
@@ -356,6 +562,13 @@ export default function InvestPage() {
                       ? t('processing')
                       : `${t(`modes.${mode}`)} ${stablecoinLabel(selectedToken)}`}
                   </button>
+
+                  {depositAtCapacity && mode === 'deposit' && (
+                    <p className="text-xs text-red-300">
+                      This token is at its configured deposit cap.
+                    </p>
+                  )}
+
                   {txStatus === 'failed' && (
                     <button
                       type="button"
@@ -372,12 +585,51 @@ export default function InvestPage() {
                   <p>• {t('notes.stablecoin')}</p>
                   <p>• {t('notes.repayment')}</p>
                   <p>• {t('notes.withdrawal')}</p>
+                  {selectedToken && (
+                    <p>
+                      •{' '}
+                      {tokenDepositCap > 0n && remainingTokenCapacity !== null ? (
+                        <>
+                          {formatUSDC(remainingTokenCapacity)} remaining of{' '}
+                          {formatUSDC(tokenDepositCap)} capacity for{' '}
+                          {stablecoinLabel(selectedToken)}
+                        </>
+                      ) : (
+                        <>No deposit cap configured for {stablecoinLabel(selectedToken)}.</>
+                      )}
+                    </p>
+                  )}
                 </div>
               </>
             )}
           </div>
         </div>
+
+        {/* ── Scenario Modeler — full-width below the deposit grid (#289) ── */}
+        <section className="mt-10">
+          <div className="mb-4">
+            <h2 className="text-xl font-bold text-white">Scenario Modeler</h2>
+            <p className="text-sm text-brand-muted mt-0.5">
+              Model best, base, and worst-case returns across varying utilization and default
+              assumptions before you invest.
+            </p>
+          </div>
+          <ScenarioModeler
+            yieldBps={liveRateBps ?? poolConfig?.yieldBps ?? null}
+            loading={loading}
+          />
+        </section>
       </div>
+
+      <ConfirmActionModal
+        title={`Withdraw ${amount ? formatUSDC(toStroops(parseFloat(amount))) : ''} ${stablecoinLabel(selectedToken)}`}
+        description="This will submit an on-chain withdrawal from the pool for wallet signing. Withdrawn funds leave the pool immediately and stop earning yield. This action cannot be undone."
+        onConfirm={() => void handleConfirmWithdraw()}
+        onCancel={() => setConfirmWithdrawOpen(false)}
+        variant="destructive"
+        isOpen={confirmWithdrawOpen}
+        confirmLabel="Withdraw"
+      />
     </div>
   );
 }

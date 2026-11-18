@@ -1,0 +1,32 @@
+[package]
+name = "governance"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+share = { path = "../share" }
+access_control = { path = "../access_control" }
+proptest = "1.4"
+
+[[test]]
+name = "lib"
+path = "tests/lib.rs"
+
+[[test]]
+name = "access_control_tests"
+path = "tests/access_control_tests.rs"
+
+[[test]]
+name = "governance_flow_tests"
+path = "tests/governance_flow_tests.rs"
+
+[[test]]
+name = "finalize_proposal_proptest"
+path = "tests/finalize_proposal_proptest.rs"

@@ -1,6 +1,15 @@
 version: '3.8'
 
+# #445: Full local Astera development stack.
+# Usage:
+#   docker compose up          — start everything
+#   docker compose down -v     — stop and remove all state
+#
+# The stellar-quickstart container must be healthy before contracts are
+# deployed, and contracts must finish deploying before the frontend starts.
+
 services:
+  # ── Stellar local network ──────────────────────────────────────────────────
   stellar:
     image: stellar/quickstart:testing
     command: --local
@@ -9,17 +18,42 @@ services:
       - "11626:11626"
     volumes:
       - stellar-data:/opt/stellar
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
+  # ── Contract builder + deployer ────────────────────────────────────────────
   contracts:
     build:
       context: ./contracts
       dockerfile: Dockerfile
     volumes:
       - ./contracts:/app
+      - contract-ids:/contract-ids
     depends_on:
-      - stellar
-    command: tail -f /dev/null
+      stellar:
+        condition: service_healthy
+    environment:
+      - STELLAR_RPC_URL=http://stellar:8000/soroban/rpc
+      - STELLAR_NETWORK_PASSPHRASE=Standalone Network ; February 2017
+      - HORIZON_URL=http://stellar:8000
+    # Deploy all contracts and write their IDs to /contract-ids/env so the
+    # frontend can pick them up.  Falls back to tail -f /dev/null if the
+    # deploy script is not present (e.g. first-time checkout without scripts/).
+    command: >
+      sh -c "
+        if [ -f /app/scripts/deploy-local.sh ]; then
+          sh /app/scripts/deploy-local.sh && tail -f /dev/null
+        else
+          echo 'deploy-local.sh not found — skipping deploy, container idle'
+          tail -f /dev/null
+        fi
+      "
 
+  # ── Next.js frontend ───────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -29,10 +63,23 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+      - contract-ids:/contract-ids:ro
     depends_on:
-      - stellar
-      - contracts
+      stellar:
+        condition: service_healthy
+      contracts:
+        condition: service_started
+    environment:
+      - NEXT_PUBLIC_HORIZON_URL=http://stellar:8000
+      - NEXT_PUBLIC_SOROBAN_RPC_URL=http://stellar:8000/soroban/rpc
+      - NEXT_PUBLIC_NETWORK=local
+      # Contract IDs are written by the deployer; override here if needed.
+      - NEXT_PUBLIC_INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-}
+      - NEXT_PUBLIC_POOL_CONTRACT_ID=${POOL_CONTRACT_ID:-}
+      - NEXT_PUBLIC_SECONDARY_MARKET_CONTRACT_ID=${SECONDARY_MARKET_CONTRACT_ID:-}
+      - NEXT_PUBLIC_USDC_TOKEN_ID=${USDC_TOKEN_ID:-}
 
+  # ── Mock REST service (json-server) ───────────────────────────────────────
   mock-service:
     image: node:20-alpine
     working_dir: /mock-service
@@ -42,23 +89,117 @@ services:
     ports:
       - "4000:4000"
 
+  # ── Indexer's Postgres database ────────────────────────────────────────────
+  indexer-postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=astera
+      - POSTGRES_PASSWORD=astera
+      - POSTGRES_DB=astera_indexer
+    volumes:
+      - indexer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astera -d astera_indexer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ── Off-chain indexer ──────────────────────────────────────────────────────
   indexer:
     build:
       context: ./indexer
       dockerfile: Dockerfile
     ports:
       - "3001:3001"
-    volumes:
-      - ./indexer/data:/indexer/data
     environment:
-      - HORIZON_URL=https://horizon-testnet.stellar.org
-      - CONTRACT_IDS=
+      - HORIZON_URL=http://stellar:8000
+      - CONTRACT_IDS=${INVOICE_CONTRACT_ID:-},${POOL_CONTRACT_ID:-}
+      - SECONDARY_MARKET_CONTRACT_ID=${SECONDARY_MARKET_CONTRACT_ID:-}
       - POLLING_INTERVAL_MS=5000
       - API_PORT=3001
-      - DB_PATH=/indexer/data/indexer.db
+      - DATABASE_URL=postgres://astera:astera@indexer-postgres:5432/astera_indexer
     depends_on:
-      - stellar
+      stellar:
+        condition: service_healthy
+      indexer-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Oracle service ─────────────────────────────────────────────────────────
+  oracle-service:
+    build:
+      context: ./oracle-service
+      dockerfile: Dockerfile
+    environment:
+      - RPC_URL=http://stellar:8000/soroban/rpc
+      - HORIZON_URL=http://stellar:8000
+      - NETWORK_PASSPHRASE=Standalone Network ; February 2017
+      - ORACLE_SECRET_KEY=${ORACLE_SECRET_KEY:-}
+      - INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-}
+      - AUTO_VERIFY_DELAY_MS=30000
+      - HEALTH_PORT=8080
+      # #861: unset by default (legacy single-oracle mode). Set to run this
+      # node as one voter in the N-of-M staked oracle consensus network —
+      # see oracle-service/README.md for running multiple nodes locally.
+      - ORACLE_REGISTRY_CONTRACT_ID=${ORACLE_REGISTRY_CONTRACT_ID:-}
+    depends_on:
+      stellar:
+        condition: service_healthy
+      contracts:
+        condition: service_started
+    volumes:
+      - ./oracle-service:/app
+      - ./packages/sdk:/sdk
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:${process.env.HEALTH_PORT || 8080}/health`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Compliance service (#867) ──────────────────────────────────────────────
+  compliance-service:
+    build:
+      context: ./compliance-service
+      dockerfile: Dockerfile
+    environment:
+      - RPC_URL=http://stellar:8000/soroban/rpc
+      - HORIZON_URL=http://stellar:8000
+      - NETWORK_PASSPHRASE=Standalone Network ; February 2017
+      - COMPLIANCE_SCREENER_SECRET_KEY=${COMPLIANCE_SCREENER_SECRET_KEY:-}
+      - COMPLIANCE_CONTRACT_ID=${COMPLIANCE_CONTRACT_ID:-}
+      - POOL_CONTRACT_ID=${POOL_CONTRACT_ID:-}
+      - INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-}
+      - HEALTH_PORT=8081
+      - COMPLIANCE_ADMIN_TOKEN=${COMPLIANCE_ADMIN_TOKEN:-}
+    depends_on:
+      stellar:
+        condition: service_healthy
+      contracts:
+        condition: service_started
+    volumes:
+      - ./compliance-service:/app
+      - ./packages/sdk:/sdk
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:${process.env.HEALTH_PORT || 8081}/health`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
 volumes:
   stellar-data:
+  # Shared volume so the deployer can pass contract IDs to the frontend.
+  contract-ids:
+  indexer-postgres-data:

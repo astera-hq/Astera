@@ -1,4 +1,14 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
+import GlossaryTerm from '@/components/GlossaryTerm';
+
+// #783: canonical tag for the landing page — resolved against
+// metadataBase (set in the root layout) into an absolute URL.
+export const metadata: Metadata = {
+  title: 'Astera — Real World Assets on Stellar',
+  description: 'Tokenize invoices. Fund real businesses. Earn on-chain yield. Built on Stellar Soroban.',
+  alternates: { canonical: '/' },
+};
 
 const stats = [
   { label: 'Trade Finance Gap', value: '$1.7T', sub: 'in emerging markets' },
@@ -212,13 +222,18 @@ export default function Home() {
       <footer className="border-t border-brand-border py-8 px-6 text-center text-brand-muted text-sm">
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="font-semibold text-white">Astera</div>
-          <div>Built on Stellar · Powered by Soroban · USDC Settlement</div>
+          <div>
+            Built on Stellar · Powered by <GlossaryTerm id="soroban" /> · USDC Settlement
+          </div>
           <div className="flex gap-6">
             <Link href="/dashboard" className="hover:text-white transition-colors">
               Dashboard
             </Link>
             <Link href="/invest" className="hover:text-white transition-colors">
               Invest
+            </Link>
+            <Link href="/glossary" className="hover:text-white transition-colors">
+              Glossary
             </Link>
           </div>
         </div>

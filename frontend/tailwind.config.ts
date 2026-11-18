@@ -7,13 +7,15 @@ const config: Config = {
     extend: {
       colors: {
         brand: {
-          gold: '#F5A623',
-          amber: '#E8920A',
-          dark: '#0A0E1A',
-          navy: '#0D1526',
-          card: '#111827',
-          border: '#1F2A3C',
-          muted: '#6B7A99',
+          gold: 'var(--gold)',
+          amber: 'var(--amber)',
+          dark: 'var(--bg)',
+          navy: 'var(--bg-navy)',
+          card: 'var(--card)',
+          border: 'var(--border)',
+          muted: 'var(--muted)',
+          text: 'var(--text-primary)',
+          'text-secondary': 'var(--text-secondary)',
         },
       },
       fontFamily: {

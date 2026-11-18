@@ -28,17 +28,22 @@ interface ExplorerLinkProps {
   className?: string;
 }
 
-export function ExplorerLink({
-  type,
-  id,
-  network,
-  children,
-  className = '',
-}: ExplorerLinkProps) {
+export function ExplorerLink({ type, id, network, children, className = '' }: ExplorerLinkProps) {
   if (!id) return null;
 
   const url = explorerUrl(type, id, network);
   const label = children ?? truncateAddress(id);
+
+  if (url === null) {
+    return (
+      <span
+        title={id}
+        className={`inline-flex items-center gap-1 font-mono text-xs text-blue-400 ${className}`}
+      >
+        {label}
+      </span>
+    );
+  }
 
   return (
     <a
@@ -46,6 +51,7 @@ export function ExplorerLink({
       target="_blank"
       rel="noopener noreferrer"
       title={id}
+      aria-label={`View ${type} ${id} on Stellar Explorer`}
       className={`inline-flex items-center gap-1 font-mono text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors ${className}`}
     >
       {label}

@@ -9,7 +9,7 @@
 
 import { useEffect, useCallback, useSyncExternalStore } from 'react';
 import { sseEventsService, type UserRole } from '../lib/sse-events';
-import { useStore } from '../lib/store';
+import { useStore, type AsteraStore } from '../lib/store';
 
 interface UseSseEventsOptions {
   /** User role for event filtering (default: 'Admin') */
@@ -47,7 +47,7 @@ export function useSseEvents(options: UseSseEventsOptions = {}): {
 } {
   const { role = 'Admin', intervalMs = 15_000, enabled = true } = options;
   const isPolling = useSyncExternalStore(subscribe, getSnapshot);
-  const setPollingInterval = useStore((s) => s.setPollingInterval);
+  const setPollingInterval = useStore((s: AsteraStore) => s.setPollingInterval);
 
   // Keep role in sync with the service
   useEffect(() => {

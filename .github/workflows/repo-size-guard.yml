@@ -1,0 +1,37 @@
+name: Repo Size Guard
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  guard:
+    name: No build artifacts or old history
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # target/ was purged from history on 2026-10-18. This commit only exists in the
+      # old history, so its presence means the PR merged a stale main back in.
+      - name: Reject pre-rewrite history
+        run: |
+          if git cat-file -e 3d384c602686e7fed8ddd1d008e0f8fc1ca43800 2>/dev/null; then
+            echo "::error::This branch contains Astera's old (pre-2026-10-18) history, which re-adds ~220 MB of build files."
+            echo "::error::Fix: git fetch upstream && git checkout -b <new-branch> upstream/main && git cherry-pick <your commits>"
+            exit 1
+          fi
+
+      - name: Reject target/ and files over 5 MB
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          bad=$(git rev-list --objects "$BASE..HEAD" \
+            | git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' \
+            | awk '$1=="blob" && ($2 > 5242880 || $3 ~ /^target\//) {printf "%.1f MiB  %s\n", $2/1048576, $3}')
+          if [ -n "$bad" ]; then
+            echo "::error::PR adds build artifacts or files over 5 MB:"
+            echo "$bad"
+            exit 1
+          fi

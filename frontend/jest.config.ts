@@ -1,5 +1,5 @@
 import type { Config } from 'jest';
-import nextJest from 'next/jest.js';
+import nextJest from 'next/jest';
 
 const createJestConfig = nextJest({
   // Provide the path to your Next.js app to load next.config.js and .env files in your test environment
@@ -13,6 +13,9 @@ const config: Config = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
+    '^next-intl$': '<rootDir>/__mocks__/next-intl.js',
+    '^next-intl/server$': '<rootDir>/__mocks__/next-intl-server.js',
+    '^next/navigation$': '<rootDir>/__mocks__/next-navigation.js',
   },
   testPathIgnorePatterns: ['<rootDir>/node_modules/', '<rootDir>/.next/', '<rootDir>/e2e/'],
 };

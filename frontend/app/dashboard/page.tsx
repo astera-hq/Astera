@@ -5,24 +5,32 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { usePathname, useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
-import InvoiceCard from '@/components/InvoiceCard';
-import { StatCardSkeleton, InvoiceCardSkeleton } from '@/components/Skeleton';
-import CreditScore from '@/components/CreditScore';
+import InvoiceCard, { InvoiceCardSkeleton } from '@/components/InvoiceCard';
+import { StatCardSkeleton, Skeleton } from '@/components/Skeleton';
+import CreditScore, { CreditScoreSkeleton } from '@/components/CreditScore';
 import OnboardingModal, { isFirstTimeUser } from '@/components/OnboardingModal';
+import SMEOnboardingChecklist from '@/components/SMEOnboardingChecklist';
+import TestnetFaucet from '@/components/TestnetFaucet';
+import LenderPortfolio from '@/components/LenderPortfolio';
+import PipelineBoard from '@/components/dashboard/PipelineBoard';
+import ErrorBoundary from '@/components/ErrorBoundary';
 import {
   getMultipleInvoices,
   getInvoiceCount,
   getInvoiceMetadata,
   getFundedInvoice,
+  getCreditScoreStatus,
 } from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice, InvoiceMetadata } from '@/lib/types';
 import { filterInvoicesByStatuses } from '@/lib/dashboardFilters';
+import { useDashboardViewMode } from '@/hooks/useDashboardViewMode';
+import { DASHBOARD_VIEW_MODES } from '@/lib/dashboardPipeline';
 import { useTranslations } from 'next-intl';
 
 type DashboardRow = { invoice: Invoice; metadata: InvoiceMetadata };
 
-type StatusFilter = Invoice['status'];
+type StatusFilter = Invoice['status'] | 'All';
 type SortOption =
   | 'created-desc'
   | 'created-asc'
@@ -33,8 +41,18 @@ type SortOption =
 
 /** Number of invoices to load per page */
 const PAGE_SIZE = 20;
+const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
 
 export default function DashboardPage() {
+  const { wallet } = useStore();
+  return (
+    <ErrorBoundary walletAddress={wallet?.address ?? undefined}>
+      <DashboardContent />
+    </ErrorBoundary>
+  );
+}
+
+function DashboardContent() {
   const t = useTranslations('Dashboard');
   const router = useRouter();
   const pathname = usePathname();
@@ -44,14 +62,33 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [isScoreStale, setIsScoreStale] = useState(false);
+  const [scoreFactors, setScoreFactors] = useState<{
+    finalScore: number;
+    riskAdjustmentPts: number;
+    trendAdjustmentPts: number;
+  } | null>(null);
+  const [dashboardTab, setDashboardTab] = useState<'borrower' | 'lender'>('borrower');
 
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilters, setStatusFilters] = useState<StatusFilter[]>([]);
   const [sort, setSort] = useState<SortOption>('created-desc');
-  const [hydrated, setHydrated] = useState(false);
+  const [page, setPage] = useState(0);
+  const [queryHydrated, setQueryHydrated] = useState(false);
+  const { viewMode, setViewMode, hydrated: viewModeHydrated } = useDashboardViewMode();
 
-  const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
+  const STATUS_TABS: StatusFilter[] = [
+    'Pending',
+    'AwaitingVerification',
+    'Verified',
+    'Disputed',
+    'Funded',
+    'Paid',
+    'Defaulted',
+    'Cancelled',
+    'Expired',
+  ];
 
   const SORT_OPTIONS: { value: SortOption; label: string }[] = [
     { value: 'created-desc', label: t('sort.createdDesc') },
@@ -73,11 +110,11 @@ export default function DashboardPage() {
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setHydrated(true);
+    setQueryHydrated(true);
   }, []);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!queryHydrated) return;
 
     const params = new URLSearchParams(window.location.search);
     const q = params.get('q') ?? '';
@@ -91,14 +128,16 @@ export default function DashboardPage() {
     const initialSortValue = SORT_OPTIONS.some((opt) => opt.value === initialSort)
       ? (initialSort as SortOption)
       : 'created-desc';
+    const initialPage = Math.max(0, parseInt(params.get('page') ?? '0', 10) || 0);
 
     startTransition(() => {
       setSearch(q);
       setDebouncedSearch(q);
       setStatusFilters(initialStatuses);
       setSort(initialSortValue);
+      setPage(initialPage);
     });
-  }, [hydrated]);
+  }, [queryHydrated]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -107,17 +146,24 @@ export default function DashboardPage() {
     return () => window.clearTimeout(handle);
   }, [search]);
 
+  // Reset to first page whenever filters or sort change
   useEffect(() => {
-    if (!hydrated) return;
+    if (queryHydrated) setPage(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, statusFilters, sort]);
+
+  useEffect(() => {
+    if (!queryHydrated) return;
 
     const params = new URLSearchParams();
     if (debouncedSearch.trim()) params.set('q', debouncedSearch.trim());
     if (statusFilters.length > 0) params.set('status', statusFilters.join(','));
     if (sort !== 'created-desc') params.set('sort', sort);
+    if (page > 0) params.set('page', String(page));
 
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  }, [hydrated, pathname, router, debouncedSearch, sort, statusFilters]);
+  }, [queryHydrated, pathname, router, debouncedSearch, sort, statusFilters, page]);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -138,7 +184,7 @@ export default function DashboardPage() {
       const fetched = await getMultipleInvoices(ids);
 
       const mine = fetched
-        .map((invoice, index) => ({ id: ids[index], invoice }))
+        .map((invoice, index) => ({ id: ids[index]!, invoice }))
         .filter((row) => row.invoice.owner === wallet.address);
       const rows: DashboardRow[] = await Promise.all(
         mine.map(async ({ id, invoice }) => ({
@@ -171,6 +217,31 @@ export default function DashboardPage() {
   const loadInvoices = useCallback(async () => {
     setLoading(true);
     try {
+      if (debouncedSearch.trim()) {
+        const indexerUrl = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
+        const params = new URLSearchParams({
+          q: debouncedSearch.trim(),
+          page: String(page),
+          pageSize: String(PAGE_SIZE),
+        });
+        const response = await fetch(`${indexerUrl}/api/invoices/search?${params}`);
+        if (!response.ok) throw new Error(`Invoice search failed: ${response.status}`);
+        const result = (await response.json()) as { invoiceIds: number[]; total: number };
+        const ids = result.invoiceIds;
+        const fetched = ids.length > 0 ? await getMultipleInvoices(ids) : [];
+        const rows = await Promise.all(
+          fetched
+            .map((invoice, index) => ({ invoice, id: ids[index] }))
+            .filter(({ invoice }) => invoice.owner === wallet.address)
+            .map(async ({ invoice, id }) => ({ invoice, metadata: await getInvoiceMetadata(id!) })),
+        );
+        setInvoices(rows);
+        setCommittedMap({});
+        setTotalOnChainCount(result.total);
+        setScannedCount(result.total);
+        return;
+      }
+
       const count = await getInvoiceCount();
       setTotalOnChainCount(count);
 
@@ -186,12 +257,12 @@ export default function DashboardPage() {
       setCommittedMap(committed);
       setScannedCount(count - Math.max(scannedUpTo, 0));
     } catch (e) {
-      toast.error('Failed to load invoices. Make sure contracts are deployed.');
+      toast.error(t('notifications.loadError'));
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, [fetchBatch]);
+  }, [debouncedSearch, fetchBatch, page, wallet.address]);
 
   /** Load the next page of invoices */
   const loadMore = useCallback(async () => {
@@ -229,6 +300,19 @@ export default function DashboardPage() {
     loadInvoices();
   }, [wallet.connected, wallet.address, loadInvoices]);
 
+  useEffect(() => {
+    if (!wallet.address) return;
+    getCreditScoreStatus(wallet.address).then((result) => {
+      if (!result) return;
+      setIsScoreStale(result.isStale);
+      setScoreFactors({
+        finalScore: result.finalScore,
+        riskAdjustmentPts: result.riskAdjustmentPts,
+        trendAdjustmentPts: result.trendAdjustmentPts,
+      });
+    });
+  }, [wallet.address]);
+
   const stats = {
     total: invoices.length,
     pending: invoices.filter((row) => row.invoice.status === 'Pending').length,
@@ -251,7 +335,8 @@ export default function DashboardPage() {
       );
     }
 
-    result = filterInvoicesByStatuses(result, statusFilters);
+    const selectedStatuses = statusFilters.filter((s): s is Invoice['status'] => s !== 'All');
+    result = filterInvoicesByStatuses(result, selectedStatuses);
 
     switch (sort) {
       case 'created-desc':
@@ -289,7 +374,25 @@ export default function DashboardPage() {
     return result;
   }, [invoices, debouncedSearch, statusFilters, sort]);
 
+  const pipelineRows = useMemo(() => {
+    if (!debouncedSearch.trim()) return invoices;
+    const q = debouncedSearch.trim().toLowerCase();
+    return invoices.filter(
+      (row) =>
+        row.metadata.debtor.toLowerCase().includes(q) ||
+        row.metadata.description.toLowerCase().includes(q) ||
+        row.metadata.name.toLowerCase().includes(q),
+    );
+  }, [invoices, debouncedSearch]);
+
   const isFiltered = debouncedSearch.trim() !== '' || statusFilters.length > 0;
+
+  const totalPages = debouncedSearch
+    ? Math.max(1, Math.ceil(totalOnChainCount / PAGE_SIZE))
+    : Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pagedItems = debouncedSearch
+    ? filtered
+    : filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-4 sm:px-6">
@@ -301,9 +404,33 @@ export default function DashboardPage() {
             <p className="text-brand-muted text-sm">{t('description')}</p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            {viewModeHydrated && (
+              <div className="inline-flex items-center rounded-xl border border-brand-border bg-brand-card p-1">
+                <button
+                  onClick={() => setViewMode(DASHBOARD_VIEW_MODES.LIST)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                    viewMode === DASHBOARD_VIEW_MODES.LIST
+                      ? 'bg-brand-gold text-brand-dark'
+                      : 'text-brand-muted hover:text-brand-text'
+                  }`}
+                >
+                  {t('view.list')}
+                </button>
+                <button
+                  onClick={() => setViewMode(DASHBOARD_VIEW_MODES.PIPELINE)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                    viewMode === DASHBOARD_VIEW_MODES.PIPELINE
+                      ? 'bg-brand-gold text-brand-dark'
+                      : 'text-brand-muted hover:text-brand-text'
+                  }`}
+                >
+                  {t('view.pipeline')}
+                </button>
+              </div>
+            )}
             <button
               onClick={() => setShowOnboarding(true)}
-              className="min-h-[44px] px-4 py-2 text-brand-muted hover:text-white transition-colors text-sm"
+              className="min-h-[44px] px-4 py-2 text-brand-muted hover:text-brand-text transition-colors text-sm"
             >
               {t('help')}
             </button>
@@ -325,238 +452,332 @@ export default function DashboardPage() {
             <p className="text-brand-muted">{t('connectWalletDesc')}</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left column */}
-            <div className="lg:col-span-2 space-y-6">
-              {/* Quick stats */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                {[
-                  {
-                    label: t('stats.totalVolume'),
-                    value: formatUSDC(stats.totalVolume),
-                    highlight: true,
-                  },
-                  { label: t('stats.pending'), value: stats.pending.toString() },
-                  { label: t('stats.funded'), value: stats.funded.toString() },
-                  { label: t('stats.paid'), value: stats.paid.toString() },
-                ].map((s) => (
-                  <div
-                    key={s.label}
-                    className="p-4 bg-brand-card border border-brand-border rounded-xl"
-                  >
-                    <p className="text-xs text-brand-muted mb-1">{s.label}</p>
-                    <p className={`text-xl font-bold ${s.highlight ? 'gradient-text' : ''}`}>
-                      {s.value}
-                    </p>
-                  </div>
-                ))}
-              </div>
-
-              {/* Invoices */}
-              <div ref={listRef}>
-                <h2 className="text-lg font-semibold mb-4">{t('yourInvoices')}</h2>
-
-                {/* Search */}
-                <div className="relative mb-3">
-                  <svg
-                    className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-muted pointer-events-none"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"
-                    />
-                  </svg>
-                  <input
-                    type="text"
-                    placeholder={t('searchPlaceholder')}
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="w-full bg-brand-dark border border-brand-border rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold"
-                  />
-                  {search && (
-                    <button
-                      onClick={() => setSearch('')}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-brand-muted hover:text-white"
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-
-                {/* Status tabs + Sort */}
-                <div className="flex flex-col gap-3 mb-4">
-                  <div className="flex gap-1 flex-wrap">
-                    <button
-                      onClick={() => setStatusFilters([])}
-                      className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                        statusFilters.length === 0
-                          ? 'bg-brand-gold text-brand-dark'
-                          : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
-                      }`}
-                    >
-                      {t('status.all')}
-                    </button>
-                    {STATUS_TABS.map((tab) => (
-                      <button
-                        key={tab}
-                        onClick={() =>
-                          setStatusFilters((prev) =>
-                            prev.includes(tab)
-                              ? prev.filter((item) => item !== tab)
-                              : [...prev, tab],
-                          )
-                        }
-                        className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                          statusFilters.includes(tab)
-                            ? 'bg-brand-gold text-brand-dark'
-                            : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
-                        }`}
-                      >
-                        {t(`status.${tab.toLowerCase()}`)}
-                      </button>
-                    ))}
-                  </div>
-
-                  <select
-                    value={sort}
-                    onChange={(e) => setSort(e.target.value as SortOption)}
-                    className="w-full sm:w-auto bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-gold cursor-pointer min-h-[36px]"
-                  >
-                    {SORT_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {statusFilters.length > 0 && (
-                  <div className="flex items-center gap-2 flex-wrap mb-4">
-                    {statusFilters.map((status) => (
-                      <button
-                        key={status}
-                        onClick={() =>
-                          setStatusFilters((prev) => prev.filter((item) => item !== status))
-                        }
-                        className="px-2.5 py-1 rounded-full text-xs bg-brand-card border border-brand-border text-white hover:border-brand-gold/60"
-                      >
-                        {t(`status.${status.toLowerCase()}`)} ✕
-                      </button>
-                    ))}
+          <>
+            <div className="mb-6 inline-flex rounded-xl border border-brand-border bg-brand-card p-1">
+              <button
+                onClick={() => setDashboardTab('borrower')}
+                className={`rounded-lg px-4 py-2 text-sm font-medium ${dashboardTab === 'borrower' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-brand-text'}`}
+              >
+                Borrower
+              </button>
+              <button
+                onClick={() => setDashboardTab('lender')}
+                className={`rounded-lg px-4 py-2 text-sm font-medium ${dashboardTab === 'lender' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-brand-text'}`}
+              >
+                Lender
+              </button>
+            </div>
+            {dashboardTab === 'lender' ? (
+              <LenderPortfolio />
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* #274: Testnet faucet banner */}
+                {wallet.address && (
+                  <div className="lg:col-span-3">
+                    <TestnetFaucet address={wallet.address} />
                   </div>
                 )}
-
-                {loading ? (
-                  <div className="space-y-4">
-                    {[1, 2, 3].map((n) => (
-                      <InvoiceCardSkeleton key={n} />
-                    ))}
-                  </div>
-                ) : invoices.length === 0 ? (
-                  <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
-                    <p className="text-brand-muted mb-4">{t('noInvoices')}</p>
-                    <Link
-                      href="/invoice/new"
-                      className="text-brand-gold hover:underline text-sm font-medium"
-                    >
-                      {t('createFirst')}
-                    </Link>
-                  </div>
-                ) : filtered.length === 0 ? (
-                  <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
-                    <p className="text-brand-muted mb-3">{t('noMatch')}</p>
-                    {isFiltered && (
-                      <button
-                        onClick={() => {
-                          setSearch('');
-                          setDebouncedSearch('');
-                          setStatusFilters([]);
-                        }}
-                        className="text-brand-gold hover:underline text-sm font-medium"
-                      >
-                        {t('clearFilters')}
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <>
-                    <div className="space-y-4">
-                      {filtered.map((inv) => (
-                        <InvoiceCard
-                          key={inv.invoice.id}
-                          id={inv.invoice.id}
-                          metadata={inv.metadata}
-                          fundedAmount={committedMap[inv.invoice.id]}
-                        />
+                {/* Left column */}
+                <div className="lg:col-span-2 space-y-6">
+                  {/* Quick stats */}
+                  {loading ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                      {[1, 2, 3, 4].map((n) => (
+                        <div
+                          key={n}
+                          className="p-3 sm:p-4 bg-brand-card border border-brand-border rounded-xl animate-pulse min-h-[88px] flex flex-col justify-center"
+                        >
+                          <Skeleton className="h-3 w-16 mb-2" />
+                          <Skeleton className="h-6 w-20" />
+                        </div>
                       ))}
                     </div>
-
-                    {/* Load More / Pagination Controls */}
-                    {hasMore && (
-                      <div className="mt-6 text-center">
-                        <button
-                          onClick={loadMore}
-                          disabled={loadingMore}
-                          className="px-6 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-white hover:border-brand-gold/50 transition-colors disabled:opacity-50"
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                      {[
+                        {
+                          label: t('stats.totalVolume'),
+                          value: formatUSDC(stats.totalVolume),
+                          highlight: true,
+                        },
+                        { label: t('stats.pending'), value: stats.pending.toString() },
+                        { label: t('stats.funded'), value: stats.funded.toString() },
+                        { label: t('stats.paid'), value: stats.paid.toString() },
+                      ].map((s) => (
+                        <div
+                          key={s.label}
+                          className="p-3 sm:p-4 bg-brand-card border border-brand-border rounded-xl min-h-[88px] flex flex-col justify-center"
                         >
-                          {loadingMore ? (
-                            <span className="flex items-center justify-center gap-2">
-                              <span className="w-4 h-4 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" />
-                              {t('loadingMore')}
-                            </span>
-                          ) : (
-                            t('loadMore')
-                          )}
+                          <p className="text-xs text-brand-muted mb-1">{s.label}</p>
+                          <p
+                            className={`text-lg sm:text-xl font-bold ${s.highlight ? 'gradient-text' : ''}`}
+                          >
+                            {s.value}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Invoices */}
+                  <div ref={listRef}>
+                    <h2 className="text-lg font-semibold mb-4">{t('yourInvoices')}</h2>
+
+                    {/* Search */}
+                    <div className="relative mb-3">
+                      <svg
+                        className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-muted pointer-events-none"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"
+                        />
+                      </svg>
+                      <input
+                        type="text"
+                        placeholder={t('searchPlaceholder')}
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        className="w-full bg-brand-dark border border-brand-border rounded-xl pl-9 pr-4 py-2.5 text-sm text-brand-text placeholder-brand-muted focus:outline-none focus:border-brand-gold"
+                      />
+                      {search && (
+                        <button
+                          onClick={() => setSearch('')}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-brand-muted hover:text-brand-text"
+                        >
+                          ✕
                         </button>
-                        <p className="text-xs text-brand-muted mt-2">
-                          {t('showing', { count: invoices.length })}
-                          {totalOnChainCount > 0 &&
-                            ` · Scanned ${scannedCount} of ${totalOnChainCount} on-chain`}
-                        </p>
+                      )}
+                    </div>
+
+                    {viewMode === DASHBOARD_VIEW_MODES.LIST && (
+                      <>
+                        <div className="flex flex-col gap-3 mb-4">
+                          <div className="flex gap-1 flex-wrap">
+                            <button
+                              onClick={() => setStatusFilters([])}
+                              className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                                statusFilters.length === 0
+                                  ? 'bg-brand-gold text-brand-dark'
+                                  : 'text-brand-muted hover:text-brand-text bg-brand-card border border-brand-border'
+                              }`}
+                            >
+                              {t('status.all')}
+                            </button>
+                            {STATUS_TABS.map((tab) => (
+                              <button
+                                key={tab}
+                                onClick={() =>
+                                  setStatusFilters((prev) =>
+                                    prev.includes(tab)
+                                      ? prev.filter((item) => item !== tab)
+                                      : [...prev, tab],
+                                  )
+                                }
+                                className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                                  statusFilters.includes(tab)
+                                    ? 'bg-brand-gold text-brand-dark'
+                                    : 'text-brand-muted hover:text-brand-text bg-brand-card border border-brand-border'
+                                }`}
+                              >
+                                {t(`status.${tab.toLowerCase()}`)}
+                              </button>
+                            ))}
+                          </div>
+
+                          <select
+                            value={sort}
+                            onChange={(e) => setSort(e.target.value as SortOption)}
+                            className="w-full sm:w-auto bg-brand-dark border border-brand-border rounded-lg px-3 py-2 text-xs text-brand-text focus:outline-none focus:border-brand-gold cursor-pointer min-h-[36px]"
+                          >
+                            {SORT_OPTIONS.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {statusFilters.length > 0 && (
+                          <div className="flex items-center gap-2 flex-wrap mb-4">
+                            {statusFilters.map((status) => (
+                              <button
+                                key={status}
+                                onClick={() =>
+                                  setStatusFilters((prev) => prev.filter((item) => item !== status))
+                                }
+                                className="px-2.5 py-1 rounded-full text-xs bg-brand-card border border-brand-border text-brand-text hover:border-brand-gold/60"
+                              >
+                                {t(`status.${status.toLowerCase()}`)} ✕
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {loading ? (
+                      <div className="space-y-4">
+                        {[1, 2, 3].map((n) => (
+                          <InvoiceCardSkeleton key={n} />
+                        ))}
                       </div>
-                    )}
+                    ) : invoices.length === 0 ? (
+                      <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
+                        <p className="text-brand-muted mb-4">{t('noInvoices')}</p>
+                        <Link
+                          href="/invoice/new"
+                          className="text-brand-gold hover:underline text-sm font-medium"
+                        >
+                          {t('createFirst')}
+                        </Link>
+                      </div>
+                    ) : filtered.length === 0 ? (
+                      <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
+                        <p className="text-brand-muted mb-3">{t('noMatch')}</p>
+                        {isFiltered && (
+                          <button
+                            onClick={() => {
+                              setSearch('');
+                              setDebouncedSearch('');
+                              setStatusFilters([]);
+                            }}
+                            className="text-brand-gold hover:underline text-sm font-medium"
+                          >
+                            {t('clearFilters')}
+                          </button>
+                        )}
+                      </div>
+                    ) : viewMode === DASHBOARD_VIEW_MODES.PIPELINE ? (
+                      <PipelineBoard rows={pipelineRows} />
+                    ) : (
+                      <>
+                        <div className="space-y-4">
+                          {pagedItems.map((inv) => (
+                            <InvoiceCard
+                              key={inv.invoice.id}
+                              id={inv.invoice.id}
+                              metadata={inv.metadata}
+                              fundedAmount={committedMap[inv.invoice.id]}
+                            />
+                          ))}
+                        </div>
 
-                    {!hasMore && invoices.length > 0 && (
-                      <p className="text-xs text-brand-muted text-center mt-4">
-                        {t('allLoaded', { count: invoices.length })}
-                      </p>
+                        {/* Pagination controls */}
+                        <div className="mt-6 flex flex-col items-center gap-3">
+                          <p className="text-xs text-brand-muted">
+                            {filtered.length > 0
+                              ? `Showing ${page * PAGE_SIZE + 1}–${Math.min((page + 1) * PAGE_SIZE, filtered.length)} of ${filtered.length} invoice${filtered.length !== 1 ? 's' : ''}`
+                              : ''}
+                            {totalOnChainCount > 0 &&
+                              ` · Scanned ${scannedCount} of ${totalOnChainCount} on-chain`}
+                          </p>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setPage((p) => Math.max(0, p - 1))}
+                              disabled={page === 0}
+                              className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-brand-text hover:border-brand-gold/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              aria-label="Previous page"
+                            >
+                              ← Prev
+                            </button>
+
+                            <span className="px-3 py-2 text-sm text-brand-muted">
+                              Page {page + 1} / {totalPages}
+                            </span>
+
+                            <button
+                              onClick={async () => {
+                                const nextPage = page + 1;
+                                // If we need more data from the chain, load it first
+                                if (nextPage >= totalPages && hasMore) {
+                                  await loadMore();
+                                }
+                                setPage(nextPage);
+                              }}
+                              disabled={page >= totalPages - 1 && !hasMore}
+                              className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-brand-text hover:border-brand-gold/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              aria-label="Next page"
+                            >
+                              {loadingMore ? (
+                                <span className="flex items-center gap-1">
+                                  <span className="w-3 h-3 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" />
+                                  Loading…
+                                </span>
+                              ) : (
+                                'Next →'
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      </>
                     )}
-                  </>
-                )}
+                  </div>
+                </div>
+
+                {/* Right column */}
+                <div className="space-y-6 lg:sticky lg:top-24 lg:self-start">
+                  {invoices.length < 1 && (
+                    <SMEOnboardingChecklist
+                      walletConnected={wallet.connected}
+                      invoiceCount={invoices.length}
+                      onDismiss={() => {}}
+                    />
+                  )}
+                  {loading ? (
+                    <CreditScoreSkeleton />
+                  ) : (
+                    <CreditScore
+                      paid={stats.paid}
+                      funded={stats.funded}
+                      defaulted={stats.defaulted}
+                      totalVolume={stats.totalVolume}
+                      isStale={isScoreStale}
+                      finalScore={scoreFactors?.finalScore}
+                      riskAdjustmentPts={scoreFactors?.riskAdjustmentPts}
+                      trendAdjustmentPts={scoreFactors?.trendAdjustmentPts}
+                      paymentHistory={invoices
+                        .filter(
+                          (row) =>
+                            row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted',
+                        )
+                        .map((row) => {
+                          const paidDate = row.invoice.paidAt > 0 ? row.invoice.paidAt : null;
+                          return {
+                            invoiceId: row.invoice.id,
+                            amount: row.invoice.amount,
+                            dueDate: row.metadata.dueDate,
+                            paidDate,
+                            status: paidDate
+                              ? paidDate > row.metadata.dueDate
+                                ? 'Late'
+                                : 'OnTime'
+                              : row.invoice.status === 'Defaulted'
+                                ? 'Defaulted'
+                                : 'OnTime',
+                            daysLate:
+                              paidDate && paidDate > row.metadata.dueDate
+                                ? Math.floor((paidDate - row.metadata.dueDate) / 86400)
+                                : undefined,
+                          };
+                        })}
+                    />
+                  )}
+                  <Link
+                    href="/dashboard/credit"
+                    className="block text-center text-sm text-brand-gold hover:text-brand-amber transition-colors"
+                  >
+                    View Full Credit Profile →
+                  </Link>
+                </div>
               </div>
-            </div>
-
-            {/* Right column */}
-            <div>
-              <CreditScore
-                paid={stats.paid}
-                funded={stats.funded}
-                defaulted={stats.defaulted}
-                totalVolume={stats.totalVolume}
-                paymentHistory={invoices
-                  .filter((row) => row.invoice.status === 'Paid' || row.invoice.status === 'Defaulted')
-                  .map((row) => ({
-                    invoiceId: row.invoice.id,
-                    amount: row.invoice.amount,
-                    dueDate: row.metadata.dueDate,
-                    paidDate: row.metadata.paidDate ?? null,
-                    status: row.metadata.paidDate
-                      ? (row.metadata.paidDate > row.metadata.dueDate ? 'Late' : 'OnTime')
-                      : row.invoice.status === 'Defaulted'
-                        ? 'Defaulted'
-                        : 'OnTime',
-                    daysLate:
-                      row.metadata.paidDate && row.metadata.paidDate > row.metadata.dueDate
-                        ? Math.floor((row.metadata.paidDate - row.metadata.dueDate) / 86400)
-                        : undefined,
-                  }))}
-              />
-            </div>
-          </div>
+            )}
+          </>
         )}
       </div>
 

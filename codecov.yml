@@ -1,0 +1,37 @@
+# #781: per-flag coverage tracking for contracts vs. frontend, with a
+# required PR status check that fails when either flag's coverage drops
+# below its target. `informational: false` (the default) is what makes the
+# status check actually block/fail the PR rather than just report a number.
+coverage:
+  status:
+    project:
+      default: false
+      contracts:
+        target: 80%
+        flags:
+          - contracts
+        threshold: 1%
+      frontend:
+        target: 70%
+        flags:
+          - frontend
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+        threshold: 1%
+
+flags:
+  contracts:
+    paths:
+      - contracts/
+    carryforward: false
+  frontend:
+    paths:
+      - frontend/
+    carryforward: false
+
+comment:
+  layout: 'reach, diff, flags, files'
+  behavior: default
+  require_changes: false

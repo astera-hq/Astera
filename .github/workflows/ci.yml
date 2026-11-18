@@ -1,324 +1,455 @@
-name: CI/CD Pipeline
+name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
-    branches: [main, develop]
+    branches: [main]
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # ---- Security Audit ----
-  security-audit:
-    name: Security Audit
+  contracts:
+    name: Smart Contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: .
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32v1-none
+          components: clippy, rustfmt, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - run: cargo clippy -- -D warnings
+      # contracts/tests (package `integration-tests`) is itself a workspace
+      # member and uses soroban_sdk::contractimport! to load prebuilt .wasm
+      # files, so these must exist before ANY `cargo test` invocation that
+      # touches the full workspace — including the unqualified one below.
+      - name: Build contracts for integration tests
+        run: cargo build --locked --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry -p arbitration
+      - run: cargo test --locked
+        timeout-minutes: 10
+      - name: Run fuzz tests (short)
+        timeout-minutes: 10
+        run: cargo test --locked -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
+      - name: Run integration tests
+        timeout-minutes: 15
+        run: cargo test --locked -p integration-tests --test integration_tests
+      # #781: code coverage for the Soroban contracts. Runs after the tests
+      # above (not instead of them) since cargo-llvm-cov's own instrumented
+      # `cargo test` still needs the prebuilt wasm32v1-none release
+      # artifacts from the "Build contracts for integration tests" step.
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Generate contracts coverage report
+        timeout-minutes: 15
+        run: cargo llvm-cov --workspace --lcov --output-path contracts-lcov.info
+      - name: Upload contracts coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: contracts-lcov.info
+          flags: contracts
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+      - name: Check WASM size
+        run: |
+          cargo build --locked --target wasm32-unknown-unknown --release
+          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+            SIZE=$(wc -c < "$wasm" | tr -d ' ')
+            if [ "$SIZE" -gt 204800 ]; then
+              echo "ERROR: $wasm is $SIZE bytes — too large for deployment"
+              exit 1
+            fi
+          done
+          scripts/wasm-size-check.sh
+      - name: Upload WASM binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm
+          path: target/wasm32-unknown-unknown/release/*.wasm
+          retention-days: 30
+
+  benchmarks:
+    name: Contract Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `cargo bench` fails the job on a compile/panic error in the benchmark
+      # harness itself, which is enough to catch a contract-call regression
+      # that blows past a resource limit instead of it only surfacing later
+      # as a production failure. `--noplot` skips gnuplot/plotters output,
+      # which isn't needed (or reliably available) on the CI runner.
+      - name: Run contract benchmarks
+        run: cargo bench --locked -p benchmarks -- --noplot
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-benchmark-results
+          path: target/criterion/
+          retention-days: 30
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Check frontend formatting
+        run: npx prettier --check .
+      - name: Check locale files stay in sync with en
+        run: npm run check:locales
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-
-      - name: Run cargo-audit
-        working-directory: ./contracts
-        run: cargo audit
-
-  # ---- Rust Contracts ----
-  rust-contracts:
-    name: Rust Contracts
-    runs-on: ubuntu-latest
-    needs: security-audit
-    strategy:
-      matrix:
-        contract: [invoice, pool, credit_score]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: contracts
+          workspaces: .
 
-      - name: Check formatting
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo clippy -- -D warnings
-
-      - name: Build contract
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo build --target wasm32-unknown-unknown --release
-
-      - name: Run tests
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo test --verbose
-
-      - name: Run fuzz tests
-        working-directory: ./contracts/${{ matrix.contract }}
-        run: cargo test --test fuzz_tests --verbose
-        continue-on-error: false
-
-  # ---- WASM Size Check ----
-  check-wasm-size:
-    name: Check Wasm binary sizes
-    runs-on: ubuntu-latest
-    needs: rust-contracts
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
       - name: Build contracts
-        run: cargo build --target wasm32-unknown-unknown --release
-      - name: Check sizes
-        run: |
-          MAX_SIZE_BYTES=204800
-          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-            SIZE=$(stat -c%s "$wasm")
-            echo "$wasm: $SIZE bytes"
-            if [ "$SIZE" -gt "$MAX_SIZE_BYTES" ]; then
-              echo "ERROR: $wasm exceeds limit"
-              exit 1
-            fi
-          done
+        run: cargo build --locked --target wasm32v1-none --release -p invoice -p pool -p credit_score -p share -p oracle_registry -p arbitration
 
-  # ---- Frontend ----
-  frontend:
-    name: Frontend Build & Test
+      - name: Run cross-contract integration tests
+        working-directory: .
+        run: cargo test --locked --manifest-path contracts/tests/Cargo.toml
+
+      # #781: frontend Jest coverage, uploaded to Codecov under its own flag
+      # so contract and frontend coverage are tracked (and can regress)
+      # independently.
+      - name: Frontend tests with coverage
+        run: npm test -- --coverage --coverageReporters=lcov
+      - name: Upload frontend coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: frontend/coverage/lcov.info
+          flags: frontend
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  e2e:
+    name: E2E Tests
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./frontend
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run ESLint
-        run: npm run lint
-
-      - name: Build frontend
-        run: npm run build
-
-  # ---- Dependency Scanning ----
-  dependency-scan:
-    name: Dependency Vulnerability Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Scan frontend dependencies
-        working-directory: ./frontend
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Start local Stellar network & deploy contracts
+        working-directory: .
         run: |
-          npm install -g npm-audit-resolver
-          npm audit --audit-level=high
-
-  # ---- E2E Tests (Playwright) ----
-  e2e-tests:
-    name: E2E Tests (Playwright)
-    runs-on: ubuntu-latest
-    needs: [frontend]
-    if: github.event_name == 'pull_request'
-    defaults:
-      run:
-        working-directory: ./frontend
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
-
-      - name: Build frontend
-        run: npm run build
+          docker compose up -d stellar contracts
+          until docker compose logs contracts | grep -q "Contract IDs written"; do sleep 2; done
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Run E2E tests
+        run: |
+          export $(docker compose exec -T contracts cat /contract-ids/env | xargs)
+          export NEXT_PUBLIC_INVOICE_CONTRACT_ID="$INVOICE_CONTRACT_ID"
+          export NEXT_PUBLIC_POOL_CONTRACT_ID="$POOL_CONTRACT_ID"
+          npm run test:e2e
         env:
-          NEXT_PUBLIC_NETWORK: testnet
-          NEXT_PUBLIC_INVOICE_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_POOL_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_USDC_TOKEN_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-
-      - name: Run Playwright E2E tests
-        run: npm run test:e2e
-        env:
-          NEXT_PUBLIC_NETWORK: testnet
-          NEXT_PUBLIC_INVOICE_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_POOL_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-          NEXT_PUBLIC_USDC_TOKEN_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM
-
-      - name: Upload Playwright report
+          NEXT_PUBLIC_NETWORK: local
+      - name: Upload E2E artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
           path: frontend/playwright-report/
-          retention-days: 7
-
-  # ---- Integration Tests ----
-  integration-tests:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: [rust-contracts, frontend]
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: contracts
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Build all contracts
-        working-directory: ./contracts
-        run: cargo build --target wasm32-unknown-unknown --release
-
-      - name: Run integration tests
-        working-directory: ./contracts
-        run: cargo test --test integration_tests --verbose
-
-      - name: Run all contract tests with timing
-        id: contract-tests
-        working-directory: ./contracts
-        run: |
-          START=$(date +%s)
-          cargo test --workspace --verbose 2>&1 | tee test-output.txt
-          END=$(date +%s)
-          ELAPSED=$((END-START))
-          echo "contract_test_duration_s=${ELAPSED}" >> $GITHUB_OUTPUT
-          echo "Test suite completed in ${ELAPSED} seconds"
-
-      - name: Check test execution time
-        run: |
-          ELAPSED=${{ steps.contract-tests.outputs.contract_test_duration_s }}
-          MAX_SECONDS=120
-          echo "Test duration: ${ELAPSED}s"
-          if [ "${ELAPSED}" -gt "${MAX_SECONDS}" ]; then
-            echo "⚠️  WARNING: Tests took ${ELAPSED}s, exceeding ${MAX_SECONDS}s threshold"
-          else
-            echo "✅ Tests completed within ${MAX_SECONDS}s threshold"
-          fi
-
-      - name: Run benchmarks
-        working-directory: ./contracts
-        run: cargo bench --bench contract_benchmarks
-
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        with:
-          name: contract-benchmarks-${{ github.sha }}
-          path: |
-            contracts/target/criterion/
-            contracts/test-output.txt
           retention-days: 30
 
-  # ---- Deploy to Testnet ----
-  deploy-testnet:
-    name: Deploy to Testnet
+  lighthouse:
+    name: Lighthouse CI
     runs-on: ubuntu-latest
-    needs: [rust-contracts, frontend, integration-tests]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: testnet
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npx playwright install chromium
+      - name: Build and run Lighthouse CI
+        run: npx lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+      - name: Upload Lighthouse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: .lighthouseci/
+          retention-days: 30
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+  oracle-service:
+    name: Oracle Service
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: oracle-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: oracle-service/package-lock.json
+      - run: npm ci
+      - name: Check oracle-service formatting
+        run: npx prettier --check .
+      - name: Build oracle-service
+        run: npm run build
+      - name: Test oracle-service
+        run: npm test
+
+  indexer:
+    name: Indexer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: indexer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Check indexer formatting
+        run: npx prettier --check .
+      - name: Build indexer
+        run: npm run build
+      - name: Test indexer
+        run: npm test
+
+  compliance-service:
+    name: Compliance Service
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: compliance-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: compliance-service/package-lock.json
+      - run: npm ci
+      - name: Build compliance-service
+        run: npm run build
+      - name: Test compliance-service
+        run: npm test
+
+  sdk-tests:
+    name: SDK Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: packages/sdk/package-lock.json
+      - run: npm ci
+      - name: Test SDK
+        run: npm test
+
+  deploy-smoke-test:
+    name: Deploy Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [contracts]
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    env:
+      # GitHub withholds repository secrets from `pull_request` runs
+      # triggered by a fork (by design — a fork PR can't be trusted with
+      # deploy credentials), so TESTNET_DEPLOYER_SECRET is empty for any
+      # external contribution and every step below would fail immediately on
+      # `--source-account` with nothing to actually test. `secrets`/`env`
+      # aren't usable in a job-level `if:`, so every secret-dependent step is
+      # individually guarded on this instead — they skip cleanly on fork PRs
+      # and run for real whenever the secret *is* available (e.g. a
+      # maintainer's own branch).
+      HAS_DEPLOY_SECRET: ${{ secrets.TESTNET_DEPLOYER_SECRET != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-
-      - name: Install Stellar CLI
-        run: cargo install stellar-cli --locked
-
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Soroban CLI system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libudev-dev libusb-1.0-0-dev pkg-config
+      - name: Install Soroban CLI
+        if: env.HAS_DEPLOY_SECRET == 'true'
+        # Building soroban-cli from source via `cargo install` pulls in native
+        # deps (libdbus, libudev, ...) that keep drifting on the runner image
+        # and take 10+ minutes to compile. Download the prebuilt stellar-cli
+        # release instead and symlink it as `soroban` — same tool (stellar-cli
+        # is soroban-cli's current name), same CLI surface, no native build.
+        run: |
+          curl -sSfL -o stellar-cli.tar.gz \
+            https://github.com/stellar/stellar-cli/releases/download/v27.0.0/stellar-cli-27.0.0-x86_64-unknown-linux-gnu.tar.gz
+          tar xzf stellar-cli.tar.gz
+          sudo install -m 755 stellar /usr/local/bin/stellar
+          sudo ln -sf /usr/local/bin/stellar /usr/local/bin/soroban
+          soroban --version
       - name: Build contracts
-        working-directory: ./contracts
-        run: cargo build --target wasm32-unknown-unknown --release
-
-      - name: Configure Stellar CLI
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
-          stellar keys add deployer --secret-key "${{ secrets.TESTNET_DEPLOYER_KEY }}"
-
-      - name: Deploy Invoice Contract
+          cargo build --locked --target wasm32-unknown-unknown --release -p invoice -p pool -p credit_score -p share -p secondary_market
+      - name: Deploy invoice contract to testnet
         id: deploy-invoice
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
-          CONTRACT_ID=$(stellar contract deploy \
+          CONTRACT_ID=$(soroban contract deploy \
             --wasm target/wasm32-unknown-unknown/release/invoice.wasm \
-            --source deployer \
-            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
-          echo "INVOICE_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
-        continue-on-error: true
-
-      - name: Deploy Pool Contract
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Invoice contract ID: $CONTRACT_ID"
+      - name: Smoke test invoice contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
+        run: |
+          soroban contract invoke \
+            --id ${{ steps.deploy-invoice.outputs.contract_id }} \
+            --fn get_invoice \
+            --arg 999 \
+            --network testnet
+          # Should return InvoiceError::InvoiceNotFound — verify it doesn't crash
+      - name: Deploy pool contract to testnet
         id: deploy-pool
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
-          CONTRACT_ID=$(stellar contract deploy \
+          CONTRACT_ID=$(soroban contract deploy \
             --wasm target/wasm32-unknown-unknown/release/pool.wasm \
-            --source deployer \
-            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
-          echo "POOL_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
-        continue-on-error: true
-
-      - name: Deploy Credit Score Contract
-        id: deploy-credit
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Pool contract ID: $CONTRACT_ID"
+      - name: Smoke test pool contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
-          CONTRACT_ID=$(stellar contract deploy \
+          soroban contract invoke \
+            --id ${{ steps.deploy-pool.outputs.contract_id }} \
+            --fn version \
+            --network testnet
+      - name: Deploy secondary_market contract to testnet
+        id: deploy-secondary-market
+        if: env.HAS_DEPLOY_SECRET == 'true'
+        run: |
+          CONTRACT_ID=$(soroban contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/secondary_market.wasm \
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Secondary market contract ID: $CONTRACT_ID"
+      - name: Smoke test secondary_market contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
+        run: |
+          # #1044: secondary_market has no `version` fn (unlike pool/invoice) —
+          # get_pool_contract is a safe read-only check instead: it returns
+          # None pre-initialize rather than panicking, so it just confirms the
+          # deployed wasm responds to invocation.
+          soroban contract invoke \
+            --id ${{ steps.deploy-secondary-market.outputs.contract_id }} \
+            --fn get_pool_contract \
+            --network testnet
+      - name: Deploy credit_score contract to testnet
+        id: deploy-credit-score
+        if: env.HAS_DEPLOY_SECRET == 'true'
+        run: |
+          CONTRACT_ID=$(soroban contract deploy \
             --wasm target/wasm32-unknown-unknown/release/credit_score.wasm \
-            --source deployer \
-            --network testnet 2>&1 | grep -oP 'Contract ID: \K[A-Z0-9]+' || echo "")
-          echo "CREDIT_CONTRACT_ID=$CONTRACT_ID" >> $GITHUB_OUTPUT
-        continue-on-error: true
-
-      - name: Summary
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Credit score contract ID: $CONTRACT_ID"
+      - name: Smoke test credit_score contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
         run: |
-          echo "### Testnet Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Invoice Contract: ${{ steps.deploy-invoice.outputs.INVOICE_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Pool Contract: ${{ steps.deploy-pool.outputs.POOL_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Credit Score Contract: ${{ steps.deploy-credit.outputs.CREDIT_CONTRACT_ID }}" >> $GITHUB_STEP_SUMMARY
-
-// Contributed via automated bounty system
+          soroban contract invoke \
+            --id ${{ steps.deploy-credit-score.outputs.contract_id }} \
+            --fn version \
+            --network testnet
+      - name: Deploy share contract to testnet
+        id: deploy-share
+        if: env.HAS_DEPLOY_SECRET == 'true'
+        run: |
+          CONTRACT_ID=$(soroban contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/share.wasm \
+            --source ${{ secrets.TESTNET_DEPLOYER_SECRET }} \
+            --network testnet \
+            --fee 1000000)
+          echo "contract_id=$CONTRACT_ID" >> $GITHUB_OUTPUT
+          echo "Share contract ID: $CONTRACT_ID"
+      - name: Smoke test share contract
+        if: env.HAS_DEPLOY_SECRET == 'true'
+        run: |
+          soroban contract invoke \
+            --id ${{ steps.deploy-share.outputs.contract_id }} \
+            --fn total_supply \
+            --network testnet
+      - name: Save contract IDs to file
+        if: always()
+        run: |
+          echo "invoice=${{ steps.deploy-invoice.outputs.contract_id }}" > contract-ids.txt
+          echo "pool=${{ steps.deploy-pool.outputs.contract_id }}" >> contract-ids.txt
+          echo "secondary_market=${{ steps.deploy-secondary-market.outputs.contract_id }}" >> contract-ids.txt
+          echo "credit_score=${{ steps.deploy-credit-score.outputs.contract_id }}" >> contract-ids.txt
+          echo "share=${{ steps.deploy-share.outputs.contract_id }}" >> contract-ids.txt
+      - name: Upload contract IDs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-contract-ids
+          path: contract-ids.txt
+          retention-days: 30

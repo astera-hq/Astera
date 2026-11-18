@@ -5,9 +5,11 @@
 /* ---- Dark mode (default) ---- */
 :root {
   --bg: #0a0e1a;
+  --bg-navy: #0d1526;
   --card: #111827;
   --border: #1f2a3c;
   --gold: #f5a623;
+  --amber: #e8920a;
   --muted: #6b7a99;
   --text-primary: #f9fafb;
   --text-secondary: #d1d5db;
@@ -16,9 +18,11 @@
 /* ---- Light mode ---- */
 :root.light {
   --bg: #f8fafc;
+  --bg-navy: #f1f5f9;
   --card: #ffffff;
   --border: #e2e8f0;
   --gold: #d97706;
+  --amber: #b45309;
   --muted: #64748b;
   --text-primary: #0f172a;
   --text-secondary: #334155;
@@ -109,4 +113,13 @@ body {
 }
 :root.light .badge-disputed {
   @apply bg-orange-100 text-orange-700 border border-orange-300;
+}
+
+/* Light mode select element styling */
+:root.light select {
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+  background-position: right 0.5rem center;
+  background-repeat: no-repeat;
+  background-size: 1.5em 1.5em;
+  padding-right: 2.5rem;
 }

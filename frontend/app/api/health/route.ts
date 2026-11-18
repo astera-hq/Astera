@@ -11,10 +11,18 @@ interface HealthCheck {
 interface HealthResponse {
   status: 'ok' | 'degraded' | 'down';
   checks: Record<string, HealthCheck>;
+  contracts: {
+    invoice: string;
+    pool: string;
+    creditScore: string;
+    governance: string;
+  };
   timestamp: string;
 }
 
 const RPC_URL = process.env.NEXT_PUBLIC_STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org';
+const ORACLE_SERVICE_URL = process.env.ORACLE_SERVICE_URL ?? 'http://localhost:8080/health';
+const COMPLIANCE_SERVICE_URL = process.env.COMPLIANCE_SERVICE_URL ?? 'http://localhost:8081/health';
 const RPC_TIMEOUT_MS = 5000;
 
 async function checkRpc(): Promise<HealthCheck> {
@@ -33,12 +41,46 @@ async function checkRpc(): Promise<HealthCheck> {
       return { name: 'stellar_rpc', status: 'down', detail: `HTTP ${res.status}` };
     }
     if (elapsed > RPC_TIMEOUT_MS) {
-      return { name: 'stellar_rpc', status: 'degraded', detail: `Response time ${elapsed}ms > ${RPC_TIMEOUT_MS}ms` };
+      return {
+        name: 'stellar_rpc',
+        status: 'degraded',
+        detail: `Response time ${elapsed}ms > ${RPC_TIMEOUT_MS}ms`,
+      };
     }
     return { name: 'stellar_rpc', status: 'ok', detail: `${elapsed}ms` };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'unreachable';
     return { name: 'stellar_rpc', status: 'down', detail: message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function checkHttpService(name: string, url: string): Promise<HealthCheck> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+  try {
+    const start = Date.now();
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    const elapsed = Date.now() - start;
+    if (!res.ok) {
+      return { name, status: 'down', detail: `HTTP ${res.status}` };
+    }
+    if (elapsed > RPC_TIMEOUT_MS) {
+      return {
+        name,
+        status: 'degraded',
+        detail: `Response time ${elapsed}ms > ${RPC_TIMEOUT_MS}ms`,
+      };
+    }
+    return { name, status: 'ok', detail: `${elapsed}ms` };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'unreachable';
+    return { name, status: 'down', detail: message };
   } finally {
     clearTimeout(timer);
   }
@@ -51,11 +93,11 @@ function overallStatus(checks: Record<string, HealthCheck>): 'ok' | 'degraded' |
   return 'ok';
 }
 
-async function fireWebhook(payload: HealthResponse): Promise<void> {
+function fireWebhook(payload: HealthResponse): Promise<void> {
   const webhookUrl = process.env.ALERT_WEBHOOK_URL;
-  if (!webhookUrl || payload.status === 'ok') return;
+  if (!webhookUrl || payload.status === 'ok') return Promise.resolve();
   try {
-    await fetch(webhookUrl, {
+    return fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -64,22 +106,40 @@ async function fireWebhook(payload: HealthResponse): Promise<void> {
         data: payload,
         timestamp: payload.timestamp,
       }),
-    });
+    })
+      .then(() => undefined)
+      .catch(() => undefined);
   } catch {
-    // Best-effort — do not fail the health endpoint because of a webhook error.
+    return Promise.resolve();
   }
 }
 
+function contractId(value: string | undefined): string {
+  return value && value.trim() ? value.trim() : 'not_configured';
+}
+
 export async function GET() {
-  const rpc = await checkRpc();
+  const [rpc, oracle, compliance] = await Promise.all([
+    checkRpc(),
+    checkHttpService('oracle_service', ORACLE_SERVICE_URL),
+    checkHttpService('compliance_service', COMPLIANCE_SERVICE_URL),
+  ]);
 
   const checks: Record<string, HealthCheck> = {
     stellar_rpc: rpc,
+    oracle_service: oracle,
+    compliance_service: compliance,
   };
 
   const response: HealthResponse = {
     status: overallStatus(checks),
     checks,
+    contracts: {
+      invoice: contractId(process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID),
+      pool: contractId(process.env.NEXT_PUBLIC_POOL_CONTRACT_ID),
+      creditScore: contractId(process.env.NEXT_PUBLIC_CREDIT_SCORE_CONTRACT_ID),
+      governance: contractId(process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID),
+    },
     timestamp: new Date().toISOString(),
   };
 

@@ -1,7 +1,7 @@
 # Rust
 target/
+target*/
 **/*.rs.bk
-Cargo.lock
 
 # Node
 node_modules/
@@ -18,6 +18,15 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# Playwright / E2E
+frontend/test-results/
+frontend/playwright-report/
+
+# next-pwa generated artifacts (produced on build)
+frontend/public/sw.js
+frontend/public/workbox-*.js
+frontend/public/fallback-*.js
+
 # IDE
 .vscode/
 .idea/
@@ -30,5 +39,14 @@ yarn-error.log*
 node_modules/
 target/
 
+# Upgrade dry-run build artifacts
+.upgrade-dry-run/
+
+# Stale /sdk/ directory left behind after SDK consolidation (#1207)
+/sdk/
+
 # Contract test snapshots (generated)
 contracts/**/test_snapshots/
+
+# Proptest regression artifacts (generated)
+contracts/**/*.proptest-regressions/

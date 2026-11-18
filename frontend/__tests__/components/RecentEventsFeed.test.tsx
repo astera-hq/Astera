@@ -8,7 +8,7 @@ const mockEvents: ContractEvent[] = [
   {
     id: 'event-1',
     contractId: 'INV123',
-    topic: ['INVOICE', 'created'],
+    topic: ['invoice', 'created'],
     value: ['INV001', 'OWNER1', 1000000000n],
     ledger: 100,
     ledgerCloseAt: '2024-01-01T00:00:00Z',
@@ -17,7 +17,7 @@ const mockEvents: ContractEvent[] = [
   {
     id: 'event-2',
     contractId: 'POOL123',
-    topic: ['POOL', 'funded'],
+    topic: ['pool', 'funded'],
     value: ['INV001', 'SME1', 500000000n],
     ledger: 101,
     ledgerCloseAt: '2024-01-01T00:05:00Z',
@@ -26,7 +26,7 @@ const mockEvents: ContractEvent[] = [
   {
     id: 'event-3',
     contractId: 'INV123',
-    topic: ['INVOICE', 'default'],
+    topic: ['invoice', 'default'],
     value: 'INV002',
     ledger: 102,
     ledgerCloseAt: '2024-01-01T00:10:00Z',
@@ -73,7 +73,7 @@ describe('RecentEventsFeed', () => {
   });
 
   it('renders with single event', () => {
-    render(<RecentEventsFeed events={[mockEvents[0]]} isLoading={false} />);
+    render(<RecentEventsFeed events={[mockEvents[0]!]} isLoading={false} />);
     expect(screen.getByText('CREATED')).toBeInTheDocument();
     expect(screen.queryByText('FUNDED')).not.toBeInTheDocument();
   });

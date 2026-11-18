@@ -1,87 +1,102 @@
-# Windows/WSL2 Developer Setup Guide
+# Windows/WSL2 Setup Guide
 
-This guide covers the steps required to set up the Astera development environment on Windows using Windows Subsystem for Linux (WSL2).
+Astera's contracts and tooling are built for a Unix-like environment. On Windows
+we **strongly** recommend the Windows Subsystem for Linux 2 (WSL2) rather than
+native Windows, PowerShell, or Git Bash. This guide gets you from a fresh Windows
+install to a working local Astera development environment.
 
-## 1. WSL2 Installation and Ubuntu Setup
+## 1. Install WSL2
 
-1. Open PowerShell as Administrator and run:
-   ```powershell
-   wsl --install
-   ```
-2. Restart your computer if prompted.
-3. Once installed, set up your Ubuntu user and password.
-4. Update your Ubuntu packages:
-   ```bash
-   sudo apt update && sudo apt upgrade -y
-   ```
+Open **PowerShell as Administrator** and run:
 
-## 2. Docker Desktop with WSL2 Backend
+```powershell
+wsl --install
+```
 
-1. Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/).
-2. In Docker Desktop Settings, go to **General** and ensure **Use the WSL 2 based engine** is checked.
-3. Go to **Resources > WSL Integration** and enable integration for your Ubuntu distro.
-4. Verify Docker is running inside WSL:
-   ```bash
-   docker ps
-   ```
+This installs Ubuntu (by default) and enables the WSL2 virtual machine
+platform. Reboot when prompted, then launch **Ubuntu** from the Start menu and
+create your Linux user account.
 
-## 3. Rust and Cargo Installation
+> If you already have WSL1, upgrade it: `wsl --set-default-version 2` and, for an
+> existing distro, `wsl --set-version Ubuntu 2`.
 
-Inside your WSL terminal, run:
+## 2. Install dependencies inside WSL2 (Ubuntu)
+
+Open your Ubuntu terminal and install the toolchain:
+
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y build-essential pkg-config libssl-dev curl git python3
+```
+
+### Rust + the Soroban wasm target
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
 rustup target add wasm32-unknown-unknown
 ```
 
-## 4. Stellar CLI Installation
+### Stellar CLI
 
-Install the Stellar CLI inside WSL:
 ```bash
-cargo install --locked stellar-cli --features opt
+cargo install --locked stellar-cli
 ```
-Ensure `~/.cargo/bin` is in your PATH.
 
-## 5. Node.js 20+ via NVM
+Verify with `stellar --version`.
 
-Install NVM (Node Version Manager) inside WSL:
+### Node.js 20+
+
+Use `nvm` (recommended) or your distro's packages:
+
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-source ~/.bashrc
 nvm install 20
-nvm use 20
 ```
 
-## 6. Git Line Ending Configuration
+### Freighter wallet
 
-To avoid issues with Windows CRLF line endings, configure Git inside WSL to use LF:
+Install the [Freighter](https://www.freighter.app/) browser extension in your
+**Windows** browser (Edge/Chrome/Firefox). It talks to the network over RPC, so
+it works fine alongside WSL2 — you only need it for frontend interaction.
+
+## 3. Clone and build
+
+Keep your code on the **Linux** filesystem (`/home/you/...`), not the Windows
+mount (`/mnt/c/...`) — builds are dramatically faster and case-sensitivity issues
+disappear.
+
 ```bash
-git config --global core.autocrlf false
+git clone https://github.com/astera-hq/Astera.git
+cd Astera
+cargo build --target wasm32-unknown-unknown --release
 ```
-If you have already cloned the repo, you might need to re-clone it or run:
+
+## 4. Run the stack
+
+The easiest path is Docker Compose, which runs inside WSL2's own Docker
+engine. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/),
+enable the **WSL2 backend** (Settings → General → "Use the WSL 2 based engine"),
+and grant it access to your Ubuntu distro (Settings → Resources → WSL
+Integration).
+
+Then, from the repo root inside Ubuntu:
+
 ```bash
-git rm --cached -r .
-git reset --hard
+docker compose up --build
 ```
 
-## 7. Running the Docker Compose Stack
+The frontend is served at http://localhost:3000 (reachable from your Windows
+browser). See [Local Development with Docker Compose](local-development.md) for
+the full service layout and troubleshooting.
 
-From the root of the project:
-```bash
-docker-compose up -d
-```
-Note: If you encounter permission issues with mounted volumes, ensure the project is cloned into the WSL filesystem (e.g., `~/source/Astera`) rather than the Windows filesystem (`/mnt/c/...`).
+## 5. Common pitfalls
 
-## 8. Known Issues and Solutions
-
-### File Permissions
-**Issue:** Cargo builds fail or Docker volumes have incorrect permissions.
-**Solution:** Move your project to the native WSL filesystem (e.g., `~/projects/Astera`) instead of `/mnt/c/`.
-
-### Port Forwarding
-**Issue:** `localhost` from Windows browser doesn't connect to services in WSL.
-**Solution:** Usually, WSL2 forwards ports to `localhost` automatically. If not, find the WSL IP using `hostname -I` and use that.
-
-### Stellar CLI Path
-**Issue:** `stellar` command not found.
-**Solution:** Add `export PATH="$HOME/.cargo/bin:$PATH"` to your `~/.bashrc` or `~/.zshrc`.
+- **`cannot find wasm32-unknown-unknown` during build:** you skipped
+  `rustup target add wasm32-unknown-unknown`. Re-run it.
+- **Builds hang / extremely slow:** you cloned into `/mnt/c`. Move the repo to
+  your Linux home directory.
+- **`stellar: command not found`:** your shell didn't pick up cargo. Run
+  `source "$HOME/.cargo/env"` or restart the terminal.
+- **Docker command not found in Ubuntu:** Docker Desktop's WSL integration is
+  off — enable it in Docker Desktop settings and restart the terminal.

@@ -2,8 +2,10 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import Navbar from '@/components/Navbar';
 import ThemeProvider from '@/components/ThemeProvider';
+import SWRProvider from '@/components/SWRProvider';
+import { ClientShell } from '@/components/ClientShell';
 import { Toaster } from 'react-hot-toast';
-import { assertEnvValid } from '@/lib/env';
+import { assertEnvValid, getAppUrl } from '@/lib/env';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -11,14 +13,30 @@ export const viewport: Viewport = {
   maximumScale: 5,
 };
 
+// #765: base URL used to resolve relative OG/Twitter image paths into the
+// absolute URLs social platforms require.
+const APP_URL = getAppUrl();
+
+const SITE_TITLE = 'Astera — Real World Assets on Stellar';
+const SITE_DESCRIPTION =
+  'Tokenize invoices. Fund real businesses. Earn on-chain yield. Built on Stellar Soroban.';
+
 export const metadata: Metadata = {
-  title: 'Astera — Real World Assets on Stellar',
-  description:
-    'Tokenize invoices. Fund real businesses. Earn on-chain yield. Built on Stellar Soroban.',
+  metadataBase: new URL(APP_URL),
+  title: SITE_TITLE,
+  description: SITE_DESCRIPTION,
   openGraph: {
-    title: 'Astera',
-    description: 'Invoice financing for emerging markets, powered by Stellar.',
+    type: 'website',
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
     siteName: 'Astera',
+    images: [{ url: '/og-image.png', width: 1200, height: 630, alt: SITE_TITLE }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+    images: ['/og-image.png'],
   },
 };
 
@@ -33,8 +51,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const messages = await getMessages();
 
   return (
-    <html lang={locale}>
+    <html lang={locale} suppressHydrationWarning>
       <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){var t=localStorage.getItem('astera-theme');var m=window.matchMedia('(prefers-color-scheme: light)').matches;if(t==='light'||(t===null&&m))document.documentElement.classList.add('light');})()`,
+          }}
+        />
         <link rel="manifest" href="/manifest.json" />
         <meta name="theme-color" content="#ffffff" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -52,13 +75,17 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           Skip to main content
         </a>
         <NextIntlClientProvider messages={messages}>
-          <ThemeProvider>
-            <Navbar />
-            <main id="main-content" role="main">
-              {children}
-            </main>
-            <Toaster position="top-right" duration={5000} />
-          </ThemeProvider>
+          <SWRProvider>
+            <ThemeProvider>
+              <ClientShell>
+                <Navbar />
+                <main id="main-content" role="main">
+                  {children}
+                </main>
+                <Toaster position="top-right" toastOptions={{ duration: 5000 }} />
+              </ClientShell>
+            </ThemeProvider>
+          </SWRProvider>
         </NextIntlClientProvider>
       </body>
     </html>

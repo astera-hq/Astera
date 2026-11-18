@@ -4,3 +4,6 @@ export { InvoiceFunnelChart } from './InvoiceFunnelChart';
 export { CreditScoreDistributionChart } from './CreditScoreDistributionChart';
 export { TopSmesTable } from './TopSmesTable';
 export { RecentEventsFeed } from './RecentEventsFeed';
+export { RateCurveChart } from './RateCurveChart';
+export { RevenueTrendChart } from './RevenueTrendChart';
+export { FeeVolumeChart } from './FeeVolumeChart';

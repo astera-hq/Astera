@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useTranslations } from 'next-intl';
 
 export type ToastKind = 'info' | 'warning' | 'error' | 'success';
 
@@ -36,6 +37,7 @@ const KIND_STYLES: Record<ToastKind, string> = {
 };
 
 export default function ToastHost() {
+  const tr = useTranslations('Notifications.toast');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   useEffect(() => {
@@ -84,7 +86,7 @@ export default function ToastHost() {
             </div>
             <button
               onClick={() => dismiss(t.id)}
-              aria-label="Dismiss notification"
+              aria-label={tr('dismiss')}
               className="shrink-0 opacity-70 hover:opacity-100 transition-opacity"
             >
               <svg

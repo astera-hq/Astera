@@ -42,7 +42,7 @@ export function RecentEventsFeed({ events, isLoading }: RecentEventsFeedProps) {
         <div className="space-y-2 max-h-96 overflow-y-auto custom-scrollbar">
           {events.map((event) => {
             const [contractType, eventType] = event.topic;
-            const isInvoice = contractType === 'INVOICE';
+            const isInvoice = contractType === 'invoice';
 
             return (
               <div

@@ -33,7 +33,7 @@ export function PoolUtilizationChart({ data, isLoading }: PoolUtilizationChartPr
         <span className="w-2 h-6 bg-brand-gold rounded-full" />
         Pool Utilization
       </h3>
-      <div className="h-72">
+      <div className="h-72 overflow-x-hidden">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
@@ -54,11 +54,12 @@ export function PoolUtilizationChart({ data, isLoading }: PoolUtilizationChartPr
                 borderRadius: '8px',
                 color: '#fff',
               }}
-              formatter={(value: number, name: string) => {
-                if (name === 'utilization') return `${value}%`;
-                if (name === 'deployed') return `$${value.toLocaleString()}`;
-                if (name === 'deposited') return `$${value.toLocaleString()}`;
-                return value;
+              formatter={(value, name) => {
+                const n = Number(value ?? 0);
+                if (name === 'utilization') return `${n}%`;
+                if (name === 'deployed') return `$${n.toLocaleString()}`;
+                if (name === 'deposited') return `$${n.toLocaleString()}`;
+                return n;
               }}
             />
             <Legend wrapperStyle={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }} />

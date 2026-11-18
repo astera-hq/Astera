@@ -24,9 +24,7 @@ describe('ConfirmActionModal', () => {
   });
 
   it('renders nothing when isOpen is false', () => {
-    const { container } = render(
-      <ConfirmActionModal {...defaultProps} isOpen={false} />,
-    );
+    const { container } = render(<ConfirmActionModal {...defaultProps} isOpen={false} />);
     expect(container.innerHTML).toBe('');
   });
 
@@ -62,8 +60,10 @@ describe('ConfirmActionModal', () => {
   });
 
   it('renders with destructive variant styling', () => {
-    render(<ConfirmActionModal {...defaultProps} variant="destructive" />);
-    // Confirm button should have red styling (disabled initially due to phrase)
+    render(
+      <ConfirmActionModal {...defaultProps} variant="destructive" confirmPhrase="CONFIRM TEST" />,
+    );
+    // Confirm button should be disabled until phrase matches
     const confirmBtn = screen.getByRole('button', { name: /confirm/i });
     expect(confirmBtn).toHaveAttribute('disabled');
   });
@@ -71,22 +71,14 @@ describe('ConfirmActionModal', () => {
   describe('with confirmPhrase', () => {
     it('shows input field when confirmPhrase is provided', () => {
       render(
-        <ConfirmActionModal
-          {...defaultProps}
-          confirmPhrase="CONFIRM TEST"
-          variant="destructive"
-        />,
+        <ConfirmActionModal {...defaultProps} confirmPhrase="CONFIRM TEST" variant="destructive" />,
       );
       expect(screen.getByPlaceholderText('CONFIRM TEST')).toBeInTheDocument();
     });
 
     it('disables Confirm button when phrase does not match', () => {
       render(
-        <ConfirmActionModal
-          {...defaultProps}
-          confirmPhrase="CONFIRM TEST"
-          variant="destructive"
-        />,
+        <ConfirmActionModal {...defaultProps} confirmPhrase="CONFIRM TEST" variant="destructive" />,
       );
       const confirmBtn = screen.getByRole('button', { name: /confirm/i });
       expect(confirmBtn).toHaveAttribute('disabled');
@@ -94,11 +86,7 @@ describe('ConfirmActionModal', () => {
 
     it('enables Confirm button when phrase matches', () => {
       render(
-        <ConfirmActionModal
-          {...defaultProps}
-          confirmPhrase="CONFIRM TEST"
-          variant="destructive"
-        />,
+        <ConfirmActionModal {...defaultProps} confirmPhrase="CONFIRM TEST" variant="destructive" />,
       );
       const input = screen.getByPlaceholderText('CONFIRM TEST');
       fireEvent.change(input, { target: { value: 'CONFIRM TEST' } });
@@ -108,11 +96,7 @@ describe('ConfirmActionModal', () => {
 
     it('calls onConfirm when phrase matches and Confirm is clicked', () => {
       render(
-        <ConfirmActionModal
-          {...defaultProps}
-          confirmPhrase="CONFIRM TEST"
-          variant="destructive"
-        />,
+        <ConfirmActionModal {...defaultProps} confirmPhrase="CONFIRM TEST" variant="destructive" />,
       );
       const input = screen.getByPlaceholderText('CONFIRM TEST');
       fireEvent.change(input, { target: { value: 'CONFIRM TEST' } });
@@ -122,11 +106,7 @@ describe('ConfirmActionModal', () => {
 
     it('does not call onConfirm when phrase does not match', () => {
       render(
-        <ConfirmActionModal
-          {...defaultProps}
-          confirmPhrase="CONFIRM TEST"
-          variant="destructive"
-        />,
+        <ConfirmActionModal {...defaultProps} confirmPhrase="CONFIRM TEST" variant="destructive" />,
       );
       const input = screen.getByPlaceholderText('CONFIRM TEST');
       fireEvent.change(input, { target: { value: 'WRONG PHRASE' } });
@@ -137,11 +117,7 @@ describe('ConfirmActionModal', () => {
 
     it('resets typed phrase after confirmation', async () => {
       render(
-        <ConfirmActionModal
-          {...defaultProps}
-          confirmPhrase="CONFIRM TEST"
-          variant="destructive"
-        />,
+        <ConfirmActionModal {...defaultProps} confirmPhrase="CONFIRM TEST" variant="destructive" />,
       );
       const input = screen.getByPlaceholderText('CONFIRM TEST');
       fireEvent.change(input, { target: { value: 'CONFIRM TEST' } });
@@ -161,7 +137,7 @@ describe('ConfirmActionModal', () => {
 
     it('calls onCancel when Escape key is pressed', () => {
       render(<ConfirmActionModal {...defaultProps} />);
-      fireEvent.keyDown(document, { key: 'Escape' });
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
       expect(mockOnCancel).toHaveBeenCalledTimes(1);
     });
   });

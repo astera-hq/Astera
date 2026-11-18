@@ -1,0 +1,17 @@
+{
+  "_comment": "Baseline WASM sizes (bytes, post wasm-opt -Oz) checked by scripts/wasm-size-check.sh. A PR may not grow any contract more than 10% over its recorded baseline. Update these values deliberately when a size increase is expected, in the same PR that causes it.",
+  "access_control": 62270,
+  "arbitration": 46189,
+  "auction": 35571,
+  "compliance": 31910,
+  "credit_score": 72286,
+  "governance": 28116,
+  "insurance": 38105,
+  "invoice": 94911,
+  "oracle_registry": 43132,
+  "pool": 155067,
+  "referral": 19817,
+  "secondary_market": 44603,
+  "share": 18434,
+  "tranche": 24819
+}

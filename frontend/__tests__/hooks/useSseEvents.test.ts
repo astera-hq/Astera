@@ -144,9 +144,12 @@ describe('useSseEvents Hook', () => {
   it('should update role when role prop changes', () => {
     (useStore as unknown as jest.Mock).mockReturnValue(jest.fn());
 
-    const { rerender } = renderHook(({ role }) => useSseEvents({ role, enabled: true }), {
-      initialProps: { role: 'SME' as const },
-    });
+    const { rerender } = renderHook(
+      ({ role }: { role: 'SME' | 'Investor' }) => useSseEvents({ role, enabled: true }),
+      {
+        initialProps: { role: 'SME' },
+      },
+    );
 
     expect(sseEventsService.setRole).toHaveBeenCalledWith('SME');
 

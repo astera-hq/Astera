@@ -3,9 +3,13 @@ import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 // Simple test component
-const TestButton = ({ onClick, children, disabled = false }: { 
-  onClick?: () => void; 
-  children: React.ReactNode; 
+const TestButton = ({
+  onClick,
+  children,
+  disabled = false,
+}: {
+  onClick?: () => void;
+  children: React.ReactNode;
   disabled?: boolean;
 }) => (
   <button onClick={onClick} disabled={disabled} data-testid="test-button">

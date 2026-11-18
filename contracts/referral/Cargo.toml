@@ -1,0 +1,22 @@
+[package]
+name = "referral"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+access_control = { path = "../access_control" }
+
+[[test]]
+name = "lifecycle_tests"
+path = "tests/lifecycle_tests.rs"
+
+[[test]]
+name = "access_control_tests"
+path = "tests/access_control_tests.rs"

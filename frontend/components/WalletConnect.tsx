@@ -1,22 +1,32 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+ test/auction-governance-boundary-coverage
 import { useStore, getStoredWalletAddress } from '@/lib/store';
+
+import { useStore, getStoredWalletAddress, wasWalletConnected } from '@/lib/store';
+ main
 import { getEnvConfig } from '@/lib/env';
+import { getFreighter } from '@/lib/freighter';
 import toast from 'react-hot-toast';
 import { truncateAddress } from '@/lib/stellar';
 import LoadingSpinner from '@/components/LoadingSpinner';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
+import { useTranslations } from 'next-intl';
 
 type WalletStep = 'idle' | 'detecting' | 'requesting-access' | 'fetching-address';
 
-const STEP_LABELS: Record<WalletStep, string> = {
-  idle: 'Connect Wallet',
-  detecting: 'Detecting Freighter…',
-  'requesting-access': 'Approve in Freighter…',
-  'fetching-address': 'Fetching address…',
-};
-
 const MAX_RETRIES = 2;
+const WALLET_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number = WALLET_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Wallet operation timed out after 10 s')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // Network mismatch detection function
 async function checkNetworkMismatch(): Promise<{
@@ -25,7 +35,7 @@ async function checkNetworkMismatch(): Promise<{
   appNetwork: string | null;
 }> {
   try {
-    const freighter = await import('@stellar/freighter-api');
+    const freighter = await getFreighter();
     const { network } = await freighter.getNetwork();
     const envConfig = getEnvConfig();
     const appNetwork = envConfig.NEXT_PUBLIC_NETWORK;
@@ -48,63 +58,99 @@ async function checkNetworkMismatch(): Promise<{
 }
 
 export default function WalletConnect() {
+  const t = useTranslations('Notifications.wallet');
+  const router = useRouter();
   const { wallet, setWallet, disconnect, setNetworkMismatch } = useStore();
   const [step, setStep] = useState<WalletStep>('idle');
   const [retryCount, setRetryCount] = useState(0);
+  const [inlineError, setInlineError] = useState<string | null>(null);
+  const [disconnectModalOpen, setDisconnectModalOpen] = useState(false);
 
   const loading = step !== 'idle';
+  const stepLabels: Record<WalletStep, string> = {
+    idle: t('connect'),
+    detecting: t('detecting'),
+    'requesting-access': t('requestingAccess'),
+    'fetching-address': t('fetchingAddress'),
+  };
 
   // Auto-reconnect on mount if a wallet address was previously stored
   useEffect(() => {
     const stored = getStoredWalletAddress();
+ test/auction-governance-boundary-coverage
     if (!stored || wallet.connected) return;
+
+    if (!wasWalletConnected() || !stored || wallet.connected) return;
+ main
 
     void (async () => {
       try {
-        const freighter = await import('@stellar/freighter-api');
+        const freighter = await getFreighter();
+ test/auction-governance-boundary-coverage
         const { isConnected } = await freighter.isConnected();
         if (!isConnected) return;
 
         const { isAllowed } = await freighter.isAllowed();
         if (!isAllowed) return;
 
+        const { isAllowed } = await freighter.isAllowed();
+        if (!isAllowed) {
+          disconnect();
+          return;
+        
+          main
+
         const { address, error: addrError } = await freighter.getAddress();
         if (addrError || !address) return;
 
+ test/auction-governance-boundary-coverage
+
+        if (address !== stored) {
+          disconnect();
+          toast.error('Freighter account changed. Please reconnect.');
+          return;
+        }
+
+ main
         // Check for network mismatch on auto-reconnect
         const networkCheck = await checkNetworkMismatch();
         setNetworkMismatch(networkCheck);
 
-        setWallet({ address, connected: true, network: 'testnet' });
+        setWallet({ address: address ?? null, connected: true, network: 'testnet' });
       } catch {
-        // Silent failure — user can reconnect manually
+        // Silent failure - user can reconnect manually
       }
     })();
+ test/auction-governance-boundary-coverage
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  }, [disconnect, setNetworkMismatch, setWallet, wallet.connected]);
+ main
+
   async function connect(attempt = 0) {
     setStep('detecting');
+    setInlineError(null);
     try {
-      const freighter = await import('@stellar/freighter-api');
+      const freighter = await getFreighter();
 
-      const { isConnected } = await freighter.isConnected();
+      const { isConnected } = await withTimeout(freighter.isConnected());
       if (!isConnected) {
-        toast.error('Freighter not detected. Please install the browser extension and reload.');
+        toast.error(t('freighterMissing'));
         setStep('idle');
         return;
       }
 
       setStep('requesting-access');
-      const { isAllowed } = await freighter.isAllowed();
+      const { isAllowed } = await withTimeout(freighter.isAllowed());
       if (!isAllowed) {
-        await freighter.setAllowed();
+        await withTimeout(freighter.setAllowed());
       }
 
       setStep('fetching-address');
       const { address, error: addrError } = await freighter.getAddress();
       if (addrError) {
-        toast.error('Could not retrieve wallet address. Please try again.');
+        toast.error(t('addressUnavailable'));
         setStep('idle');
         return;
       }
@@ -113,18 +159,19 @@ export default function WalletConnect() {
       const networkCheck = await checkNetworkMismatch();
       setNetworkMismatch(networkCheck);
 
-      setWallet({ address, connected: true, network: 'testnet' });
-      toast.success('Wallet connected successfully!');
+      setWallet({ address: address ?? null, connected: true, network: 'testnet' });
+      toast.success(t('connected'));
       setRetryCount(0);
       setStep('idle');
     } catch (e) {
       console.error('[WalletConnect] Connection error:', e);
-      if (attempt < MAX_RETRIES) {
+      const isTimeout = e instanceof Error && e.message.includes('timed out');
+      if (!isTimeout && attempt < MAX_RETRIES) {
         setRetryCount(attempt + 1);
         // Brief delay before auto-retry
         setTimeout(() => connect(attempt + 1), 800);
       } else {
-        toast.error('Failed to connect wallet after multiple attempts. Please try again.');
+        toast.error(t('connectFailed'));
         setRetryCount(0);
         setStep('idle');
       }
@@ -136,20 +183,39 @@ export default function WalletConnect() {
     connect(0);
   }
 
+  function handleConfirmDisconnect() {
+    setDisconnectModalOpen(false);
+    disconnect();
+    router.push('/');
+  }
+
   if (wallet.connected && wallet.address) {
     return (
-      <div className="flex items-center gap-3">
-        <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-800/50 text-green-400 text-sm">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-400" aria-hidden="true" />
-          <span>{truncateAddress(wallet.address)}</span>
+      <>
+        <div className="flex items-center gap-3">
+          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-800/50 text-green-400 text-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400" aria-hidden="true" />
+            <span>{truncateAddress(wallet.address)}</span>
+          </div>
+          <button
+            onClick={() => setDisconnectModalOpen(true)}
+            className="text-sm text-brand-muted hover:text-white transition-colors"
+          >
+            {t('disconnect')}
+          </button>
         </div>
-        <button
-          onClick={disconnect}
-          className="text-sm text-brand-muted hover:text-white transition-colors"
-        >
-          Disconnect
-        </button>
-      </div>
+
+        <ConfirmActionModal
+          title="Disconnect wallet?"
+          description="You will need to reconnect and re-authenticate."
+          confirmLabel="Disconnect"
+          cancelLabel="Keep connected"
+          variant="destructive"
+          isOpen={disconnectModalOpen}
+          onConfirm={handleConfirmDisconnect}
+          onCancel={() => setDisconnectModalOpen(false)}
+        />
+      </>
     );
   }
 
@@ -158,25 +224,32 @@ export default function WalletConnect() {
       <button
         onClick={() => connect(0)}
         disabled={loading}
+        data-onboarding-id="wallet-connect"
         className="flex items-center gap-2 px-4 py-2 bg-brand-gold text-brand-dark font-semibold rounded-lg hover:bg-brand-amber transition-colors text-sm disabled:opacity-60 disabled:cursor-not-allowed"
         aria-busy={loading}
       >
         {loading && <LoadingSpinner size="sm" />}
-        {STEP_LABELS[step]}
+        {stepLabels[step]}
       </button>
+
+      {inlineError && (
+        <p role="alert" className="text-xs text-red-400 text-right max-w-[18rem]">
+          {inlineError}
+        </p>
+      )}
 
       {retryCount > 0 && (
         <button
           onClick={handleRetry}
           className="text-xs text-brand-gold hover:text-brand-amber underline transition-colors"
         >
-          Retry
+          {t('retry')}
         </button>
       )}
 
       {loading && retryCount > 0 && (
         <p className="text-brand-muted text-xs">
-          Retry attempt {retryCount}/{MAX_RETRIES}…
+          {t('retryAttempt', { retryCount, maxRetries: MAX_RETRIES })}
         </p>
       )}
     </div>

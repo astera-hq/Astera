@@ -12,3 +12,28 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.4"
+access_control = { path = "../access_control" }
+
+[[test]]
+name = "fuzz_tests"
+path = "tests/fuzz_tests.rs"
+
+[[test]]
+name = "timeout_tests"
+path = "tests/timeout_tests.rs"
+
+[[test]]
+name = "multi_oracle_tests"
+path = "tests/multi_oracle_tests.rs"
+
+[[test]]
+name = "access_control_tests"
+path = "tests/access_control_tests.rs"
+
+[[test]]
+name = "issue_1501_cancel_invoice_counter_tests"
+path = "tests/issue_1501_cancel_invoice_counter_tests.rs"
+
+[[test]]
+name = "issue_1500_resolve_dispute_threshold_tests"
+path = "tests/issue_1500_resolve_dispute_threshold_tests.rs"

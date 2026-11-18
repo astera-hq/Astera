@@ -5,6 +5,11 @@
     "allowJs": true,
     "skipLibCheck": true,
     "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
     "noEmit": true,
     "esModuleInterop": true,
     "module": "esnext",
@@ -14,6 +19,7 @@
     "jsx": "preserve",
     "incremental": true,
     "plugins": [{ "name": "next" }],
+    "types": ["node", "react", "react-dom", "jest"],
     "paths": {
       "@/*": ["./*"]
     }

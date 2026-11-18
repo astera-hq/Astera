@@ -1,0 +1,21 @@
+[package]
+name = "access_control"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[[test]]
+name = "lifecycle_tests"
+path = "tests/lifecycle_tests.rs"
+
+[[test]]
+name = "cross_contract_tests"
+path = "tests/cross_contract_tests.rs"

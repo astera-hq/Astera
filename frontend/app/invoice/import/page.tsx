@@ -5,7 +5,7 @@ import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { buildCreateInvoiceTx, submitTx } from '@/lib/contracts';
-import { toStroops, formatUSDC } from '@/lib/stellar';
+import { NETWORK, toStroops, formatUSDC } from '@/lib/stellar';
 
 const MAX_INVOICES_PER_DAY = 10;
 
@@ -33,13 +33,19 @@ export default function ImportInvoicePage() {
   const [parsedRows, setParsedRows] = useState<ParsedRow[]>([]);
   const [validRows, setValidRows] = useState<ParsedRow[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [results, setResults] = useState<{ row: ParsedRow; success: boolean; invoiceId?: number; error?: string }[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [results, setResults] = useState<
+    { row: ParsedRow; success: boolean; invoiceId?: number; error?: string }[]
+  >([]);
 
   const parseCSV = useCallback((content: string): ParsedRow[] => {
     const lines = content.trim().split('\n');
     if (lines.length < 2) return [];
 
-    const header = lines[0].toLowerCase().split(',').map(h => h.trim());
+    const header = lines[0]!
+      .toLowerCase()
+      .split(',')
+      .map((h) => h.trim());
     const debtorIdx = header.indexOf('debtor_name');
     const amountIdx = header.indexOf('amount');
     const dueDateIdx = header.indexOf('due_date');
@@ -53,7 +59,7 @@ export default function ImportInvoicePage() {
 
     const rows: ParsedRow[] = [];
     for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].split(',').map(c => c.trim().replace(/^"|"$/g, ''));
+      const cols = lines[i]!.split(',').map((c) => c.trim().replace(/^"|"$/g, ''));
       const debtor = cols[debtorIdx] || '';
       const amount = cols[amountIdx] || '';
       const dueDate = cols[dueDateIdx] || '';
@@ -89,27 +95,65 @@ export default function ImportInvoicePage() {
     return rows;
   }, []);
 
-  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.name.endsWith('.csv')) {
-      toast.error('Please select a CSV file');
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const content = ev.target?.result as string;
-      const rows = parseCSV(content);
-      if (rows.length > 0) {
-        setParsedRows(rows);
-        setValidRows(rows.filter(r => r.errors.length === 0));
-        setStep('preview');
+  const processFile = useCallback(
+    (file: File) => {
+      if (!file.name.endsWith('.csv')) {
+        toast.error('Please select a CSV file');
+        return;
       }
-    };
-    reader.readAsText(file);
-  }, [parseCSV]);
+
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const content = ev.target?.result as string;
+        const rows = parseCSV(content);
+        if (rows.length > 0) {
+          setParsedRows(rows);
+          setValidRows(rows.filter((r) => r.errors.length === 0));
+          setStep('preview');
+        }
+      };
+      reader.readAsText(file);
+    },
+    [parseCSV],
+  );
+
+  const handleFileSelect = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      processFile(file);
+    },
+    [processFile],
+  );
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  }, []);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDragOver(false);
+      const file = e.dataTransfer.files?.[0];
+      if (file) processFile(file);
+    },
+    [processFile],
+  );
 
   const downloadTemplate = useCallback(() => {
     const blob = new Blob([CSV_TEMPLATE], { type: 'text/csv;charset=utf-8;' });
@@ -122,8 +166,8 @@ export default function ImportInvoicePage() {
   }, []);
 
   const removeRow = useCallback((rowNum: number) => {
-    setParsedRows(prev => prev.filter(r => r.rowNum !== rowNum));
-    setValidRows(prev => prev.filter(r => r.rowNum !== rowNum));
+    setParsedRows((prev) => prev.filter((r) => r.rowNum !== rowNum));
+    setValidRows((prev) => prev.filter((r) => r.rowNum !== rowNum));
   }, []);
 
   const handleStartImport = useCallback(async () => {
@@ -132,7 +176,9 @@ export default function ImportInvoicePage() {
       return;
     }
     if (validRows.length > MAX_INVOICES_PER_DAY) {
-      toast.error(`Maximum ${MAX_INVOICES_PER_DAY} invoices per day. Please reduce the number of invoices.`);
+      toast.error(
+        `Maximum ${MAX_INVOICES_PER_DAY} invoices per day. Please reduce the number of invoices.`,
+      );
       return;
     }
 
@@ -142,7 +188,7 @@ export default function ImportInvoicePage() {
 
     for (let i = 0; i < validRows.length; i++) {
       setCurrentIndex(i);
-      const row = validRows[i];
+      const row = validRows[i]!;
 
       try {
         const dueTimestamp = Math.floor(new Date(row.dueDate).getTime() / 1000);
@@ -158,17 +204,17 @@ export default function ImportInvoicePage() {
 
         const freighter = await import('@stellar/freighter-api');
         const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-          networkPassphrase: 'Test SDF Network ; September 2015',
+          networkPassphrase: NETWORK,
           address: wallet.address,
         });
         if (signError) throw new Error(signError.message);
 
         await submitTx(signedTxXdr);
 
-        setResults(prev => [...prev, { row, success: true, invoiceId: i + 1 }]);
+        setResults((prev) => [...prev, { row, success: true, invoiceId: i + 1 }]);
       } catch (e) {
         const error = e instanceof Error ? e.message : 'Transaction failed';
-        setResults(prev => [...prev, { row, success: false, error }]);
+        setResults((prev) => [...prev, { row, success: false, error }]);
       }
     }
 
@@ -177,7 +223,7 @@ export default function ImportInvoicePage() {
 
   const downloadResults = useCallback(() => {
     const header = ['Row', 'Debtor', 'Amount', 'Due Date', 'Status', 'Invoice ID', 'Error'];
-    const rows = results.map(r => [
+    const rows = results.map((r) => [
       r.row.rowNum,
       r.row.debtor,
       r.row.amount,
@@ -188,7 +234,7 @@ export default function ImportInvoicePage() {
     ]);
 
     const csv = [header, ...rows]
-      .map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(','))
+      .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
       .join('\n');
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -229,11 +275,26 @@ export default function ImportInvoicePage() {
                 Upload a CSV file with invoice data. The file must include the following columns:
               </p>
               <ul className="text-sm text-brand-muted mb-4 space-y-1">
-                <li><code className="text-brand-gold">debtor_name</code> - Name of the debtor (required)</li>
-                <li><code className="text-brand-gold">amount</code> - Invoice amount in USDC (required)</li>
-                <li><code className="text-brand-gold">due_date</code> - Due date as YYYY-MM-DD (required)</li>
-                <li><code className="text-brand-gold">description</code> - Invoice description (optional)</li>
-                <li><code className="text-brand-gold">verification_hash</code> - Verification hash (optional)</li>
+                <li>
+                  <code className="text-brand-gold">debtor_name</code> - Name of the debtor
+                  (required)
+                </li>
+                <li>
+                  <code className="text-brand-gold">amount</code> - Invoice amount in USDC
+                  (required)
+                </li>
+                <li>
+                  <code className="text-brand-gold">due_date</code> - Due date as YYYY-MM-DD
+                  (required)
+                </li>
+                <li>
+                  <code className="text-brand-gold">description</code> - Invoice description
+                  (optional)
+                </li>
+                <li>
+                  <code className="text-brand-gold">verification_hash</code> - Verification hash
+                  (optional)
+                </li>
               </ul>
 
               <input
@@ -243,13 +304,38 @@ export default function ImportInvoicePage() {
                 onChange={handleFileSelect}
                 className="hidden"
               />
-              <div className="flex gap-3">
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="px-5 py-3 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors"
+              <div
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`border-2 border-dashed rounded-2xl p-10 text-center transition-colors cursor-pointer ${
+                  dragOver
+                    ? 'border-brand-gold bg-brand-gold/10'
+                    : 'border-brand-border hover:border-brand-gold/50'
+                }`}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <svg
+                  className="mx-auto h-10 w-10 text-brand-muted mb-3"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
                 >
-                  Select CSV File
-                </button>
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={1.5}
+                    d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                  />
+                </svg>
+                <p className="text-sm text-brand-muted mb-1">
+                  {dragOver ? 'Drop your CSV file here' : 'Drag and drop your CSV file here'}
+                </p>
+                <p className="text-xs text-brand-muted">or click to browse files</p>
+              </div>
+
+              <div className="flex gap-3 mt-4">
                 <button
                   onClick={downloadTemplate}
                   className="px-5 py-3 border border-brand-border text-white font-semibold rounded-xl hover:border-brand-gold/50 transition-colors"
@@ -271,7 +357,8 @@ export default function ImportInvoicePage() {
 
               {validRows.length > MAX_INVOICES_PER_DAY && (
                 <div className="p-3 bg-yellow-900/20 border border-yellow-800/50 rounded-xl text-sm text-yellow-400 mb-4">
-                  Warning: You are about to create {validRows.length} invoices. The rate limit is {MAX_INVOICES_PER_DAY} invoices/day. Consider reducing the number.
+                  Warning: You are about to create {validRows.length} invoices. The rate limit is{' '}
+                  {MAX_INVOICES_PER_DAY} invoices/day. Consider reducing the number.
                 </div>
               )}
 
@@ -288,7 +375,7 @@ export default function ImportInvoicePage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-brand-border">
-                    {parsedRows.slice(0, 20).map(row => (
+                    {parsedRows.slice(0, 20).map((row) => (
                       <tr key={row.rowNum} className={row.errors.length > 0 ? 'opacity-60' : ''}>
                         <td className="py-2">{row.rowNum}</td>
                         <td className="py-2">{row.debtor}</td>
@@ -358,11 +445,11 @@ export default function ImportInvoicePage() {
               <h2 className="text-lg font-semibold mb-4">Import Complete</h2>
               <div className="space-y-2 mb-4">
                 <p className="text-green-400">
-                  {results.filter(r => r.success).length} invoices created successfully
+                  {results.filter((r) => r.success).length} invoices created successfully
                 </p>
-                {results.filter(r => !r.success).length > 0 && (
+                {results.filter((r) => !r.success).length > 0 && (
                   <p className="text-red-400">
-                    {results.filter(r => !r.success).length} invoices failed
+                    {results.filter((r) => !r.success).length} invoices failed
                   </p>
                 )}
               </div>
@@ -387,7 +474,10 @@ export default function ImportInvoicePage() {
               <h3 className="font-semibold mb-3">Details</h3>
               <div className="space-y-2 text-sm">
                 {results.map((r, i) => (
-                  <div key={i} className="flex items-center justify-between p-2 bg-brand-dark rounded-lg">
+                  <div
+                    key={i}
+                    className="flex items-center justify-between p-2 bg-brand-dark rounded-lg"
+                  >
                     <span className={r.success ? 'text-green-400' : 'text-red-400'}>
                       {r.success ? '✓' : '✗'} Invoice #{r.row.rowNum}
                     </span>

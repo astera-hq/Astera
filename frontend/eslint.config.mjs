@@ -13,6 +13,15 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ['node_modules/**', '.next/**'],
+    ignores: [
+      'node_modules/**',
+      '.next/**',
+      // Auto-generated Soroban contract bindings (see scripts/gen-bindings.sh).
+      'src/generated/**',
+      'public/sw.js',
+      'public/sw.js.map',
+      'public/workbox-*.js',
+      'public/workbox-*.js.map',
+    ],
   },
 );

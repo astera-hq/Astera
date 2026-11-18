@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useTranslations } from 'next-intl';
 import {
   PoolUtilizationChart,
   YieldPerformanceChart,
@@ -16,6 +17,7 @@ import {
 } from '@/lib/analytics';
 
 export default function AnalyticsPage() {
+  const t = useTranslations('Admin.analytics');
   const [data, setData] = useState<AnalyticsDashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +32,7 @@ export default function AnalyticsPage() {
       setLastRefresh(new Date());
     } catch (err) {
       console.error('[Analytics] Failed to load dashboard data:', err);
-      setError('Failed to load analytics data. Please try again.');
+      setError(t('error'));
     } finally {
       setIsLoading(false);
     }
@@ -62,15 +64,13 @@ export default function AnalyticsPage() {
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Analytics Dashboard</h1>
-          <p className="text-brand-muted">
-            Protocol performance metrics, invoice funnel analysis, and on-chain activity.
-          </p>
+          <h1 className="text-3xl font-bold text-white mb-2">{t('title')}</h1>
+          <p className="text-brand-muted">{t('description')}</p>
         </div>
         <div className="flex items-center gap-3">
           {lastRefresh && (
             <span className="text-xs text-brand-muted">
-              Last updated: {lastRefresh.toLocaleTimeString()}
+              {t('lastUpdated', { time: lastRefresh.toLocaleTimeString() })}
             </span>
           )}
           <button
@@ -78,12 +78,11 @@ export default function AnalyticsPage() {
             disabled={isLoading}
             className="bg-brand-gold hover:bg-brand-gold-light disabled:opacity-50 text-brand-dark px-4 py-2 rounded-xl text-sm font-bold transition-all"
           >
-            {isLoading ? 'Loading...' : 'Refresh Data'}
+            {isLoading ? t('loading') : t('refresh')}
           </button>
         </div>
       </div>
 
-      {/* Error State */}
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-4 text-red-400 text-sm">
           {error}

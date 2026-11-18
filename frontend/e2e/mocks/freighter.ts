@@ -6,16 +6,17 @@
  * @stellar/freighter-api so dynamic imports resolve to this stub.
  */
 
-export const MOCK_ADDRESS =
-  'GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3B2WSQHG4W37';
+export const MOCK_ADDRESS = 'GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3B2WSQHG4W37';
 
 /** Script string to inject into the browser page before app scripts run. */
-export function freighterMockScript(opts: {
-  isConnected?: boolean;
-  isAllowed?: boolean;
-  address?: string;
-  signError?: string;
-} = {}): string {
+export function freighterMockScript(
+  opts: {
+    isConnected?: boolean;
+    isAllowed?: boolean;
+    address?: string;
+    signError?: string;
+  } = {},
+): string {
   const connected = opts.isConnected ?? true;
   const allowed = opts.isAllowed ?? true;
   const address = opts.address ?? MOCK_ADDRESS;

@@ -10,14 +10,24 @@ import {
   getPoolTokenTotals,
   getInvestorPosition,
   getFundedInvoice,
+  listCoFundingRounds,
+  getCoFundingRound,
+  getInvestorCoFundPositions,
+  getListing,
+  listListingsForInvestor,
+  getOrder,
+  getOrderBook,
+  listOrdersForOwner,
   buildDepositTx,
   buildWithdrawTx,
   buildCommitToInvoiceTx,
   buildCreateInvoiceTx,
   buildMarkDefaultedTx,
-  buildInitCoFundingTx,
   buildSetYieldTx,
   submitTx,
+  getReferrer,
+  getReferralStats,
+  buildRegisterReferralTx,
 } from './contracts';
 import type {
   Invoice,
@@ -26,24 +36,97 @@ import type {
   PoolTokenTotals,
   FundedInvoice,
   InvoiceMetadata,
+  ReferralStats,
+  CoFundingRound,
+  Listing,
+  ListingKind,
+  Order,
+  OrderBookLevel,
 } from './types';
 
-// SWR Configuration
-const SWR_CONFIG = {
-  refreshInterval: 30000, // 30 seconds
-  revalidateOnFocus: true,
-  revalidateOnReconnect: true,
-  dedupingInterval: 5000, // 5 seconds
+type SWRCacheEntry = {
+  refreshInterval: number;
+  revalidateOnFocus: boolean;
+  revalidateOnReconnect: boolean;
+  dedupingInterval: number;
 };
 
-const STALE_TIMES = {
-  poolConfig: 300000, // 5 minutes - changes infrequently (admin updates)
-  invoiceCount: 15000, // 15 seconds - changes with new invoices
-  invoice: 10000, // 10 seconds - status changes frequently
-  position: 15000, // 15 seconds - changes with deposits/commits
-  tokens: 60000, // 1 minute - whitelist changes rarely
-  tokenTotals: 20000, // 20 seconds - changes with deposits/deployments
-  fundedInvoice: 10000, // 10 seconds - status changes
+/** Per-data-type TTLs (milliseconds). Import and refer to these directly. */
+export const CACHE_TTL = {
+  poolConfig: 5 * 60_000,
+  invoiceStatus: 15_000,
+  creditScore: 60_000,
+  walletBalance: 30_000,
+} as const;
+
+/** Per-resource SWR configuration. Import and spread into useSWR options. */
+export const CACHE_CONFIG: Record<string, SWRCacheEntry> = {
+  poolConfig: {
+    refreshInterval: CACHE_TTL.poolConfig,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.poolConfig,
+  },
+  invoiceCount: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  invoice: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  position: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  tokens: {
+    refreshInterval: CACHE_TTL.creditScore,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.creditScore,
+  },
+  tokenTotals: {
+    refreshInterval: CACHE_TTL.walletBalance,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.walletBalance,
+  },
+  fundedInvoice: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  referral: {
+    refreshInterval: CACHE_TTL.creditScore,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.creditScore,
+  },
+  coFundingRounds: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  coFundingPositions: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
+  secondaryMarketListings: {
+    refreshInterval: CACHE_TTL.invoiceStatus,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: CACHE_TTL.invoiceStatus,
+  },
 };
 
 // Error type for contract calls
@@ -73,8 +156,7 @@ async function fetcher<T>(fn: () => Promise<T>): Promise<T> {
 
 export function usePoolConfig() {
   return useSWR<PoolConfig, ContractError>('pool-config', () => fetcher(() => getPoolConfig()), {
-    ...SWR_CONFIG,
-    refreshInterval: STALE_TIMES.poolConfig,
+    ...CACHE_CONFIG.poolConfig,
   });
 }
 
@@ -85,8 +167,7 @@ export function useAcceptedTokens() {
     'accepted-tokens',
     () => fetcher(() => getAcceptedTokens()),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.tokens,
+      ...CACHE_CONFIG.tokens,
     },
   );
 }
@@ -95,8 +176,7 @@ export function useAcceptedTokens() {
 
 export function useInvoiceCount() {
   return useSWR<number, ContractError>('invoice-count', () => fetcher(() => getInvoiceCount()), {
-    ...SWR_CONFIG,
-    refreshInterval: STALE_TIMES.invoiceCount,
+    ...CACHE_CONFIG.invoiceCount,
   });
 }
 
@@ -107,8 +187,7 @@ export function useInvoice(id: number | null) {
     id !== null ? ['invoice', id] : null,
     () => fetcher(() => getInvoice(id!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.invoice,
+      ...CACHE_CONFIG.invoice,
     },
   );
 }
@@ -120,8 +199,7 @@ export function useInvoiceMetadata(id: number | null) {
     id !== null ? ['invoice-metadata', id] : null,
     () => fetcher(() => getInvoiceMetadata(id!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.invoice,
+      ...CACHE_CONFIG.invoice,
     },
   );
 }
@@ -133,8 +211,7 @@ export function useInvestorPosition(investor: string | null, token: string | nul
     investor && token ? ['position', investor, token] : null,
     () => fetcher(() => getInvestorPosition(investor!, token!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.position,
+      ...CACHE_CONFIG.position,
     },
   );
 }
@@ -146,8 +223,7 @@ export function usePoolTokenTotals(token: string | null) {
     token ? ['token-totals', token] : null,
     () => fetcher(() => getPoolTokenTotals(token!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.tokenTotals,
+      ...CACHE_CONFIG.tokenTotals,
     },
   );
 }
@@ -159,11 +235,180 @@ export function useFundedInvoice(invoiceId: number | null) {
     invoiceId !== null ? ['funded-invoice', invoiceId] : null,
     () => fetcher(() => getFundedInvoice(invoiceId!)),
     {
-      ...SWR_CONFIG,
-      refreshInterval: STALE_TIMES.fundedInvoice,
+      ...CACHE_CONFIG.fundedInvoice,
     },
   );
 }
+
+// ---- #799: Referral Program Cache ----
+
+export function useReferrer(referee: string | null) {
+  return useSWR<string | null, ContractError>(
+    referee ? ['referrer', referee] : null,
+    () => fetcher(() => getReferrer(referee!)),
+    {
+      ...CACHE_CONFIG.referral,
+    },
+  );
+}
+
+export function useReferralStats(referrer: string | null) {
+  return useSWR<ReferralStats, ContractError>(
+    referrer ? ['referral-stats', referrer] : null,
+    () => fetcher(() => getReferralStats(referrer!)),
+    {
+      ...CACHE_CONFIG.referral,
+    },
+  );
+}
+
+// ---- Co-Funding Rounds Cache ----
+
+export function useCoFundingRounds() {
+  return useSWR<CoFundingRound[], ContractError>(
+    'co-funding-rounds',
+    () =>
+      fetcher(async () => {
+        const ids = await listCoFundingRounds();
+        const rounds = await Promise.all(ids.map((id) => getCoFundingRound(id)));
+        return rounds.filter((r): r is CoFundingRound => r !== null);
+      }),
+    {
+      ...CACHE_CONFIG.coFundingRounds,
+    },
+  );
+}
+
+// ---- Co-Funding Positions Cache ----
+
+export function useCoFundingPositions(investor: string | null) {
+  return useSWR<Array<{ invoiceId: number; bps: number }>, ContractError>(
+    investor ? ['co-funding-positions', investor] : null,
+    () => fetcher(() => getInvestorCoFundPositions(investor!)),
+    {
+      ...CACHE_CONFIG.coFundingPositions,
+    },
+  );
+}
+
+// ---- #1044: Secondary Market Listings Cache ----
+//
+// Unlike co-funding rounds (which the pool contract can enumerate directly
+// via list_co_funding_rounds), secondary_market has no "list all listings"
+// entrypoint — only per-invoice and per-seller lookups. Browsing all open
+// listings across the platform is instead discovered from the indexer's
+// already-ingested lst_open/lst_cncl/lst_buy event history (see #1044's
+// indexer/src/parser.ts + api.ts changes), then hydrated with a live
+// getListing() read per id, mirroring the discover-then-hydrate shape of
+// useCoFundingRounds above.
+
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
+
+async function fetchListingIds(path: string): Promise<number[]> {
+  const res = await fetch(`${INDEXER_URL}${path}`);
+  if (!res.ok) throw new Error(`Indexer error: ${res.status}`);
+  const data = (await res.json()) as { listingIds: Array<string | number> };
+  return (data.listingIds ?? []).map((id) => Number(id));
+}
+
+async function hydrateListings(ids: number[]): Promise<Listing[]> {
+  const listings = await Promise.all(ids.map((id) => getListing(id)));
+  return listings.filter((l): l is Listing => l !== null);
+}
+
+/** All currently-open secondary-market listings (across every seller/invoice). */
+export function useOpenListings() {
+  return useSWR<Listing[], ContractError>(
+    'secondary-market-open-listings',
+    () =>
+      fetcher(async () => {
+        const ids = await fetchListingIds('/secondary-market/listings/open');
+        return hydrateListings(ids);
+      }),
+    {
+      ...CACHE_CONFIG.secondaryMarketListings,
+    },
+  );
+}
+
+/** Every listing (open, filled, or cancelled) a given seller has created. */
+export function useMyListings(seller: string | null) {
+  return useSWR<Listing[], ContractError>(
+    seller ? ['secondary-market-my-listings', seller] : null,
+    () =>
+      fetcher(async () => {
+        const ids = await listListingsForInvestor(seller!);
+        return hydrateListings(ids);
+      }),
+    {
+      ...CACHE_CONFIG.secondaryMarketListings,
+    },
+  );
+}
+
+// ---- #1035: Order Book Cache ----
+//
+// Unlike the listings above, `get_order_book` is scoped to a single
+// (invoiceId, kind) pair and reads on-chain state directly — no indexer
+// discovery step needed, since there's no "browse every invoice's book at
+// once" need in the UI (a seller/buyer works one invoice at a time).
+
+async function hydrateOrders(ids: number[]): Promise<Order[]> {
+  const orders = await Promise.all(ids.map((id) => getOrder(id)));
+  return orders.filter((o): o is Order => o !== null);
+}
+
+/** Resting bid/ask depth levels for one invoice's order book, as `{ bids, asks }` (#1133). */
+export function useOrderBook(invoiceId: number | null, kind: ListingKind | null) {
+  return useSWR<{ bids: OrderBookLevel[]; asks: OrderBookLevel[] }, ContractError>(
+    invoiceId !== null && kind ? ['secondary-market-order-book', invoiceId, kind] : null,
+    () =>
+      fetcher(async () => {
+        const { bids, asks } = await getOrderBook(invoiceId!, kind!);
+        return { bids, asks };
+      }),
+    {
+      ...CACHE_CONFIG.secondaryMarketListings,
+    },
+  );
+}
+
+/** Every order (any status) a given owner has placed. */
+export function useMyOrders(owner: string | null) {
+  return useSWR<Order[], ContractError>(
+    owner ? ['secondary-market-my-orders', owner] : null,
+    () =>
+      fetcher(async () => {
+        const ids = await listOrdersForOwner(owner!);
+        return hydrateOrders(ids);
+      }),
+    {
+      ...CACHE_CONFIG.secondaryMarketListings,
+    },
+  );
+}
+
+async function registerReferralMutation(
+  _: string,
+  { arg }: { arg: { referee: string; referrer: string; signedXdr: string } },
+) {
+  return submitTx(arg.signedXdr);
+}
+
+export function useRegisterReferral(referee: string) {
+  return useSWRMutation<
+    unknown,
+    ContractError,
+    string,
+    { referee: string; referrer: string; signedXdr: string }
+  >('register-referral', registerReferralMutation, {
+    onSuccess: () => {
+      mutate(['referrer', referee]);
+    },
+  });
+}
+
+export { buildRegisterReferralTx };
 
 // ---- Mutations with Cache Invalidation ----
 
@@ -286,6 +531,11 @@ export function useSetYield(admin: string) {
   return useSWRMutation<unknown, ContractError, string, { admin: string; signedXdr: string }>(
     'set-yield',
     setYieldMutation,
+    {
+      onSuccess: () => {
+        mutate('pool-config');
+      },
+    },
   );
 }
 
@@ -315,9 +565,3 @@ export function getPositionCacheKeys(investor?: string, token?: string) {
 
   return keys;
 }
-
-// Export SWR provider config for app setup
-export const swrConfig = {
-  provider: () => new Map(),
-  ...SWR_CONFIG,
-};

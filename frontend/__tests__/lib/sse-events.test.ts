@@ -19,15 +19,13 @@ import {
   MAX_EVENTS_HISTORY,
   EVENT_TOAST_MAP,
 } from '../../lib/sse-events';
-import { rpc } from '../../lib/stellar';
+import { rpcGetEvents, rpcGetLatestLedger } from '../../lib/stellar';
 
 // ---- Mocks ----
 
 jest.mock('../../lib/stellar', () => ({
-  rpc: {
-    getLatestLedger: jest.fn(),
-    getEvents: jest.fn(),
-  },
+  rpcGetEvents: jest.fn(),
+  rpcGetLatestLedger: jest.fn(),
   INVOICE_CONTRACT_ID: 'TEST_INVOICE_CONTRACT',
   POOL_CONTRACT_ID: 'TEST_POOL_CONTRACT',
   scValToNative: jest.fn((val: unknown) => val),
@@ -79,11 +77,11 @@ describe('SSE Events Polling Service', () => {
     });
 
     // Default mock responses
-    (rpc.getLatestLedger as jest.Mock).mockResolvedValue({
+    (rpcGetLatestLedger as jest.Mock).mockResolvedValue({
       sequence: 1000,
     });
 
-    (rpc.getEvents as jest.Mock).mockResolvedValue({ events: [] });
+    (rpcGetEvents as jest.Mock).mockResolvedValue({ events: [] });
   });
 
   afterEach(() => {
@@ -217,32 +215,32 @@ describe('SSE Events Polling Service', () => {
   // ---- Test 6: Toast Notifications ----
   describe('Toast Notifications', () => {
     it('should map funded event to success toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['funded']([1, 'sme-addr', BigInt(10000000)], 'tx-hash');
+      const toastConfig = EVENT_TOAST_MAP['funded']!([1, 'sme-addr', BigInt(10000000)], 'tx-hash');
       expect(toastConfig.kind).toBe('success');
       expect(toastConfig.title).toBe('Invoice Funded');
       expect(toastConfig.description).toContain('Invoice #1');
     });
 
     it('should map repaid event to info toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['repaid']([1, BigInt(10000000), BigInt(500000)]);
+      const toastConfig = EVENT_TOAST_MAP['repaid']!([1, BigInt(10000000), BigInt(500000)]);
       expect(toastConfig.kind).toBe('info');
       expect(toastConfig.title).toBe('Invoice Repaid');
     });
 
     it('should map default event to error toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['default']();
+      const toastConfig = EVENT_TOAST_MAP['default']!(undefined);
       expect(toastConfig.kind).toBe('error');
       expect(toastConfig.title).toBe('Invoice Defaulted');
     });
 
     it('should map deposit event to info toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['deposit'](['investor-addr', BigInt(5000000)]);
+      const toastConfig = EVENT_TOAST_MAP['deposit']!(['investor-addr', BigInt(5000000)]);
       expect(toastConfig.kind).toBe('info');
       expect(toastConfig.title).toBe('Pool Deposit');
     });
 
     it('should map withdraw event to warning toast', () => {
-      const toastConfig = EVENT_TOAST_MAP['withdraw'](['investor-addr', BigInt(5000000)]);
+      const toastConfig = EVENT_TOAST_MAP['withdraw']!(['investor-addr', BigInt(5000000)]);
       expect(toastConfig.kind).toBe('warning');
       expect(toastConfig.title).toBe('Pool Withdrawal');
     });
@@ -276,7 +274,7 @@ describe('SSE Events Polling Service', () => {
   // ---- Test 8: Error Handling ----
   describe('Error Handling', () => {
     it('should handle RPC errors gracefully', async () => {
-      (rpc.getLatestLedger as jest.Mock).mockRejectedValue(new Error('Network error'));
+      (rpcGetLatestLedger as jest.Mock).mockRejectedValue(new Error('Network error'));
 
       sseEventsService.start();
       await jest.advanceTimersByTimeAsync(0);

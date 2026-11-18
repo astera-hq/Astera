@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
+import { Skeleton } from '@/components/Skeleton';
 
 interface PaymentRecord {
   invoiceId: number;
@@ -18,7 +19,42 @@ interface Props {
   totalVolume: bigint;
   paymentHistory?: PaymentRecord[];
   previousScore?: number;
+  isStale?: boolean;
+  /**
+   * #1041: the contract's real `final_score` (blended score + debtor-
+   * concentration/invoice-size risk + repayment-trend adjustments), when the
+   * caller has already fetched it (e.g. via `getCreditScoreStatus`). When
+   * provided, this replaces the locally-estimated `score` below as the
+   * headline number — the local estimate remains the fallback for callers
+   * that haven't wired up the real fetch, so existing behavior is unchanged
+   * when this prop is omitted.
+   */
+  finalScore?: number;
+  riskAdjustmentPts?: number;
+  trendAdjustmentPts?: number;
 }
+
+const SCORE_TIERS = [
+  { name: 'Very Poor', min: 200 },
+  { name: 'Poor', min: 500 },
+  { name: 'Fair', min: 580 },
+  { name: 'Good', min: 670 },
+  { name: 'Very Good', min: 740 },
+  { name: 'Excellent', min: 800 },
+];
+
+const PTS_PAID_ON_TIME = 30;
+const PTS_PAID_LATE = 15;
+const PTS_DEFAULTED = 50;
+const PTS_NEW_INVOICE = 5;
+
+const TIER_BENEFITS: Record<string, string> = {
+  Poor: 'Unlock basic funding limits ($5,000 per invoice)',
+  Fair: 'Increase per-invoice limit to $10,000 and reduce factoring fees',
+  Good: 'Unlock higher funding limits ($25,000) and preferential fee tiers',
+  'Very Good': 'Access premium funding ($50,000+) and lowest factoring fees',
+  Excellent: 'Maximum funding limits and exclusive pool access',
+};
 
 export default function CreditScore({
   paid,
@@ -27,21 +63,39 @@ export default function CreditScore({
   totalVolume,
   paymentHistory = [],
   previousScore,
+  isStale = false,
+  finalScore,
+  riskAdjustmentPts = 0,
+  trendAdjustmentPts = 0,
 }: Props) {
   const total = paid + funded + defaulted;
+  const [showImprovement, setShowImprovement] = useState(false);
 
-  // Simple score: 300–850 based on repayment rate and volume
   const repaymentRate = total > 0 ? paid / total : 0;
-  const volumeBonus = Math.min(Number(totalVolume) / 1e10, 50); // up to 50 pts
-  const score = Math.round(300 + repaymentRate * 500 + volumeBonus);
+  const volumeBonus = Math.min(Number(totalVolume) / 1e10, 50);
+  const estimatedScore = Math.round(300 + repaymentRate * 500 + volumeBonus);
+  const score = finalScore ?? estimatedScore;
 
   const scoreChange = previousScore ? score - previousScore : null;
-  const scoreColor =
-    score >= 750 ? 'text-green-400' : score >= 600 ? 'text-yellow-400' : 'text-red-400';
-  const scoreLabel =
-    score >= 750 ? 'Excellent' : score >= 650 ? 'Good' : score >= 550 ? 'Fair' : 'Building';
+  const hasHistory = total > 0;
+  const scoreColor = !hasHistory
+    ? 'text-[var(--muted)]'
+    : score >= 750
+      ? 'text-green-400'
+      : score >= 600
+        ? 'text-yellow-400'
+        : 'text-red-400';
+  const scoreLabel = !hasHistory
+    ? 'No history'
+    : score >= 750
+      ? 'Excellent'
+      : score >= 650
+        ? 'Good'
+        : score >= 550
+          ? 'Fair'
+          : 'Building';
 
-  const arc = Math.round(((score - 300) / 550) * 180); // 0–180 degrees
+  const arc = Math.round(((score - 300) / 550) * 180);
 
   const avgPaymentDays = useMemo(() => {
     if (paymentHistory.length === 0) return 0;
@@ -49,32 +103,170 @@ export default function CreditScore({
     if (onTimePaid.length === 0) return 0;
     const totalDays = onTimePaid.reduce((sum, p) => {
       const due = p.dueDate;
-      const paid = p.paidDate || Date.now() / 1000;
+      const paid = p.paidDate ?? due;
       return sum + Math.floor((paid - due) / 86400);
     }, 0);
     return Math.round(totalDays / onTimePaid.length);
   }, [paymentHistory]);
 
+  const nextTier = useMemo(() => {
+    for (const tier of SCORE_TIERS) {
+      if (score < tier.min) {
+        return tier;
+      }
+    }
+    return null;
+  }, [score]);
+
+  const currentTier = useMemo(() => {
+    let tier = SCORE_TIERS[0];
+    for (const t of SCORE_TIERS) {
+      if (score >= t.min) {
+        tier = t;
+      }
+    }
+    return tier;
+  }, [score]);
+
+  const pointsToNext = nextTier ? nextTier.min - score : 0;
+
+  const recommendations = useMemo(() => {
+    const recs: { factor: string; stat: string; impact: string; tip: string }[] = [];
+
+    const onTimeRate = total > 0 ? paid / total : 0;
+    recs.push({
+      factor: 'On-time payments',
+      stat: `${paid}/${total} (${Math.round(onTimeRate * 100)}%)`,
+      impact: 'High',
+      tip:
+        onTimeRate < 0.8
+          ? `Pay your next ${Math.ceil(0.8 * total - paid)} invoices on time to reach Good tier`
+          : 'Keep up the great on-time payment record',
+    });
+
+    recs.push({
+      factor: 'Defaults',
+      stat: defaulted > 0 ? `${defaulted} default${defaulted > 1 ? 's' : ''}` : 'None',
+      impact: 'High',
+      tip:
+        defaulted > 0
+          ? 'Avoid defaults — each costs 50 points'
+          : 'No defaults — maintain this record',
+    });
+
+    const lateCount = paymentHistory.filter((p) => p.status === 'Late').length;
+    recs.push({
+      factor: 'Payment speed',
+      stat:
+        avgPaymentDays > 0
+          ? avgPaymentDays > 0
+            ? `Avg ${avgPaymentDays} days ${avgPaymentDays > 0 ? 'late' : 'early'}`
+            : 'N/A'
+          : lateCount > 0
+            ? `${lateCount} late payment(s)`
+            : 'No data',
+      impact: 'Medium',
+      tip:
+        avgPaymentDays > 0
+          ? 'Try to pay within the due date to boost your score'
+          : 'Pay invoices as early as possible for maximum points',
+    });
+
+    recs.push({
+      factor: 'Invoice volume',
+      stat: `${total} total`,
+      impact: 'Low',
+      tip:
+        total < 5
+          ? `Create ${5 - total} more invoices to build history faster (+${PTS_NEW_INVOICE} pts at 5 invoices)`
+          : total < 10
+            ? 'Reach 10 invoices for another score bonus'
+            : 'Strong invoice history — keep building',
+    });
+
+    return recs;
+  }, [paid, defaulted, total, avgPaymentDays, paymentHistory]);
+
   return (
     <div className="space-y-6">
+      {isStale && (
+        <div className="flex items-start gap-3 px-4 py-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl text-sm text-yellow-400">
+          <svg
+            className="w-4 h-4 mt-0.5 shrink-0"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+            />
+          </svg>
+          <span>
+            Score may be outdated — the scoring parameters were updated after this score was last
+            computed. It will refresh automatically on your next invoice payment.
+          </span>
+        </div>
+      )}
+
       {/* Score Overview Card */}
-      <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
+      <div className="p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl">
         <h2 className="text-lg font-semibold mb-6">On-Chain Credit Score</h2>
+
+        {/* Staleness warning: score was computed under a previous scoring config */}
+        {isStale && (
+          <div
+            role="alert"
+            aria-live="polite"
+            className="mb-4 flex items-start gap-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300"
+          >
+            <svg
+              className="mt-0.5 h-4 w-4 shrink-0"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+              />
+            </svg>
+            <span>
+              Score may be outdated — the scoring formula has been updated since this score was last
+              computed. Submit or repay an invoice to refresh your score.
+            </span>
+          </div>
+        )}
 
         {/* Score display with change indicator */}
         <div className="text-center mb-8">
           <div className={`text-5xl font-bold mb-2 ${scoreColor}`}>{score}</div>
-          <div className="text-brand-muted text-sm mb-1">{scoreLabel}</div>
+          <div className="text-[var(--muted)] text-sm mb-1">{scoreLabel}</div>
           {scoreChange !== null && (
             <div
               className={`text-xs font-medium ${
                 scoreChange >= 0 ? 'text-green-400' : 'text-red-400'
               }`}
             >
-              {scoreChange >= 0 ? '+' : ''}{scoreChange} since last invoice
+              {scoreChange >= 0 ? '+' : ''}
+              {scoreChange} since last invoice
             </div>
           )}
-          <div className="text-xs text-brand-muted/60 mt-2">Based on {total} invoice(s)</div>
+          {(riskAdjustmentPts !== 0 || trendAdjustmentPts !== 0) && (
+            <div className="text-xs text-[var(--muted)] mt-1">
+              {riskAdjustmentPts !== 0 &&
+                `Risk adjustment: ${riskAdjustmentPts > 0 ? '+' : ''}${riskAdjustmentPts} pts`}
+              {riskAdjustmentPts !== 0 && trendAdjustmentPts !== 0 && ' · '}
+              {trendAdjustmentPts !== 0 &&
+                `Trend: ${trendAdjustmentPts > 0 ? '+' : ''}${trendAdjustmentPts} pts`}
+            </div>
+          )}
+          <div className="text-xs text-[var(--muted)]/60 mt-2">Based on {total} invoice(s)</div>
         </div>
 
         {/* Score Breakdown */}
@@ -86,46 +278,162 @@ export default function CreditScore({
 
         {/* Additional Stats */}
         {total > 0 && (
-          <div className="mt-6 pt-6 border-t border-brand-border grid grid-cols-2 gap-4">
+          <div className="mt-6 pt-6 border-t border-[var(--border)] grid grid-cols-2 gap-4">
             <div>
-              <div className="text-xs text-brand-muted mb-1">Repayment Rate</div>
-              <div className="text-lg font-semibold">
-                {Math.round(repaymentRate * 100)}%
-              </div>
+              <div className="text-xs text-[var(--muted)] mb-1">Repayment Rate</div>
+              <div className="text-lg font-semibold">{Math.round(repaymentRate * 100)}%</div>
             </div>
             <div>
-              <div className="text-xs text-brand-muted mb-1">Average Payment Days</div>
+              <div className="text-xs text-[var(--muted)] mb-1">Average Payment Days</div>
               <div className="text-lg font-semibold">{avgPaymentDays} days</div>
             </div>
           </div>
         )}
 
         {total === 0 && (
-          <p className="text-center text-brand-muted text-sm mt-4">
+          <p className="text-center text-[var(--muted)] text-sm mt-4">
             Create and repay invoices to build your score.
           </p>
+        )}
+
+        {/* Score Tier Progress Bar */}
+        {nextTier && currentTier && (
+          <div className="mt-6 pt-6 border-t border-[var(--border)]">
+            <div className="flex justify-between text-xs text-[var(--muted)] mb-2">
+              <span>
+                {currentTier.name} ({score})
+              </span>
+              <span>
+                {nextTier.name} ({nextTier.min})
+              </span>
+            </div>
+            <div className="relative h-3 bg-brand-border rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-brand-border to-green-500 rounded-full transition-all"
+                style={{
+                  width: `${((score - currentTier.min) / (nextTier.min - currentTier.min)) * 100}%`,
+                }}
+              />
+              <div
+                className="absolute top-0 h-full w-0.5 bg-white/50"
+                style={{
+                  left: `${((score - currentTier.min) / (nextTier.min - currentTier.min)) * 100}%`,
+                }}
+              />
+            </div>
+            <div className="text-xs text-[var(--muted)] mt-2 text-center">
+              {pointsToNext} pts to {nextTier.name}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Score Improvement Panel (collapsed by default) */}
+      <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl overflow-hidden">
+        <button
+          onClick={() => setShowImprovement(!showImprovement)}
+          className="w-full p-6 text-left flex items-center justify-between hover:bg-brand-border/20 transition"
+        >
+          <h3 className="text-lg font-semibold">Improve your score</h3>
+          <svg
+            className={`w-5 h-5 text-[var(--muted)] transition-transform ${
+              showImprovement ? 'rotate-180' : ''
+            }`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+
+        {showImprovement && (
+          <div className="px-6 pb-6 space-y-6">
+            {/* Score Breakdown Table */}
+            <div>
+              <h4 className="text-sm font-semibold text-[var(--muted)] uppercase tracking-wider mb-3">
+                Current Stats vs. Recommendations
+              </h4>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border)]">
+                      <th className="text-left text-[var(--muted)] py-2 px-2">Factor</th>
+                      <th className="text-left text-[var(--muted)] py-2 px-2">Your Stats</th>
+                      <th className="text-left text-[var(--muted)] py-2 px-2">Impact</th>
+                      <th className="text-left text-[var(--muted)] py-2 px-2">Tip</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recommendations.map((rec, i) => (
+                      <tr key={i} className="border-b border-[var(--border)]/50">
+                        <td className="py-3 px-2 font-medium">{rec.factor}</td>
+                        <td className="py-3 px-2 text-[var(--muted)]">{rec.stat}</td>
+                        <td className="py-3 px-2">
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                              rec.impact === 'High'
+                                ? 'bg-red-500/20 text-red-400'
+                                : rec.impact === 'Medium'
+                                  ? 'bg-yellow-500/20 text-yellow-400'
+                                  : 'bg-blue-500/20 text-blue-400'
+                            }`}
+                          >
+                            {rec.impact}
+                          </span>
+                        </td>
+                        <td className="py-3 px-2 text-[var(--muted)] text-xs">{rec.tip}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Next Milestone */}
+            {nextTier && (
+              <div className="p-4 bg-brand-border/30 rounded-xl">
+                <h4 className="text-sm font-semibold mb-2">Next Milestone: {nextTier.name}</h4>
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="text-2xl font-bold">{nextTier.min}</div>
+                  <div className="text-xs text-[var(--muted)]">{pointsToNext} points away</div>
+                </div>
+                <p className="text-sm text-[var(--muted)]">
+                  {TIER_BENEFITS[nextTier.name] || 'Unlock new benefits at this tier'}
+                </p>
+                {pointsToNext <= PTS_PAID_ON_TIME * 2 && (
+                  <p className="text-sm text-green-400 mt-2">
+                    Pay {Math.ceil(pointsToNext / PTS_PAID_ON_TIME)} more invoice
+                    {Math.ceil(pointsToNext / PTS_PAID_ON_TIME) > 1 ? 's' : ''} on time (+
+                    {Math.ceil(pointsToNext / PTS_PAID_ON_TIME) * PTS_PAID_ON_TIME} pts) to reach{' '}
+                    {nextTier.name} tier and {TIER_BENEFITS[nextTier.name]?.toLowerCase()}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
       {/* Payment History Table */}
       {paymentHistory.length > 0 && (
-        <div className="p-6 bg-brand-card border border-brand-border rounded-2xl">
+        <div className="p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl">
           <h3 className="text-lg font-semibold mb-4">Payment History</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-brand-border">
-                  <th className="text-left text-brand-muted py-3 px-2">Invoice</th>
-                  <th className="text-right text-brand-muted py-3 px-2">Amount</th>
-                  <th className="text-left text-brand-muted py-3 px-2">Status</th>
-                  <th className="text-right text-brand-muted py-3 px-2">Days Late</th>
+                <tr className="border-b border-[var(--border)]">
+                  <th className="text-left text-[var(--muted)] py-3 px-2">Invoice</th>
+                  <th className="text-right text-[var(--muted)] py-3 px-2">Amount</th>
+                  <th className="text-left text-[var(--muted)] py-3 px-2">Status</th>
+                  <th className="text-right text-[var(--muted)] py-3 px-2">Days Late</th>
                 </tr>
               </thead>
               <tbody>
                 {paymentHistory.slice(0, 10).map((record) => (
                   <tr
                     key={record.invoiceId}
-                    className="border-b border-brand-border hover:bg-brand-border/30 transition"
+                    className="border-b border-[var(--border)] hover:bg-brand-border/30 transition"
                   >
                     <td className="py-3 px-2 font-medium">#{record.invoiceId}</td>
                     <td className="text-right py-3 px-2">
@@ -173,7 +481,7 @@ function ScoreRow({
   return (
     <div>
       <div className="flex justify-between text-sm mb-1">
-        <span className="text-brand-muted">{label}</span>
+        <span className="text-[var(--muted)]">{label}</span>
         <span className="font-medium">{count}</span>
       </div>
       <div className="h-1.5 bg-brand-border rounded-full overflow-hidden">
@@ -181,6 +489,45 @@ function ScoreRow({
           className={`h-full ${color} rounded-full transition-all`}
           style={{ width: `${pct}%` }}
         />
+      </div>
+    </div>
+  );
+}
+
+export function CreditScoreSkeleton() {
+  return (
+    <div className="p-6 bg-[var(--card)] border border-[var(--border)] rounded-2xl animate-pulse">
+      <Skeleton className="h-5 w-44 mb-6" />
+
+      <div className="text-center mb-8">
+        <Skeleton className="h-12 w-24 mx-auto mb-2" />
+        <Skeleton className="h-4 w-16 mx-auto mb-1" />
+        <Skeleton className="h-3 w-32 mx-auto" />
+      </div>
+
+      <div className="space-y-3">
+        {[1, 2, 3].map((i) => (
+          <div key={i}>
+            <div className="flex justify-between text-sm mb-1">
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-4 w-6" />
+            </div>
+            <div className="h-1.5 bg-brand-border rounded-full overflow-hidden">
+              <div className="h-full bg-brand-border/60 rounded-full" style={{ width: '50%' }} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-6 pt-6 border-t border-[var(--border)] grid grid-cols-2 gap-4">
+        <div>
+          <Skeleton className="h-3 w-20 mb-1" />
+          <Skeleton className="h-6 w-14" />
+        </div>
+        <div>
+          <Skeleton className="h-3 w-28 mb-1" />
+          <Skeleton className="h-6 w-14" />
+        </div>
       </div>
     </div>
   );

@@ -33,7 +33,7 @@ export function YieldPerformanceChart({ data, isLoading }: YieldPerformanceChart
         <span className="w-2 h-6 bg-emerald-500 rounded-full" />
         Yield Performance
       </h3>
-      <div className="h-72">
+      <div className="h-72 overflow-x-hidden">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
             <defs>
@@ -59,10 +59,11 @@ export function YieldPerformanceChart({ data, isLoading }: YieldPerformanceChart
                 borderRadius: '8px',
                 color: '#fff',
               }}
-              formatter={(value: number, name: string) => {
-                if (name === 'apy') return `${value}% APY`;
-                if (name === 'interest') return `${value}%`;
-                return value;
+              formatter={(value, name) => {
+                const n = Number(value ?? 0);
+                if (name === 'apy') return `${n}% APY`;
+                if (name === 'interest') return `${n}%`;
+                return n;
               }}
             />
             <Legend wrapperStyle={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }} />

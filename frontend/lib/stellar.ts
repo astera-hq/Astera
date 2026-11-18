@@ -10,13 +10,69 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 
-export const NETWORK = Networks.TESTNET;
-export const RPC_URL = 'https://soroban-testnet.stellar.org';
+// #659: pick the network passphrase from NEXT_PUBLIC_NETWORK so mainnet builds
+// sign with Networks.PUBLIC instead of falling through to testnet.
+const networkEnv = process.env.NEXT_PUBLIC_NETWORK ?? 'testnet';
+export const NETWORK =
+  networkEnv === 'mainnet'
+    ? Networks.PUBLIC
+    : networkEnv === 'standalone'
+      ? Networks.STANDALONE
+      : Networks.TESTNET;
+export const RPC_ENDPOINTS = [
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_FALLBACK_1,
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_FALLBACK_2,
+  'https://soroban-testnet.stellar.org',
+  'https://rpc-testnet.stellar.org',
+].filter(Boolean) as string[];
+export const RPC_URL = RPC_ENDPOINTS[0]!;
 export const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 
 // Set these after deploying your contracts
 export const INVOICE_CONTRACT_ID = process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID ?? '';
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID ?? '';
+// #1044: secondary-market listings + withdrawal-wait/liquidity-forecast satellite
+// contract, split out of `pool` to clear the 200KB wasm deploy limit.
+export const SECONDARY_MARKET_CONTRACT_ID =
+  process.env.NEXT_PUBLIC_SECONDARY_MARKET_CONTRACT_ID ?? '';
+export const CREDIT_SCORE_CONTRACT_ID = process.env.NEXT_PUBLIC_CREDIT_SCORE_CONTRACT_ID ?? '';
+export const GOVERNANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID ?? '';
+// #861: N-of-M staked oracle consensus network — optional, unset until deployed.
+export const ORACLE_REGISTRY_CONTRACT_ID =
+  process.env.NEXT_PUBLIC_ORACLE_REGISTRY_CONTRACT_ID ?? '';
+
+// #867: on-chain compliance / sanctions screening registry
+export const COMPLIANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID ?? '';
+
+// #862: invoice tranching (senior/junior) with waterfall repayment — optional,
+// unset until deployed.
+export const TRANCHE_CONTRACT_ID = process.env.NEXT_PUBLIC_TRANCHE_CONTRACT_ID ?? '';
+
+// #799: on-chain referral program — optional, unset until deployed.
+export const REFERRAL_CONTRACT_ID = process.env.NEXT_PUBLIC_REFERRAL_CONTRACT_ID ?? '';
+
+// #864: role-based multisig access-control registry — optional, unset until deployed.
+export const ACCESS_CONTROL_CONTRACT_ID = process.env.NEXT_PUBLIC_ACCESS_CONTROL_CONTRACT_ID ?? '';
+
+export type AccessControlRole =
+  | 'SuperAdmin'
+  | 'RiskManager'
+  | 'TreasuryManager'
+  | 'ComplianceOfficer'
+  | 'OracleManager';
+
+// #1043: structured multi-party dispute arbitration — optional, unset until deployed.
+export const ARBITRATION_CONTRACT_ID = process.env.NEXT_PUBLIC_ARBITRATION_CONTRACT_ID ?? '';
+// #1036: collateral-liquidation Dutch auction + oracle-priced, multi-asset
+// collateral risk-response satellite, split out of `pool` to clear the 200KB
+// wasm deploy limit.
+export const AUCTION_CONTRACT_ID = process.env.NEXT_PUBLIC_AUCTION_CONTRACT_ID ?? '';
+
+// #1055: default-insurance reserve — optional, unset until deployed.
+export const INSURANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_INSURANCE_CONTRACT_ID ?? '';
+
+export const SHARE_TOKEN_ID = process.env.NEXT_PUBLIC_SHARE_TOKEN_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
 export const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
 // #111: additional stablecoin support
@@ -41,12 +97,91 @@ const RPC_POOL_CONFIG = {
   retryBaseDelay: 1_000,
 };
 
+const RPC_READ_LIMIT = {
+  maxConcurrent: 5,
+  maxStartsPerSecond: 10,
+  windowMs: 1_000,
+};
+
+type QueuedRead<T> = {
+  fn: () => Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+};
+
+const rpcReadQueue: QueuedRead<unknown>[] = [];
+const rpcReadStartTimes: number[] = [];
+let activeRpcReads = 0;
+let rpcReadTimer: ReturnType<typeof setTimeout> | null = null;
+
+function pruneReadStartTimes(now: number): void {
+  while (rpcReadStartTimes.length > 0 && now - rpcReadStartTimes[0]! >= RPC_READ_LIMIT.windowMs) {
+    rpcReadStartTimes.shift();
+  }
+}
+
+function scheduleReadQueue(): void {
+  if (rpcReadTimer || rpcReadQueue.length === 0) return;
+
+  const now = Date.now();
+  pruneReadStartTimes(now);
+
+  if (rpcReadStartTimes.length < RPC_READ_LIMIT.maxStartsPerSecond) {
+    queueMicrotask(processReadQueue);
+    return;
+  }
+
+  const nextSlotIn = Math.max(0, RPC_READ_LIMIT.windowMs - (now - rpcReadStartTimes[0]!));
+  rpcReadTimer = setTimeout(() => {
+    rpcReadTimer = null;
+    processReadQueue();
+  }, nextSlotIn);
+}
+
+function processReadQueue(): void {
+  rpcReadTimer = null;
+  const now = Date.now();
+  pruneReadStartTimes(now);
+
+  while (
+    activeRpcReads < RPC_READ_LIMIT.maxConcurrent &&
+    rpcReadQueue.length > 0 &&
+    rpcReadStartTimes.length < RPC_READ_LIMIT.maxStartsPerSecond
+  ) {
+    const task = rpcReadQueue.shift()!;
+    activeRpcReads++;
+    rpcReadStartTimes.push(Date.now());
+
+    task
+      .fn()
+      .then(task.resolve, task.reject)
+      .finally(() => {
+        activeRpcReads = Math.max(0, activeRpcReads - 1);
+        processReadQueue();
+      });
+  }
+
+  scheduleReadQueue();
+}
+
+export function readContract<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    rpcReadQueue.push({
+      fn,
+      resolve: resolve as (value: unknown) => void,
+      reject,
+    });
+    processReadQueue();
+  });
+}
+
 interface PooledConnection {
   server: StellarRpc.Server;
   createdAt: number;
   lastUsed: number;
   healthy: boolean;
   inFlightRequests: number;
+  url: string;
 }
 
 class RpcConnectionPool {
@@ -62,12 +197,14 @@ class RpcConnectionPool {
   private initPool(): void {
     const now = Date.now();
     for (let i = 0; i < RPC_POOL_CONFIG.poolSize; i++) {
+      const url = RPC_ENDPOINTS[i % RPC_ENDPOINTS.length] ?? RPC_URL ?? '';
       this.connections.push({
-        server: new StellarRpc.Server(RPC_URL),
+        server: new StellarRpc.Server(url),
         createdAt: now,
         lastUsed: now,
         healthy: true,
         inFlightRequests: 0,
+        url,
       });
     }
   }
@@ -86,7 +223,7 @@ class RpcConnectionPool {
   private async performHealthChecks(): Promise<void> {
     const now = Date.now();
     for (let i = 0; i < this.connections.length; i++) {
-      const conn = this.connections[i];
+      const conn = this.connections[i]!;
 
       // Recycle connections that are too old
       if (now - conn.createdAt > RPC_POOL_CONFIG.maxConnectionAge) {
@@ -108,12 +245,18 @@ class RpcConnectionPool {
   /** Replace a connection with a fresh one */
   private recycleConnection(index: number): void {
     const now = Date.now();
+    // Try the next endpoint in the fallback list
+    const currentUrl = this.connections[index]?.url ?? RPC_URL ?? '';
+    const nextUrlIndex = (RPC_ENDPOINTS.indexOf(currentUrl) + 1) % RPC_ENDPOINTS.length;
+    const nextUrl = RPC_ENDPOINTS[nextUrlIndex] ?? RPC_URL ?? '';
+
     this.connections[index] = {
-      server: new StellarRpc.Server(RPC_URL),
+      server: new StellarRpc.Server(nextUrl),
       createdAt: now,
       lastUsed: now,
       healthy: true,
       inFlightRequests: 0,
+      url: nextUrl,
     };
   }
 
@@ -127,7 +270,7 @@ class RpcConnectionPool {
       .filter((c) => c.healthy)
       .sort((a, b) => a.inFlightRequests - b.inFlightRequests);
 
-    const conn = sorted[0] ?? this.connections[0];
+    const conn = sorted[0] ?? this.connections[0]!;
     conn.lastUsed = Date.now();
     return conn;
   }
@@ -195,27 +338,59 @@ const rpcPool = new RpcConnectionPool();
 export const rpc = rpcPool.getConnection().server;
 
 /** Execute an RPC call with connection pooling, retry, and timeout */
-export const rpcExecute = rpcPool.execute.bind(rpcPool);
+export function rpcExecute<T>(fn: (server: StellarRpc.Server) => Promise<T>): Promise<T> {
+  return readContract(() => rpcPool.execute(fn));
+}
+
+export type RpcLatestLedger = Awaited<ReturnType<StellarRpc.Server['getLatestLedger']>>;
+export type RpcEventsRequest = Parameters<StellarRpc.Server['getEvents']>[0];
+export type RpcEventsResponse = Awaited<ReturnType<StellarRpc.Server['getEvents']>>;
+
+export function rpcGetLatestLedger(): Promise<RpcLatestLedger> {
+  return rpcExecute<RpcLatestLedger>((server) => server.getLatestLedger());
+}
+
+export function rpcGetEvents(request: RpcEventsRequest): Promise<RpcEventsResponse> {
+  return rpcExecute<RpcEventsResponse>((server) => server.getEvents(request));
+}
 
 // ---- Utility Functions ----
+
+// #778: Stellar-native assets (XLM) and the pool's configured stablecoins
+// use 7 decimal places (stroops). `formatUSDC`/`toStroops`/`fromStroops`
+// hardcode this and stay correct for those — but any amount whose token may
+// have a different on-chain decimal count (e.g. a 6-decimal stablecoin or an
+// 18-decimal wrapped asset) must go through `formatAmount`/`fromRaw` with
+// that token's actual `decimals` instead.
+const DEFAULT_STELLAR_DECIMALS = 7;
 
 /** Convert USDC amount (human) to stroops (7 decimals) */
 export function toStroops(amount: number): bigint {
   return BigInt(Math.round(amount * 10_000_000));
 }
 
-/** Convert stroops to human USDC */
-export function fromStroops(stroops: bigint): number {
-  return Number(stroops) / 10_000_000;
+/** Convert a raw on-chain integer amount to its human value given `decimals`. */
+export function fromRaw(raw: bigint, decimals: number): number {
+  return Number(raw) / Math.pow(10, decimals);
 }
 
-/** Format a stroops bigint as a USD string */
-export function formatUSDC(stroops: bigint): string {
+/** Convert stroops to human USDC (7 decimals — XLM/pool-stablecoin specific). */
+export function fromStroops(stroops: bigint): number {
+  return fromRaw(stroops, DEFAULT_STELLAR_DECIMALS);
+}
+
+/** Format a raw on-chain integer amount as a USD string using `decimals`. */
+export function formatAmount(raw: bigint, decimals: number): string {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 2,
-  }).format(fromStroops(stroops));
+  }).format(fromRaw(raw, decimals));
+}
+
+/** Format a stroops bigint as a USD string (7 decimals — XLM/pool-stablecoin specific). */
+export function formatUSDC(stroops: bigint): string {
+  return formatAmount(stroops, DEFAULT_STELLAR_DECIMALS);
 }
 
 /** Format a unix timestamp as a readable date */
@@ -241,9 +416,9 @@ export function truncateAddress(addr: string): string {
 // ---- Stellar Explorer Deep Links (#228) ----
 
 export type ExplorerEntity = 'account' | 'transaction' | 'contract' | 'ledger';
-export type StellarNetwork = 'testnet' | 'mainnet';
+export type StellarNetwork = 'testnet' | 'mainnet' | 'standalone';
 
-const EXPLORER_BASES: Record<StellarNetwork, string> = {
+const EXPLORER_BASES: Record<Exclude<StellarNetwork, 'standalone'>, string> = {
   testnet: 'https://stellar.expert/explorer/testnet',
   mainnet: 'https://stellar.expert/explorer/public',
 };
@@ -258,8 +433,10 @@ const EXPLORER_BASES: Record<StellarNetwork, string> = {
 export function explorerUrl(
   type: ExplorerEntity,
   id: string,
-  network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ?? 'testnet',
-): string {
+  network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ??
+    'testnet',
+): string | null {
+  if (network === 'standalone') return null;
   const base = EXPLORER_BASES[network] ?? EXPLORER_BASES.testnet;
   return `${base}/${type}/${encodeURIComponent(id)}`;
 }
@@ -351,6 +528,24 @@ export async function simulateTx(
   });
 }
 
+export async function isAccessControlSigner(
+  address: string,
+  role: AccessControlRole,
+): Promise<boolean> {
+  if (!ACCESS_CONTROL_CONTRACT_ID) return false;
+
+  const roleArg = xdr.ScVal.scvVec([nativeToScVal(role, { type: 'symbol' })]);
+  const result = await simulateTx(
+    ACCESS_CONTROL_CONTRACT_ID,
+    'is_signer',
+    [roleArg, new Address(address).toScVal()],
+    address,
+  );
+
+  if (StellarRpc.Api.isSimulationError(result) || !result.result) return false;
+  return Boolean(scValToNative(result.result.retval));
+}
+
 /** Submit a signed XDR transaction */
 export type TransactionProgress = {
   status: 'pending' | 'confirmed' | 'failed';
@@ -379,50 +574,80 @@ export function parseSimulationError(sim: unknown): string {
   return 'Transaction simulation failed. Please review inputs and try again.';
 }
 
+const pendingTransactions = new Set<string>();
+
+function transactionKey(tx: { hash?: () => Uint8Array | string }, signedXDR: string): string {
+  try {
+    const hash = tx.hash?.();
+    if (typeof hash === 'string') return hash;
+    if (hash instanceof Uint8Array) {
+      return Array.from(hash)
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+    }
+  } catch {
+    // Fall back to the signed payload when hashing is unavailable in tests.
+  }
+
+  return signedXDR;
+}
+
 /** Submit a signed XDR transaction */
 export async function submitTx(
   signedXDR: string,
   onProgress?: (progress: TransactionProgress) => void,
 ) {
-  return rpcExecute(async (server) => {
-    const tx = TransactionBuilder.fromXDR(signedXDR, NETWORK);
-    const response = await server.sendTransaction(tx);
+  const tx = TransactionBuilder.fromXDR(signedXDR, NETWORK);
+  const txKey = transactionKey(tx, signedXDR);
 
-    if (response.status === 'ERROR') {
-      const error = `Transaction failed: ${safeStringify(response)}`;
-      onProgress?.({ status: 'failed', hash: response.hash, error });
-      throw new Error(error);
-    }
+  if (pendingTransactions.has(txKey)) {
+    throw new Error('Transaction already in progress');
+  }
 
-    onProgress?.({ status: 'pending', hash: response.hash });
-    let result = await server.getTransaction(response.hash);
-    let attempts = 0;
+  pendingTransactions.add(txKey);
 
-    while (
-      (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') &&
-      attempts < 20
-    ) {
+  try {
+    return await rpcExecute(async (server) => {
+      const response = await server.sendTransaction(tx);
+
+      if (response.status === 'ERROR') {
+        const error = `Transaction failed: ${safeStringify(response)}`;
+        onProgress?.({ status: 'failed', hash: response.hash, error });
+        throw new Error(error);
+      }
+
       onProgress?.({ status: 'pending', hash: response.hash });
-      await new Promise((r) => setTimeout(r, 1500));
-      result = await server.getTransaction(response.hash);
-      attempts++;
-    }
+      let result = await server.getTransaction(response.hash);
+      let attempts = 0;
 
-    if (String(result.status) === 'FAILED') {
-      const error = 'Transaction failed on-chain';
-      onProgress?.({ status: 'failed', hash: response.hash, error });
-      throw new Error(error);
-    }
+      while (
+        (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') &&
+        attempts < 20
+      ) {
+        onProgress?.({ status: 'pending', hash: response.hash });
+        await new Promise((r) => setTimeout(r, 1500));
+        result = await server.getTransaction(response.hash);
+        attempts++;
+      }
 
-    if (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') {
-      const error = 'Transaction confirmation timed out';
-      onProgress?.({ status: 'failed', hash: response.hash, error });
-      throw new Error(error);
-    }
+      if (String(result.status) === 'FAILED') {
+        const error = 'Transaction failed on-chain';
+        onProgress?.({ status: 'failed', hash: response.hash, error });
+        throw new Error(error);
+      }
 
-    onProgress?.({ status: 'confirmed', hash: response.hash });
-    return result;
-  });
+      if (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') {
+        const error = 'Transaction confirmation timed out';
+        onProgress?.({ status: 'failed', hash: response.hash, error });
+        throw new Error(error);
+      }
+
+      onProgress?.({ status: 'confirmed', hash: response.hash });
+      return result;
+    });
+  } finally {
+    pendingTransactions.delete(txKey);
+  }
 }
 
 export { nativeToScVal, scValToNative, Address, xdr };

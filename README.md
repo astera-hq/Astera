@@ -1,6 +1,7 @@
 # Astera
 
 [![Soroban Contracts CI](https://github.com/Jayy4rl/Astera/actions/workflows/contracts.yml/badge.svg?branch=main)](https://github.com/Jayy4rl/Astera/actions/workflows/contracts.yml)
+[![codecov](https://codecov.io/gh/astera-hq/Astera/branch/main/graph/badge.svg)](https://codecov.io/gh/astera-hq/Astera)
 
 **Real World Assets on Stellar. Invoice financing for emerging markets.**
 
@@ -14,9 +15,10 @@ Every paid invoice builds an on-chain credit history.
 
 ```
 contracts/
-  invoice/   — RWA invoice token contract (Soroban/Rust)
-  pool/      — Liquidity pool + yield distribution (Soroban/Rust)
-frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
+  invoice/         — RWA invoice token contract (Soroban/Rust)
+  pool/            — Liquidity pool + yield distribution (Soroban/Rust)
+  oracle_registry/ — N-of-M staked oracle consensus network (Soroban/Rust)
+frontend/          — Next.js 14 app (Freighter wallet, Stellar SDK)
 ```
 
 ## Contracts
@@ -38,6 +40,22 @@ frontend/    — Next.js 14 app (Freighter wallet, Stellar SDK)
 - `repay_invoice` — SME repays principal + simple interest (8% APY default) **in the same token the invoice was funded with**
 - `withdraw` — Investor withdraws available (undeployed) balance **in the chosen token**
 
+### Oracle Registry Contract
+
+N-of-M staked oracle consensus network for invoice verification (opt-in — the invoice
+contract's original 1-of-2 primary/secondary oracle flow keeps working unmodified
+unless an admin sets `require_consensus_verification`).
+
+- `register_oracle` / `deregister_oracle` — stake-backed oracle registration, with a
+  configurable cooldown before stake is returned
+- `open_verification_round` — anyone can open a `VerificationRound` for an invoice
+  awaiting verification
+- `submit_vote` — stake-weighted vote; once approving or rejecting weight crosses the
+  quorum threshold, the registry calls back into the invoice contract's `consensus_verify`
+- `expire_round` / `admin_resolve_round` — a round that never reaches quorum expires
+  rather than blocking the invoice forever, and an admin fallback resolves it
+- `slash_oracle` — admin/governance penalty for a proven-bad verdict
+
 ---
 
 ## Getting Started
@@ -47,8 +65,10 @@ Start with the guide that matches how you want to work:
 - [Local Development with Docker Compose](docs/local-development.md)
 - [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md)
 - [Testnet Deployment Guide](docs/deployment.md)
+- [Smart Contract Interaction Guide](docs/interacting-with-contracts.md)
 
 ### Rapid Local Development (Docker Compose)
+
 We provide a Docker Compose workflow for the Stellar local network, the Next.js
 frontend, a contracts development shell, mock services, and the optional local
 indexer.
@@ -56,7 +76,9 @@ indexer.
 ```bash
 docker compose up --build
 ```
+
 After the stack is ready:
+
 - **Frontend** is available at http://localhost:3000
 - **Stellar Horizon/RPC** is available at http://localhost:8000
 - **Mock Services** are available at http://localhost:4000
@@ -205,6 +227,8 @@ For production deployment, see the comprehensive [Mainnet Deployment Guide](docs
 
 For upgrade runbooks and migration safety checks, see the [Contract Upgrade Guide](docs/contract-upgrade-guide.md).
 
+For safely testing contract upgrades before deployment, see the [Upgrade Dry-Run Guide](docs/upgrade-dry-run.md).
+
 **⚠️ Important:** Mainnet deployment involves real assets. Complete all security audits and testing before deploying to production.
 
 ---
@@ -246,10 +270,37 @@ To apply, in GitHub: **Settings → Branches → Branch protection rules → Add
 `main`, enable **Require status checks to pass before merging**, and select
 `Build & test Soroban contracts` from the list of checks.
 
-## 💰 Bounty Contribution
+### Code coverage
+
+CI uploads coverage to [Codecov](https://codecov.io/gh/astera-hq/Astera) as two independent
+flags, each with its own PR status check (configured in [`codecov.yml`](codecov.yml)):
+
+| Flag        | Source                               | Target |
+| ----------- | ------------------------------------- | ------ |
+| `contracts` | `cargo llvm-cov` over the whole Rust workspace | 80% |
+| `frontend`  | `next test -- --coverage` (Jest)      | 70%    |
+
+A PR fails the corresponding status check if it drops a flag's coverage by more than the
+configured 1% threshold. Uploading requires a `CODECOV_TOKEN` repository secret from
+codecov.io; until that secret is set, the upload steps no-op (`fail_ci_if_error: false`)
+rather than failing CI outright.
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions from developers of all experience levels! Whether you're fixing bugs, improving documentation, adding features, or participating in the Wave Program, your work helps advance tokenized RWA solutions on Stellar.
+
+**Getting started:**
+- Read our [CONTRIBUTING.md](CONTRIBUTING.md) for a complete guide on how to set up your environment, run tests, and submit pull requests
+- Check out [good first issue](https://github.com/astera-hq/Astera/labels/good%20first%20issue) labels for beginner-friendly tasks
+- See the [security checklist](CONTRIBUTING.md#-security-checklist) before submitting smart contract changes
+
+For more details on issue labels, workflow, and coding standards, please refer to [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
 
 - **Task:** Add SME onboarding verification — prevent duplicate SME accounts
 - **Reward:** $10
 - **Source:** GitHub-Paid
 - **Date:** 2026-04-27
-

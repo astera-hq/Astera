@@ -1,75 +1,70 @@
 # Contract Upgrade Guide
 
-This guide explains how to safely upgrade Astera Soroban contracts using the pool timelock flow.
+Astera contracts are upgradeable. This guide explains the safe, repeatable
+upgrade workflow: simulate the upgrade first (see
+[Upgrade Dry-Run Guide](upgrade-dry-run.md)), then apply it on the target
+network.
 
-## 1) Timelock Mechanism Overview
+## When to use this guide
 
-The pool contract uses a two-step upgrade process:
+Use the upgrade path whenever you ship a new wasm for an already-deployed
+contract — a bug fix, a new feature, or a storage-layout change. **Never** deploy
+a fresh contract instance over an existing one expecting state to carry over;
+the upgrade mechanism preserves instance storage, while a redeploy starts blank.
 
-1. `propose_upgrade(admin, wasm_hash)` stores the target Wasm hash and starts a 24-hour timelock.
-2. `execute_upgrade(admin)` can be called only after the timelock expires.
+## Prerequisites
 
-Only the configured admin can call these functions. The delay gives operators and users time to review and react before a new binary becomes active.
+- The currently deployed contract's ID (from `deployed-*.env`).
+- A newly built wasm for the contract you want to upgrade.
+- The Stellar CLI and a funded upgrade authority (typically the `access_control`
+  SuperAdmin or the contract admin, depending on the contract's upgrade gate).
 
-## 2) Pre-Upgrade Checklist
+## Step 1 — Dry-run (required for mainnet)
 
-- Verify the new Wasm hash from the exact artifact reviewed in CI.
-- Run the full contract test suite plus at least one upgrade rehearsal on testnet.
-- Announce the maintenance window to users at least 48 hours in advance.
-- Consider pausing the pool before execution to reduce in-flight state changes.
-- Confirm there are no operational blockers (critical incidents, unfinished repayment workflows, or unreviewed migrations).
-
-## 3) Step-by-Step Upgrade Procedure
+Always run the dry-run against a standalone or testnet copy first:
 
 ```bash
-# 1. Build new Wasm
-cargo build --target wasm32-unknown-unknown --release
-
-# 2. Install new Wasm and capture hash
-stellar contract install \
-  --wasm target/wasm32-unknown-unknown/release/pool.wasm \
-  --network testnet \
-  --source admin
-
-# 3. Propose upgrade (starts 24h timelock)
-stellar contract invoke \
-  --id $POOL_CONTRACT_ID \
-  --network testnet \
-  --source admin \
-  -- propose_upgrade \
-  --admin $ADMIN_ADDRESS \
-  --wasm_hash <WASM_HASH>
-
-# 4. After 24 hours, execute
-stellar contract invoke \
-  --id $POOL_CONTRACT_ID \
-  --network testnet \
-  --source admin \
-  -- execute_upgrade \
-  --admin $ADMIN_ADDRESS
+bash scripts/upgrade-dry-run.sh <contract> --network standalone
 ```
 
-## 4) State Migration
+Replace `<contract>` with `invoice`, `pool`, `credit`, or `all`. The tool
+snapshots current state, deploys the new wasm in a throwaway environment, runs
+smoke tests, and reports any breaking changes that would require a migration.
+Resolve all reported breakages before proceeding.
 
-When storage schema changes:
+## Step 2 — Apply the upgrade
 
-- Keep old fields readable in the new binary.
-- Add migration logic that lazily upgrades records on access, or provide explicit admin migration entry points.
-- Validate migration on testnet snapshots before mainnet.
-- Never remove support for legacy keys until migration completion is confirmed.
+Use the Stellar CLI to write the new wasm hash and bump the contract:
 
-## 5) Post-Upgrade Verification
+```bash
+# 1. Upload the new wasm and get its hash
+WASM_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/<contract>.wasm \
+  --source <upgrader> --network <network> | tail -1)
 
-- Run smoke checks (`get_config`, `accepted_tokens`, `get_token_totals`) immediately.
-- Execute one low-value deposit/withdraw scenario on testnet or staging first, then production if approved.
-- Unpause if paused for maintenance.
-- Monitor logs and user-facing errors for at least 24 hours.
+# 2. Apply the upgrade to the existing contract instance
+stellar contract update \
+  --id <CONTRACT_ID> \
+  --wasm-hash "$WASM_HASH" \
+  --source <upgrader> --network <network>
+```
 
-## 6) Rollback Considerations
+For contracts gated by `access_control`, the upgrade must be authorized through
+the `access_control` multisig proposal flow rather than a single admin key.
 
-Soroban upgrades are not a direct "undo". If rollback is needed:
+## Step 3 — Verify
 
-- Build and deploy a corrective Wasm version.
-- Repeat the same timelock process (`propose_upgrade` -> wait -> `execute_upgrade`).
-- Communicate status updates clearly during the full rollback window.
+```bash
+source deployed-<network>.env
+bash scripts/smoke-test-testnet.sh   # point STELLAR_RPC_URL at the target network
+```
 
+Confirm `version()` reflects the new build and that no storage/behavior
+regressions appeared.
+
+## Migration notes
+
+If the dry-run reports a storage-layout change (renamed/removed `DataKey`s or a
+changed struct), write a one-off migration that reads the old layout and writes
+the new one before the new wasm takes over. Coordinate the migration with the
+upgrade in the same proposal/transaction where possible.

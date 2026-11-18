@@ -1,0 +1,52 @@
+name: Testnet Deploy
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  deploy:
+    name: Deploy to Testnet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli@22.6.0
+
+      - name: Build contracts
+        run: cargo build --locked --target wasm32-unknown-unknown --release -p access_control -p arbitration -p auction -p compliance -p credit_score -p governance -p insurance -p invoice -p oracle_registry -p pool -p referral -p secondary_market -p share -p tranche
+
+      - name: Deploy contracts to testnet
+        run: |
+          mkdir -p /app && ln -sf "${{ github.workspace }}/target" /app/target
+          DEPLOYER_KEY="${{ secrets.TESTNET_DEPLOYER_KEY }}" \
+          NETWORK=testnet \
+          sh scripts/deploy-testnet.sh
+
+      - name: Initialize contracts
+        run: |
+          source deployed-testnet.env
+          DEPLOYER_KEY="${{ secrets.TESTNET_DEPLOYER_KEY }}" \
+          NETWORK=testnet \
+          ADMIN_ADDRESS="${{ secrets.TESTNET_ADMIN_ADDRESS }}" \
+          USDC_TOKEN_ID="${{ secrets.TESTNET_USDC_TOKEN_ID }}" \
+          sh scripts/init-contracts.sh
+
+      - name: Smoke test contracts
+        run: |
+          source deployed-testnet.env
+          bash scripts/smoke-test-testnet.sh
+
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-testnet-env
+          path: deployed-testnet.env

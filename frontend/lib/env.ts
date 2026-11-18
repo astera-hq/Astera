@@ -3,6 +3,8 @@ type EnvConfig = {
   NEXT_PUBLIC_POOL_CONTRACT_ID: string;
   NEXT_PUBLIC_USDC_TOKEN_ID: string;
   NEXT_PUBLIC_EURC_TOKEN_ID?: string;
+  // #799: optional — the referral program is opt-in on the pool contract.
+  NEXT_PUBLIC_REFERRAL_CONTRACT_ID?: string;
   NEXT_PUBLIC_NETWORK: 'testnet' | 'mainnet' | 'standalone';
   NEXT_PUBLIC_HORIZON_URL?: string;
   NEXT_PUBLIC_SOROBAN_RPC_URL?: string;
@@ -19,30 +21,15 @@ const REQUIRED_VARS = [
   'NEXT_PUBLIC_USDC_TOKEN_ID',
 ] as const;
 
-const NETWORK_CONFIGS = {
-  testnet: {
-    horizonUrl: 'https://horizon-testnet.stellar.org',
-    sorobanRpcUrl: 'https://soroban-testnet.stellar.org',
-    networkPassphrase: 'Test SDF Network ; September 2015',
-  },
-  mainnet: {
-    horizonUrl: 'https://horizon.stellar.org',
-    sorobanRpcUrl: 'https://soroban.stellar.org',
-    networkPassphrase: 'Public Global Stellar Network ; September 2015',
-  },
-  standalone: {
-    horizonUrl: 'http://localhost:8000',
-    sorobanRpcUrl: 'http://localhost:8000/soroban/rpc',
-    networkPassphrase: 'Standalone Network ; February 2017',
-  },
-} as const;
-
 function validateContractId(value: string, name: string): EnvValidationError | null {
   if (!value || value.trim() === '') {
     return { variable: name, message: 'is required' };
   }
   if (value.length !== 56 || !value.startsWith('C')) {
-    return { variable: name, message: 'must be a valid Stellar contract ID (56 characters starting with C)' };
+    return {
+      variable: name,
+      message: 'must be a valid Stellar contract ID (56 characters starting with C)',
+    };
   }
   return null;
 }
@@ -50,7 +37,10 @@ function validateContractId(value: string, name: string): EnvValidationError | n
 function validateNetwork(value: string): EnvValidationError | null {
   const validNetworks = ['testnet', 'mainnet', 'standalone'];
   if (value && !validNetworks.includes(value)) {
-    return { variable: 'NEXT_PUBLIC_NETWORK', message: `must be one of: ${validNetworks.join(', ')}` };
+    return {
+      variable: 'NEXT_PUBLIC_NETWORK',
+      message: `must be one of: ${validNetworks.join(', ')}`,
+    };
   }
   return null;
 }
@@ -90,6 +80,12 @@ export function validateEnv(): { valid: boolean; errors: EnvValidationError[] } 
     if (eurcError) errors.push(eurcError);
   }
 
+  const referralId = process.env.NEXT_PUBLIC_REFERRAL_CONTRACT_ID;
+  if (referralId) {
+    const referralError = validateContractId(referralId, 'NEXT_PUBLIC_REFERRAL_CONTRACT_ID');
+    if (referralError) errors.push(referralError);
+  }
+
   const networkError = validateNetwork(network);
   if (networkError) errors.push(networkError);
 
@@ -103,33 +99,33 @@ export function validateEnv(): { valid: boolean; errors: EnvValidationError[] } 
 }
 
 export function getEnvConfig(): EnvConfig {
-  const network = (process.env.NEXT_PUBLIC_NETWORK || 'testnet') as EnvConfig['NEXT_PUBLIC_NETWORK'];
+  const network = (process.env.NEXT_PUBLIC_NETWORK ||
+    'testnet') as EnvConfig['NEXT_PUBLIC_NETWORK'];
 
   return {
     NEXT_PUBLIC_INVOICE_CONTRACT_ID: process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID || '',
     NEXT_PUBLIC_POOL_CONTRACT_ID: process.env.NEXT_PUBLIC_POOL_CONTRACT_ID || '',
     NEXT_PUBLIC_USDC_TOKEN_ID: process.env.NEXT_PUBLIC_USDC_TOKEN_ID || '',
     NEXT_PUBLIC_EURC_TOKEN_ID: process.env.NEXT_PUBLIC_EURC_TOKEN_ID,
+    NEXT_PUBLIC_REFERRAL_CONTRACT_ID: process.env.NEXT_PUBLIC_REFERRAL_CONTRACT_ID,
     NEXT_PUBLIC_NETWORK: network,
     NEXT_PUBLIC_HORIZON_URL: process.env.NEXT_PUBLIC_HORIZON_URL,
     NEXT_PUBLIC_SOROBAN_RPC_URL: process.env.NEXT_PUBLIC_SOROBAN_RPC_URL,
   };
 }
 
-export function getNetworkConfig(network?: EnvConfig['NEXT_PUBLIC_NETWORK']) {
-  const targetNetwork = network || getEnvConfig().NEXT_PUBLIC_NETWORK;
-  const config = NETWORK_CONFIGS[targetNetwork];
-  const envConfig = getEnvConfig();
-
-  return {
-    ...config,
-    horizonUrl: envConfig.NEXT_PUBLIC_HORIZON_URL || config.horizonUrl,
-    sorobanRpcUrl: envConfig.NEXT_PUBLIC_SOROBAN_RPC_URL || config.sorobanRpcUrl,
-  };
+export function formatEnvErrors(errors: EnvValidationError[]): string {
+  return errors.map((e) => `  - ${e.variable}: ${e.message}`).join('\n');
 }
 
-export function formatEnvErrors(errors: EnvValidationError[]): string {
-  return errors.map(e => `  - ${e.variable}: ${e.message}`).join('\n');
+// #783: canonical/absolute base URL for metadata (OG images, canonical tags,
+// sitemap entries). Falls back to the Vercel preview URL, then localhost, so
+// previews and local dev still resolve to a valid absolute URL.
+export function getAppUrl(): string {
+  return (
+    process.env.NEXT_PUBLIC_APP_URL ??
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000')
+  );
 }
 
 export function assertEnvValid(): void {
@@ -137,7 +133,10 @@ export function assertEnvValid(): void {
   if (!valid) {
     const errorMessage = `Environment configuration errors:\n${formatEnvErrors(errors)}`;
     console.error(errorMessage);
-    if (typeof window === 'undefined') {
+    // CI/build environments (especially for PRs from forks) typically don't have
+    // deployed contract IDs. Only hard-fail when explicitly requested.
+    const strict = process.env.NEXT_PUBLIC_STRICT_ENV === 'true';
+    if (strict && typeof window === 'undefined') {
       throw new Error(errorMessage);
     }
   }

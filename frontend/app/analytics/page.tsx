@@ -8,21 +8,36 @@ import {
   YieldPerformanceChart,
   InvoiceFunnelChart,
   RecentEventsFeed,
+  RateCurveChart,
 } from '@/components/analytics';
-import { getPoolConfig, getAcceptedTokens, getPoolTokenTotals } from '@/lib/contracts';
+import {
+  getPoolConfig,
+  getAcceptedTokens,
+  getPoolTokenTotals,
+  getRateModelConfig,
+  getCurrentRate,
+} from '@/lib/contracts';
 import {
   fetchAnalyticsData,
   clearAnalyticsCache,
   type AnalyticsDashboardData,
 } from '@/lib/analytics';
 import { formatUSDC, stablecoinLabel } from '@/lib/stellar';
-import type { PoolConfig, PoolTokenTotals } from '@/lib/types';
+import type { PoolConfig, PoolTokenTotals, RateModelConfig } from '@/lib/types';
 
 const POOL_CONFIGURED = Boolean(process.env.NEXT_PUBLIC_POOL_CONTRACT_ID);
 
 interface TokenData {
   token: string;
   totals: PoolTokenTotals;
+}
+
+/** #863: per-token rate model state for the curve chart. */
+interface TokenRateModel {
+  token: string;
+  config: RateModelConfig;
+  currentRateBps: number | null;
+  utilizationBps: number;
 }
 
 function StatCard({
@@ -70,6 +85,7 @@ function UtilizationBar({ deployed, total }: { deployed: bigint; total: bigint }
 export default function AnalyticsPage() {
   const [config, setConfig] = useState<PoolConfig | null>(null);
   const [tokens, setTokens] = useState<TokenData[]>([]);
+  const [rateModels, setRateModels] = useState<TokenRateModel[]>([]);
   const [statsLoading, setStatsLoading] = useState(true);
   const [statsError, setStatsError] = useState<string | null>(null);
 
@@ -124,6 +140,21 @@ export default function AnalyticsPage() {
         })),
       );
       setTokens(tokenData);
+
+      // #863: load each token's rate model (if any) for the curve charts.
+      const models = await Promise.all(
+        tokenData.map(async ({ token, totals }) => {
+          const modelConfig = await getRateModelConfig(token);
+          if (!modelConfig) return null;
+          const currentRateBps = await getCurrentRate(token);
+          const utilizationBps =
+            totals.totalDeposited > 0n
+              ? Number((totals.totalDeployed * 10_000n) / totals.totalDeposited)
+              : 0;
+          return { token, config: modelConfig, currentRateBps, utilizationBps };
+        }),
+      );
+      setRateModels(models.filter((m): m is TokenRateModel => m !== null));
     } catch (e) {
       setStatsError(e instanceof Error ? e.message : 'Failed to load analytics data.');
     } finally {
@@ -253,6 +284,21 @@ export default function AnalyticsPage() {
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* #863: utilization-driven rate curves (one per configured token) */}
+            {!statsLoading && !statsError && rateModels.length > 0 && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                {rateModels.map((m) => (
+                  <RateCurveChart
+                    key={m.token}
+                    config={m.config}
+                    currentUtilizationBps={m.utilizationBps}
+                    currentRateBps={m.currentRateBps ?? undefined}
+                    title={`Rate Curve — ${stablecoinLabel(m.token)}`}
+                  />
+                ))}
               </div>
             )}
           </>

@@ -1,2 +1,5 @@
 node_modules
 .next
+
+# Auto-generated Soroban contract bindings (see scripts/gen-bindings.sh)
+src/generated

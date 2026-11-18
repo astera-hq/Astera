@@ -1,0 +1,33 @@
+[package]
+name = "arbitration"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[[test]]
+name = "registration_tests"
+path = "tests/registration_tests.rs"
+
+[[test]]
+name = "lifecycle_tests"
+path = "tests/lifecycle_tests.rs"
+
+[[test]]
+name = "secrecy_tests"
+path = "tests/secrecy_tests.rs"
+
+[[test]]
+name = "quorum_timeout_tests"
+path = "tests/quorum_timeout_tests.rs"
+
+[[test]]
+name = "authorization_tests"
+path = "tests/authorization_tests.rs"

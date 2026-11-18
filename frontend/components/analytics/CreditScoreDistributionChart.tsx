@@ -45,7 +45,7 @@ export function CreditScoreDistributionChart({
         <span className="w-2 h-6 bg-cyan-500 rounded-full" />
         Credit Score Distribution
       </h3>
-      <div className="h-72">
+      <div className="h-72 overflow-x-hidden">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
@@ -66,7 +66,7 @@ export function CreditScoreDistributionChart({
                 borderRadius: '8px',
                 color: '#fff',
               }}
-              formatter={(value: number) => [`${value} SMEs`, 'Count']}
+              formatter={(value) => [`${value ?? 0} SMEs`, 'Count']}
             />
             <Bar dataKey="count" name="SME Count" radius={[4, 4, 0, 0]}>
               {data.map((entry, index) => (

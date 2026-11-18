@@ -1,18 +1,16 @@
 import { test, expect } from '@playwright/test';
-import { MOCK_ADDRESS } from './mocks/freighter';
+import { MOCK_ADDRESS, freighterMockScript } from './mocks/freighter';
 
 async function injectConnectedWallet(page: import('@playwright/test').Page) {
+  await page.addInitScript(freighterMockScript({ isConnected: true, isAllowed: true }));
   await page.addInitScript((address: string) => {
-    localStorage.setItem(
-      'astera-wallet',
-      JSON.stringify({ state: { wallet: { address, connected: true, network: 'testnet' } }, version: 0 })
-    );
+    localStorage.setItem('astera_wallet_address', address);
   }, MOCK_ADDRESS);
 }
 
 /** Stub out contract RPC calls so the invest page doesn't hang on network. */
 async function stubContractCalls(page: import('@playwright/test').Page) {
-  await page.route('**/soroban-testnet.stellar.org**', (route) => {
+  await page.route('**/*stellar.org*', (route) => {
     route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { entries: [] } }),
@@ -39,9 +37,9 @@ test.describe('Deposit / Withdraw', () => {
   test('shows connect-wallet prompt on invest page when disconnected', async ({ page }) => {
     await stubContractCalls(page);
     await page.goto('/invest');
-    // The invest page should mention connecting wallet when no wallet is present
+    // The invest page should show a "Connect Wallet" call to action when disconnected.
     await expect(
-      page.getByText(/connect.*wallet|wallet.*connect/i)
+      page.getByRole('banner').getByRole('button', { name: /connect wallet/i }),
     ).toBeVisible({ timeout: 8000 });
   });
 
@@ -51,15 +49,16 @@ test.describe('Deposit / Withdraw', () => {
     await page.goto('/invest');
 
     // The page should render deposit/withdraw mode controls
-    const depositEl = page.getByRole('button', { name: /deposit/i }).or(
-      page.getByText(/deposit/i)
-    );
+    const depositEl = page.getByRole('button', { name: /deposit/i }).or(page.getByText(/deposit/i));
     await expect(depositEl.first()).toBeVisible({ timeout: 8000 });
   });
 
   test('navigating to /invest from navbar works', async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('link', { name: /invest/i }).click();
+    await page
+      .getByRole('banner')
+      .getByRole('link', { name: /invest/i })
+      .click();
     await expect(page).toHaveURL('/invest');
   });
 
@@ -69,9 +68,10 @@ test.describe('Deposit / Withdraw', () => {
     await page.goto('/invest');
 
     // Wait for the amount input to appear
-    const amountInput = page.locator('input[type="number"]').or(
-      page.locator('input[placeholder*="amount" i]')
-    ).first();
+    const amountInput = page
+      .locator('input[type="number"]')
+      .or(page.locator('input[placeholder*="amount" i]'))
+      .first();
 
     const inputVisible = await amountInput.isVisible().catch(() => false);
     if (!inputVisible) {
@@ -80,9 +80,14 @@ test.describe('Deposit / Withdraw', () => {
       return;
     }
 
-    await amountInput.fill('abc');
+    const value = await amountInput.evaluate((el: HTMLInputElement) => {
+      // Playwright refuses to type non-numeric text into input[type=number].
+      // Simulate a user/DOM attempt by setting value directly and dispatching input.
+      el.value = 'abc';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return el.value;
+    });
     // Number input should coerce to empty or 0
-    const value = await amountInput.inputValue();
     expect(value === '' || value === '0' || Number.isNaN(Number(value))).toBeTruthy();
   });
 });

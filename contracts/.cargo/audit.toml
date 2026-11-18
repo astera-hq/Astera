@@ -1,9 +1,18 @@
 [advisories]
-# Add known-safe advisory IDs here as needed, e.g.:
-# ignore = ["RUSTSEC-2023-XXXX"]
-ignore = []
+# Add advisory IDs to ignore only with a documented reason, e.g.:
+# ignore = [
+#   # RUSTSEC-2023-XXXX: Not applicable because we don't use the affected feature
+#   "RUSTSEC-2023-XXXX",
+# ]
+ignore = [
+  # RUSTSEC-2024-0388: `derivative` is unmaintained; transitive dep of soroban-sdk (ark-poly), cannot update independently
+  "RUSTSEC-2024-0388",
+  # RUSTSEC-2024-0436: `paste` is unmaintained; transitive dep of soroban-sdk (wasmi_core), cannot update independently
+  "RUSTSEC-2024-0436",
+]
 
 [output]
-# Valid deny values: "warnings", "unmaintained", "unsound", "yanked"
-# ("vulnerability" was removed in cargo-audit 0.18 — vulnerabilities always fail.)
+# "vulnerability" always causes failure (built-in, cannot be overridden).
+# Additionally deny unmaintained and unsound crates.
 deny = ["unmaintained", "unsound"]
+quiet = false

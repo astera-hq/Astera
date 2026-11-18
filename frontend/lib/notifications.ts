@@ -1,5 +1,6 @@
 import { AlertPriority, AlertType } from './alert-rules';
 import { safeStringify } from './stellar';
+import { isInAppEnabled } from './notification-preferences';
 
 /** Notification Record Interface */
 export interface NotificationAlert {
@@ -30,13 +31,13 @@ class NotificationService {
 
   /** Send an alert to all dispatchers */
   public async send(alert: NotificationAlert): Promise<void> {
-    const timestampMs = Date.now();
-
     // 1. Log to Console (Internal Monitoring)
     this.logToConsole(alert);
 
-    // 2. Dispatch to Subscribed UI Components
-    this.subscribers.forEach((sub) => sub(alert));
+    // 2. Dispatch to Subscribed UI Components (respect user preferences)
+    if (isInAppEnabled(alert.type)) {
+      this.subscribers.forEach((sub) => sub(alert));
+    }
 
     // 3. (Mock) Dispatch to Slack/Email if priority is HIGH/CRITICAL
     if (alert.priority === 'HIGH' || alert.priority === 'CRITICAL') {

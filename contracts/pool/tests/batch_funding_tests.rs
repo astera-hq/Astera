@@ -1,0 +1,226 @@
+#![cfg(test)]
+
+use pool::{FundingPool, FundingPoolClient, FundingRequest, PoolError};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short, testutils::Address as _, token, Address, Env, Vec,
+};
+
+mod dummy_share_contract {
+    use super::*;
+
+    #[contract]
+    pub struct DummyShare;
+
+    #[contractimpl]
+    impl DummyShare {
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+
+        pub fn total_supply(env: Env) -> i128 {
+            env.storage()
+                .instance()
+                .get(&symbol_short!("tot"))
+                .unwrap_or(0)
+        }
+
+        pub fn balance(env: Env, id: Address) -> i128 {
+            env.storage().persistent().get(&id).unwrap_or(0)
+        }
+
+        pub fn mint(env: Env, to: Address, amount: i128) {
+            let total = Self::total_supply(env.clone());
+            let balance = Self::balance(env.clone(), to.clone());
+            env.storage().persistent().set(&to, &(balance + amount));
+            env.storage()
+                .instance()
+                .set(&symbol_short!("tot"), &(total + amount));
+        }
+
+        pub fn burn(env: Env, from: Address, amount: i128) {
+            let total = Self::total_supply(env.clone());
+            let balance = Self::balance(env.clone(), from.clone());
+            env.storage().persistent().set(&from, &(balance - amount));
+            env.storage()
+                .instance()
+                .set(&symbol_short!("tot"), &(total - amount));
+        }
+    }
+}
+
+use dummy_share_contract::DummyShare;
+
+fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
+    token::StellarAssetClient::new(
+        env,
+        &env.register_stellar_asset_contract_v2(admin.clone())
+            .address(),
+    )
+}
+
+fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address) {
+    let admin = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let token = create_token_contract(env, &token_admin);
+    let share_token = env.register(DummyShare, ());
+    let invoice_contract = Address::generate(env);
+
+    let pool_id = env.register(FundingPool, ());
+    let client = FundingPoolClient::new(env, &pool_id);
+
+    client.initialize(&admin, &token.address, &share_token, &invoice_contract);
+    client.set_max_investor_concentration(&admin, &10_000u32);
+    (client, admin, token.address)
+}
+
+fn seed_liquidity(env: &Env, client: &FundingPoolClient<'_>, token: &Address, amount: i128) {
+    let token_client = token::StellarAssetClient::new(env, token);
+    for _ in 0..5 {
+        let investor = Address::generate(env);
+        token_client.mint(&investor, &amount);
+        client.deposit(&investor, token, &amount, &None);
+    }
+}
+
+#[test]
+fn test_fund_multiple_invoices_duplicate_ids_accumulate_principal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, token) = setup(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    // Deposit enough for both fundings
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&investor, &5_000_000);
+    client.deposit(&investor, &token, &5_000_000, &None);
+
+    // Create a batch with duplicate invoice IDs — partial funding
+    let mut requests: Vec<FundingRequest> = Vec::new(&env);
+    requests.push_back(FundingRequest {
+        invoice_id: 1,
+        principal: 1_000_000,
+        sme: sme.clone(),
+        due_date: 1_000_000,
+        token: token.clone(),
+    });
+    requests.push_back(FundingRequest {
+        invoice_id: 1, // Same ID — partial funding
+        principal: 2_000_000,
+        sme: sme.clone(),
+        due_date: 1_000_000,
+        token: token.clone(),
+    });
+
+    // Should succeed — duplicate IDs accumulate principal
+    let result = client.try_fund_multiple_invoices(&admin, &requests);
+    assert!(result.is_ok());
+    // Verify accumulated principal on the FundedInvoice record
+    let funded = client.get_funded_invoice(&1u64).unwrap();
+    assert_eq!(funded.principal, 3_000_000);
+}
+
+#[test]
+fn test_fund_multiple_invoices_accepts_unique_ids() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, token) = setup(&env);
+    let sme = Address::generate(&env);
+
+    // Deposit funds first without tripping the per-investor concentration cap.
+    seed_liquidity(&env, &client, &token, 2_000_000);
+
+    // Create a batch with unique invoice IDs
+    let mut requests: Vec<FundingRequest> = Vec::new(&env);
+    requests.push_back(FundingRequest {
+        invoice_id: 1,
+        principal: 1_000_000,
+        sme: sme.clone(),
+        due_date: env.ledger().timestamp() + 86_400,
+        token: token.clone(),
+    });
+    requests.push_back(FundingRequest {
+        invoice_id: 2,
+        principal: 2_000_000,
+        sme: sme.clone(),
+        due_date: env.ledger().timestamp() + 86_400,
+        token: token.clone(),
+    });
+    requests.push_back(FundingRequest {
+        invoice_id: 3,
+        principal: 1_500_000,
+        sme: sme.clone(),
+        due_date: env.ledger().timestamp() + 86_400,
+        token: token.clone(),
+    });
+
+    // Should succeed with unique IDs
+    client.fund_multiple_invoices(&admin, &requests);
+
+    // Verify all three invoices were funded
+    assert!(client.get_funded_invoice(&1).is_some());
+    assert!(client.get_funded_invoice(&2).is_some());
+    assert!(client.get_funded_invoice(&3).is_some());
+}
+
+#[test]
+fn test_fund_multiple_invoices_rejects_batch_too_large() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, token) = setup(&env);
+    let sme = Address::generate(&env);
+
+    // Create a batch larger than MAX_BATCH_SIZE (20)
+    let mut requests: Vec<FundingRequest> = Vec::new(&env);
+    for i in 1..=21 {
+        requests.push_back(FundingRequest {
+            invoice_id: i,
+            principal: 1_000_000,
+            sme: sme.clone(),
+            due_date: 1_000_000,
+            token: token.clone(),
+        });
+    }
+
+    // Should fail with BatchTooLarge
+    let result = client.try_fund_multiple_invoices(&admin, &requests);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        PoolError::BatchTooLarge.into()
+    );
+}
+
+#[test]
+fn test_fund_invoices_batch_max_size_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, token) = setup(&env);
+    let sme = Address::generate(&env);
+
+    // Deposit sufficient funds without tripping the per-investor concentration cap.
+    seed_liquidity(&env, &client, &token, 10_000_000);
+
+    // Create a batch exactly at MAX_BATCH_SIZE (20)
+    let mut requests: Vec<FundingRequest> = Vec::new(&env);
+    for i in 1..=20 {
+        requests.push_back(FundingRequest {
+            invoice_id: i,
+            principal: 1_000_000,
+            sme: sme.clone(),
+            due_date: env.ledger().timestamp() + 86_400,
+            token: token.clone(),
+        });
+    }
+
+    // Should succeed at max size
+    client.fund_multiple_invoices(&admin, &requests);
+
+    // Verify all 20 invoices were funded
+    for i in 1..=20 {
+        assert!(client.get_funded_invoice(&i).is_some());
+    }
+}

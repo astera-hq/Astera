@@ -16,7 +16,8 @@ fn setup(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address) {
     let pool = Address::generate(env);
     let sme = Address::generate(env);
     let expiration = 30u64 * 86_400u64;
-    client.initialize(&admin, &pool, &i128::MAX, &expiration, &u32::MAX);
+    // Contract enforces `grace_period_days <= 90`.
+    client.initialize(&admin, &pool, &i128::MAX, &expiration, &90u32);
     (client, admin, pool, sme)
 }
 
@@ -43,6 +44,7 @@ proptest! {
                 &due_date,
                 &String::from_str(&env, "desc"),
                 &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
             prop_assert_eq!(id, i + 1, "Invoice ID must equal creation index");
         }
@@ -70,8 +72,8 @@ proptest! {
             &due_date,
             &String::from_str(&env, "desc"),
             &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
         );
-
         let invoice = client.get_invoice(&id);
         prop_assert!(
             matches!(invoice.status, invoice::InvoiceStatus::Pending),
@@ -96,6 +98,7 @@ proptest! {
             &due_date,
             &String::from_str(&env, "desc"),
             &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
         );
         client.mark_funded(&id, &pool);
 
@@ -135,8 +138,8 @@ proptest! {
             &due_date,
             &String::from_str(&env, "desc"),
             &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
         );
-
         let invoice = client.get_invoice(&id);
         prop_assert_eq!(invoice.amount, amount);
         prop_assert_eq!(invoice.id, 1);
@@ -159,10 +162,32 @@ proptest! {
             &due_date,
             &String::from_str(&env, "desc"),
             &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
         );
-
         let invoice = client.get_invoice(&id);
         prop_assert_eq!(invoice.due_date, due_date);
+    }
+
+    /// Fuzz test: Large due dates are rejected before they can overflow deadline math.
+    #[test]
+    fn fuzz_invoice_due_dates_reject_far_future(
+        due_date in (u64::MAX - 10_000u64)..u64::MAX
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let (client, _admin, _pool, sme) = setup(&env);
+        let result = client.try_create_invoice(
+            &sme,
+            &String::from_str(&env, "Debtor"),
+            &1_000_000i128,
+            &due_date,
+            &String::from_str(&env, "desc"),
+            &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
+        );
+        prop_assert_eq!(result.unwrap_err().unwrap(), invoice::InvoiceError::DateOverflow.into());
     }
 
     /// Fuzz test: Grace period configuration
@@ -197,6 +222,7 @@ proptest! {
                 &due_date,
                 &String::from_str(&env, "desc"),
                 &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
             prop_assert_eq!(id, (i as u64) + 1);
         }
@@ -225,8 +251,8 @@ proptest! {
             &due_date,
             &String::from_str(&env, "desc"),
             &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
         );
-
         client.mark_funded(&id, &pool);
 
         // Move past due date
@@ -275,8 +301,8 @@ mod deterministic_fuzz {
                 &due_date,
                 &String::from_str(&env, "desc"),
                 &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
-
             let invoice = client.get_invoice(&id);
             assert_eq!(invoice.amount, amount);
         }
@@ -310,8 +336,8 @@ mod deterministic_fuzz {
                 &due_date,
                 &String::from_str(&env, "desc"),
                 &String::from_str(&env, "hash"),
+                &String::from_str(&env, "https://example.com/meta"),
             );
-
             client.mark_funded(&id, &pool);
             env.ledger()
                 .with_mut(|l| l.timestamp = due_date + (days_past_due * 86_400));
@@ -344,6 +370,7 @@ mod deterministic_fuzz {
                 &due_date,
                 &String::from_str(&env, &format!("Invoice #{}", i)),
                 &String::from_str(&env, &format!("hash{}", i)),
+                &String::from_str(&env, "https://example.com/meta"),
             );
             assert_eq!(id, i + 1);
         }
@@ -368,6 +395,7 @@ mod deterministic_fuzz {
             &due_date,
             &String::from_str(&env, "desc-a"),
             &String::from_str(&env, "hash-a"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         let id2 = client.create_invoice(
             &sme,
@@ -376,6 +404,7 @@ mod deterministic_fuzz {
             &due_date,
             &String::from_str(&env, "desc-b"),
             &String::from_str(&env, "hash-b"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
         let id3 = client.create_invoice(
             &sme,
@@ -384,6 +413,7 @@ mod deterministic_fuzz {
             &due_date,
             &String::from_str(&env, "desc-c"),
             &String::from_str(&env, "hash-c"),
+            &String::from_str(&env, "https://example.com/meta"),
         );
 
         let ids = soroban_sdk::vec![&env, id3, id1, id2];

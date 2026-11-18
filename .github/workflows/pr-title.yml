@@ -35,6 +35,7 @@ jobs:
             invoice
             pool
             credit_score
+            insurance
             share
             frontend
             contracts
@@ -43,6 +44,19 @@ jobs:
             docs
             ci
             deps
+            exchange-rate
+            tranche
+            arbitration
+            secondary_market
+            auction
+            compliance
+            access_control
+            oracle_registry
+            governance
+            referral
+            indexer
+            oracle-service
+            compliance-service
           requireScope: false
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: |

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 89bb125a341d92a87cf46755e8210f8f80bf3b2104814e11a2081b075bec351d # shrinks to deposit = 1000000, fund_ratio = 1
+cc 7064bae6fa39d09e6b8e79fbe2abfe021ed2390becacead98d20b9758f61464a # shrinks to principal = 1000000, elapsed_days = 1
+cc d9ac7e4b4333d8492ff1ae0c8f5ca4fe480534c09e77e9b42942800b2a6bb460 # shrinks to deposit = 1000000, fund_ratio = 1
+cc 8c06c481bd6070b623a56642cdd69404679605deacfe6b03931069b66f91a7a4 # shrinks to principal = 1000000, t1_days = 1, t2_days = 181

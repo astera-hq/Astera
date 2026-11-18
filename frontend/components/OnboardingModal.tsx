@@ -11,7 +11,18 @@ const ONBOARDING_STORAGE_KEY = 'astera-onboarding-completed';
 
 type UserRole = 'sme' | 'investor' | null;
 
-const SME_STEPS = [
+// `highlightTarget` matches a `data-onboarding-id` attribute rendered
+// elsewhere on the dashboard (e.g. the wallet-connect button, or a nav
+// link), so the modal can draw a spotlight ring around the real UI element
+// the step is talking about. Steps that don't reference a specific visible
+// element omit it.
+interface OnboardingStep {
+  title: string;
+  content: string;
+  highlightTarget?: string;
+}
+
+const SME_STEPS: OnboardingStep[] = [
   {
     title: 'Welcome to Astera',
     content:
@@ -21,11 +32,13 @@ const SME_STEPS = [
     title: 'Connect Your Wallet',
     content:
       "Connect your Freighter wallet to get started. Freighter is a browser extension for the Stellar network — install it from the Chrome Web Store if you haven't already.",
+    highlightTarget: 'wallet-connect',
   },
   {
     title: 'Create Your First Invoice',
     content:
       "Go to the Invoice page and fill in your debtor's name, invoice amount, and due date. You'll need your debtor's information and the amount owed to you.",
+    highlightTarget: 'nav-invoice',
   },
   {
     title: 'Wait for Verification',
@@ -39,7 +52,7 @@ const SME_STEPS = [
   },
 ];
 
-const INVESTOR_STEPS = [
+const INVESTOR_STEPS: OnboardingStep[] = [
   {
     title: 'Welcome to Astera',
     content:
@@ -49,11 +62,13 @@ const INVESTOR_STEPS = [
     title: 'Connect Your Wallet',
     content:
       "Connect your Freighter wallet to access the investor dashboard. Freighter is a Stellar browser extension — install it if you haven't already.",
+    highlightTarget: 'wallet-connect',
   },
   {
     title: 'Deposit USDC',
     content:
       'Go to the Invest page and deposit USDC into the liquidity pool. You will receive share tokens representing your proportional ownership of the pool.',
+    highlightTarget: 'nav-invest',
   },
   {
     title: 'Your Funds Go to Work',
@@ -70,17 +85,49 @@ const INVESTOR_STEPS = [
 export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProps) {
   const [role, setRole] = useState<UserRole>(null);
   const [currentStep, setCurrentStep] = useState(0);
+  const [highlightRect, setHighlightRect] = useState<DOMRect | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const firstFocusableRef = useRef<HTMLButtonElement>(null);
 
   const steps = role === 'sme' ? SME_STEPS : role === 'investor' ? INVESTOR_STEPS : [];
   const totalSteps = steps.length;
+  const highlightTarget = steps[currentStep]?.highlightTarget;
 
   useEffect(() => {
     if (isOpen && firstFocusableRef.current) {
       firstFocusableRef.current.focus();
     }
   }, [isOpen]);
+
+  // Spotlight the real UI element the current step is talking about (e.g.
+  // the wallet-connect button) by tracking its position on screen.
+  useEffect(() => {
+    if (!isOpen || !highlightTarget) {
+      return;
+    }
+
+    const updateRect = () => {
+      // A matching element that's hidden at the current breakpoint (e.g. the
+      // desktop nav on a mobile viewport) reports a zero-size rect — treat
+      // that the same as "not found" and fall back to the flat backdrop.
+      const candidates = document.querySelectorAll(`[data-onboarding-id="${highlightTarget}"]`);
+      let rect: DOMRect | null = null;
+      candidates.forEach((el) => {
+        if (rect) return;
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) rect = r;
+      });
+      setHighlightRect(rect);
+    };
+
+    updateRect();
+    window.addEventListener('resize', updateRect);
+    window.addEventListener('scroll', updateRect, true);
+    return () => {
+      window.removeEventListener('resize', updateRect);
+      window.removeEventListener('scroll', updateRect, true);
+    };
+  }, [isOpen, highlightTarget, currentStep]);
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -154,10 +201,28 @@ export default function OnboardingModal({ isOpen, onClose }: OnboardingModalProp
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      {highlightTarget && highlightRect ? (
+        // Spotlight: a transparent "hole" over the real UI element this step
+        // refers to, dimming everything else via a giant box-shadow instead
+        // of a flat backdrop.
+        <div
+          aria-hidden="true"
+          className="fixed rounded-lg ring-2 ring-brand-gold transition-all duration-300 pointer-events-none"
+          style={{
+            top: highlightRect.top - 6,
+            left: highlightRect.left - 6,
+            width: highlightRect.width + 12,
+            height: highlightRect.height + 12,
+            boxShadow: '0 0 0 9999px rgba(0,0,0,0.65)',
+          }}
+        />
+      ) : (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" aria-hidden="true" />
+      )}
       <div
         ref={modalRef}
-        className="bg-brand-dark border border-brand-border rounded-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto"
+        className="relative bg-brand-dark border border-brand-border rounded-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto"
         role="dialog"
         aria-modal="true"
         aria-labelledby="onboarding-title"

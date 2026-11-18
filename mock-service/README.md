@@ -1,74 +1,70 @@
-# Mock Service — Offline Frontend Development
+# Astera Mock Service
 
-The mock service is a lightweight [json-server](https://github.com/typicode/json-server) instance that serves realistic fixture data for all invoice states, pool states, and user scenarios. It allows frontend contributors to develop and test without a running Stellar node.
+A static mock REST API for frontend-only development, served by
+[json-server](https://github.com/typicode/json-server) from `db.json`. With
+it, the frontend can render invoices without a running Stellar node or
+deployed contracts (#229).
 
-## Prerequisites
+## Running
+
+With Docker Compose (from the repository root):
 
 ```bash
-npm install -g json-server   # or: pnpm add -g json-server
+docker compose up mock-service
 ```
 
-## Starting the Mock Service
+Or directly with Node:
 
 ```bash
-# From the repo root:
 cd mock-service
-json-server --watch db.json --port 4000
+npx -y json-server@0.17.4 --watch db.json --port 4000
 ```
 
-The API will be available at `http://localhost:4000`.
+Both serve the API on <http://localhost:4000>. `--watch` reloads `db.json`
+whenever it changes.
 
-## Switching the Frontend to Mock Mode
+## Pointing the frontend at it
 
-Set the environment variable before starting the frontend dev server:
+In `frontend/.env.local`:
 
 ```bash
-# .env.local (frontend/)
 NEXT_PUBLIC_USE_MOCK=true
+# Optional — this is the default:
 NEXT_PUBLIC_MOCK_API_URL=http://localhost:4000
 ```
 
-When `NEXT_PUBLIC_USE_MOCK=true`, the frontend reads data from the mock service instead of making Soroban RPC calls. This lets you work on UI and component logic with no blockchain dependency.
+With `NEXT_PUBLIC_USE_MOCK=true`, `frontend/lib/contracts.ts` reads invoices
+from `GET /invoices/:id` on the mock API instead of simulating the invoice
+contract over Soroban RPC. Other contract reads and every write
+(transactions) still go to the configured network.
 
-## Available Endpoints
+## Data and routes
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /invoices` | All invoices (one per status) |
-| `GET /invoices/:id` | Single invoice by ID |
-| `GET /pool` | Pool configuration and totals |
-| `GET /pool_token_totals` | Share price and USDC totals |
-| `GET /investors` | All investor positions |
-| `GET /investors/:id` | Single investor |
-| `GET /credit_scores` | SME credit scores |
+json-server exposes one REST resource for each top-level key in `db.json`:
 
-### Filtering (json-server built-in)
+| Route                    | Contents                                                                       |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| `GET /invoices`          | Sample invoices covering each status (`Pending`, `Verified`, `Funded`, ...)    |
+| `GET /invoices/:id`      | One invoice by id (what the frontend reads in mock mode)                       |
+| `GET /pool`              | Pool configuration and totals                                                  |
+| `GET /pool_token_totals` | Share-token supply and share price                                             |
+| `GET /investors`         | Investor positions and their invoice commitments (`/investors/:id` by address) |
+| `GET /credit_scores`     | SME credit scores (filter with `?sme=G...`)                                    |
 
-```bash
-# Invoices by status:
-GET /invoices?status=Funded
+Standard json-server features (filtering, sorting, pagination, and
+`POST`/`PUT`/`PATCH`/`DELETE` on the resources above) also work, and writes
+are persisted back to `db.json` — revert it with `git checkout db.json` if
+you do not want to commit the changes.
 
-# Invoices by owner:
-GET /invoices?owner=GDEV1…
-```
+All amounts are raw integers in the token's smallest unit (7 decimals, so
+`10000000000` = 1,000 USDC), and timestamps are Unix seconds, matching the
+contracts.
 
-## Mock Data Coverage
+## Limitations
 
-`db.json` includes one invoice in each status:
-
-| ID | Status | Debtor |
-|----|--------|--------|
-| 1 | Pending | Acme Corp |
-| 2 | AwaitingVerification | Beta Industries |
-| 3 | Verified | Gamma Ltd |
-| 4 | Funded (14-day grace override) | Delta Manufacturing |
-| 5 | Paid | Epsilon Retail |
-| 6 | Defaulted | Zeta Logistics |
-| 7 | Disputed | Eta Services |
-| 8 | Expired | Theta Wholesale |
-
-Pool state shows partially deployed capital (42% deployed). Two investors are included — one with three commitments (2 active, 1 completed) and one with no commitments. Three SME credit-score profiles cover Excellent (750), Fair (520), and No History (500).
-
-## Adding New Mock Data
-
-Edit `db.json` directly. json-server watches the file and reloads automatically. Follow the shape of existing records. Amount fields use stroops (1 USDC = 10 000 000 stroops).
+- The data is static: nothing here mirrors contract logic, so funding,
+  repayment, and so on will not change the mock state.
+- There is no faucet route. The testnet faucet component's "mint test USDC"
+  button calls `POST /faucet/usdc`, which this service does not implement, so
+  it shows its "faucet unavailable" message; mint test USDC via the CLI
+  instead.

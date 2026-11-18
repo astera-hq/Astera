@@ -42,7 +42,7 @@ export function InvoiceFunnelChart({ data, isLoading }: InvoiceFunnelChartProps)
         <span className="w-2 h-6 bg-blue-500 rounded-full" />
         Invoice Funnel
       </h3>
-      <div className="h-72">
+      <div className="h-72 overflow-x-hidden">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
@@ -62,10 +62,10 @@ export function InvoiceFunnelChart({ data, isLoading }: InvoiceFunnelChartProps)
                 borderRadius: '8px',
                 color: '#fff',
               }}
-              formatter={(value: number, name: string) => {
+              formatter={(value, name) => {
                 if (name === 'count') return `${value} invoices`;
-                if (name === 'value') return `$${value.toLocaleString()}`;
-                return value;
+                if (name === 'value') return `$${Number(value ?? 0).toLocaleString()}`;
+                return value ?? 0;
               }}
             />
             <Legend wrapperStyle={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }} />
