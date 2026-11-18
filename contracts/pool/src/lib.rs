@@ -1818,8 +1818,8 @@ fn fund_invoice_request(
     );
 
     // #275: check utilization after deployment
+    // The caller already supplied the pool config; do not reload it.
     if tt.pool_value > 0 {
-        let config = get_config_cached(env)?;
         let utilization = ((tt.total_deployed as u128 * 10_000u128) / tt.pool_value as u128) as u32;
         if utilization > config.max_utilization_bps {
             // Revert the deployment
@@ -1919,7 +1919,7 @@ fn fund_invoice_request(
     // funding source; any remainder still comes out of pool_value.
     if let Some(insurance_contract) = get_insurance_contract(env) {
         let insurance_client = InsuranceClient::new(env, &insurance_contract);
-        if let Ok(Ok(coverage)) = insurance_client.try_purchase_coverage(
+        match insurance_client.try_purchase_coverage(
             &env.current_contract_address(),
             &request.invoice_id,
             &request.principal,
@@ -1927,14 +1927,24 @@ fn fund_invoice_request(
             &request.due_date,
             &request.token,
         ) {
-            let mut tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&token_totals_key)
-                .unwrap_or_default();
-            tt.protocol_revenue = tt.protocol_revenue.saturating_sub(coverage.premium_paid);
-            tt.pool_value = tt.pool_value.saturating_sub(coverage.premium_paid);
-            env.storage().instance().set(&token_totals_key, &tt);
+            Ok(Ok(coverage)) => {
+                let mut tt: PoolTokenTotals = env
+                    .storage()
+                    .instance()
+                    .get(&token_totals_key)
+                    .unwrap_or_default();
+                tt.protocol_revenue = tt.protocol_revenue.saturating_sub(coverage.premium_paid);
+                tt.pool_value = tt.pool_value.saturating_sub(coverage.premium_paid);
+                env.storage().instance().set(&token_totals_key, &tt);
+            }
+            // Coverage is optional, so continue funding while making failures
+            // visible to indexers and monitoring for follow-up.
+            _ => {
+                env.events().publish(
+                    (EVT, symbol_short!("ins_fail")),
+                    (request.invoice_id, request.token.clone()),
+                );
+            }
         }
     }
 
@@ -2353,7 +2363,7 @@ impl FundingPool {
         let usdc_received = (amount * rate_bps as i128) / 10_000i128;
 
         // #233: enforce maximum single-investor concentration limit
-        let config = get_config_cached(&env)?;
+        // Reuse the config loaded for minimum deposit and min_rate checks.
         if config.max_single_investor_bps < 10_000 {
             let new_investor_total = investor_position.deposited + usdc_received;
             let new_pool_total = tt.pool_value + usdc_received;
@@ -8367,6 +8377,46 @@ mod test {
         // Disable the concentration limit in this test harness.
         client.set_max_investor_concentration(&admin, &10_000u32);
         (client, admin, usdc_id, share_token)
+    }
+
+    // #1747: a failed optional insurance purchase must be observable without
+    // cancelling an otherwise successful invoice funding.
+    #[test]
+    fn test_insurance_purchase_failure_emits_event_and_funding_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc, _share) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let unavailable_insurance = Address::generate(&env);
+        let principal: i128 = 1_000_000;
+
+        mint(&env, &usdc, &investor, principal);
+        client.deposit(&investor, &usdc, &principal, &None);
+        client.set_insurance_contract(&admin, &unavailable_insurance);
+        client.fund_invoice(
+            &admin,
+            &42u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + SECS_PER_DAY),
+            &usdc,
+        );
+
+        assert!(client.get_funded_invoice(&42u64).is_some());
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (EVT, symbol_short!("ins_fail")).into_val(&env);
+        let event = env
+            .events()
+            .all()
+            .iter()
+            .find(|e| e.1 == topics)
+            .expect("failed insurance purchase must emit ins_fail");
+        let (invoice_id, event_token): (u64, Address) = event.2.into_val(&env);
+        assert_eq!(invoice_id, 42);
+        assert_eq!(event_token, usdc);
+        // An unsuccessful purchase must not debit premium from pool NAV.
+        assert_eq!(client.get_token_totals(&usdc).pool_value, principal);
     }
 
     // #915: only the configured insurance contract may credit a payout into
