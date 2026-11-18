@@ -122,6 +122,12 @@ jobs:
       - name: Check locale files stay in sync with en
         run: npm run check:locales
 
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
