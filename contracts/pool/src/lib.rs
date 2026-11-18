@@ -3488,14 +3488,55 @@ impl FundingPool {
                 .unwrap_or_default();
 
             if let Some(round_id) = record.co_funding_round_id {
+                // #1746: fee-bearing co-funded invoices must reserve their
+                // factoring fee for the protocol rather than distributing it
+                // as investor principal/interest. Recognize the fee
+                // proportionally against the fixed principal + fee base,
+                // so partial repayments cannot bypass it and a later change
+                // in accrued interest does not change fees already collected.
+                let fee_base = record
+                    .principal
+                    .checked_add(record.factoring_fee)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let repaid_before = record
+                    .repaid_amount
+                    .checked_sub(actual_payment)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let fee_before = repaid_before
+                    .min(fee_base)
+                    .checked_mul(record.factoring_fee)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .checked_div(fee_base)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let fee_after = record
+                    .repaid_amount
+                    .min(fee_base)
+                    .checked_mul(record.factoring_fee)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .checked_div(fee_base)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let fee_collected = fee_after
+                    .checked_sub(fee_before)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let investor_payment = actual_payment
+                    .checked_sub(fee_collected)
+                    .ok_or(PoolError::AmountOverflow)?;
                 distribute_pari_passu_repayment(
                     env,
                     round_id,
-                    actual_payment,
+                    investor_payment,
                     &mut tt,
                     &mut stats,
                     fully_repaid,
                 )?;
+                tt.total_fee_revenue = tt
+                    .total_fee_revenue
+                    .checked_add(fee_collected)
+                    .ok_or(PoolError::AmountOverflow)?;
+                tt.protocol_revenue = tt
+                    .protocol_revenue
+                    .checked_add(fee_collected)
+                    .ok_or(PoolError::AmountOverflow)?;
             } else if fully_repaid {
                 tt.total_deployed = tt
                     .total_deployed
@@ -6358,13 +6399,22 @@ impl FundingPool {
                 // too, so their repayment interest is computed from the same
                 // single source of truth as pool-funded invoices.
                 let config = get_config_cached(&env)?;
+                // #1746: match pool-funded invoices, including applicable
+                // credit-score fee tiers, when locking the fee at funding.
+                let factoring_fee = resolve_factoring_fee(
+                    &env,
+                    &config,
+                    round.committed_principal,
+                    round.sme.clone(),
+                    &round.token,
+                )?;
                 let funded = FundedInvoice {
                     invoice_id,
                     sme: round.sme.clone(),
                     token: round.token.clone(),
                     principal: round.committed_principal,
                     funded_at: now,
-                    factoring_fee: 0,
+                    factoring_fee,
                     due_date: round.due_date,
                     repaid_amount: 0,
                     co_funding_round_id: Some(invoice_id),
@@ -8547,6 +8597,70 @@ mod test {
         assert_eq!(tt.total_paid_out, expected_total_due);
         // pool_value grew by the yield
         assert!(tt.pool_value >= principal);
+    }
+
+    // #1746: co-funded invoices charge the same factoring fee as pool
+    // funding. Even with partial repayments, investor proceeds exclude the
+    // protocol fee, which can then be withdrawn by treasury.
+    #[test]
+    fn test_co_funded_invoice_fee_collected_from_partial_repayments() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc, _share) = setup(&env);
+        let investor_a = Address::generate(&env);
+        let investor_b = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let principal: i128 = 1_000_000_000;
+        let commitment: i128 = principal / 2;
+        let deposit: i128 = 600_000_000;
+        let invoice_id = 55u64;
+
+        client.set_factoring_fee(&admin, &250u32); // 2.5%
+        client.set_treasury(&admin, &treasury);
+        for investor in [&investor_a, &investor_b] {
+            mint(&env, &usdc, investor, deposit);
+            client.deposit(investor, &usdc, &deposit, &None);
+        }
+        mint(&env, &usdc, &sme, 50_000_000);
+        client.open_co_funding(
+            &admin,
+            &OpenCoFundingRequest {
+                invoice_id,
+                token: usdc.clone(),
+                sme: sme.clone(),
+                target_principal: principal,
+                due_date: env.ledger().timestamp() + 30 * SECS_PER_DAY,
+                funding_deadline: env.ledger().timestamp() + SECS_PER_DAY,
+                min_commitment: 0,
+                max_investor_bps: 0,
+            },
+        );
+        client.commit_to_invoice(&investor_a, &invoice_id, &commitment);
+        client.commit_to_invoice(&investor_b, &invoice_id, &commitment);
+        client.finalize_co_funding(&admin, &invoice_id);
+
+        let expected_fee = 25_000_000i128;
+        let funded = client.get_funded_invoice(&invoice_id).unwrap();
+        assert_eq!(funded.factoring_fee, expected_fee);
+        let total_due = client.estimate_repayment(&invoice_id, &None);
+        assert_eq!(total_due, principal + expected_fee);
+
+        client.repay_invoice(&invoice_id, &sme, &200_000_000i128);
+        let partial = client.get_token_totals(&usdc);
+        assert!(partial.total_fee_revenue > 0);
+        assert!(partial.total_fee_revenue < expected_fee);
+        client.repay_invoice(&invoice_id, &sme, &total_due);
+
+        let totals = client.get_token_totals(&usdc);
+        assert_eq!(totals.total_fee_revenue, expected_fee);
+        assert_eq!(totals.protocol_revenue, expected_fee);
+        assert_eq!(totals.total_paid_out, principal);
+        assert_eq!(totals.pool_value, 2 * deposit);
+
+        client.withdraw_revenue(&admin, &usdc, &expected_fee);
+        let token_client = token::Client::new(&env, &usdc);
+        assert_eq!(token_client.balance(&treasury), expected_fee);
     }
 
     // #784: fund an invoice, let its factoring fee accrue as protocol
