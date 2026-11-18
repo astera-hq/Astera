@@ -106,25 +106,42 @@ the insurance claim-history/reserve views. A missing coverage record,
 no-shortfall condition, or depleted reserve is a business outcome to record,
 not a reason to resubmit indefinitely.
 
-## 4. Handle collateral auction sales
+## 4. Collateral auction integration boundary
 
-Collateral liquidation and collateral auction sale creation are distinct
-operations. `pool.liquidate_invoice` settles the collateral deposit into the
-pool's accounting; it does **not** automatically open a Dutch auction.
+Do not assume that `pool.liquidate_invoice` automatically creates an auction.
+The pool's current seizure implementation credits the collateral amount to the
+pool's token accounting and marks the collateral deposit settled; it does not
+transfer the seized tokens to the auction contract or invoke
+`auction.open_collateral_sale`.
 
-When an operator has selected sale terms, the authorized seller can call
-`auction.open_collateral_sale` with a `CollateralSaleParams` value containing:
+The auction's `open_collateral_sale` entrypoint is a separate consignment
+flow: its `seller` must authorize a token transfer and already hold the
+collateral being consigned. In the current contracts there is no pool entrypoint
+that wraps this call on behalf of the pool-held seized collateral. A keeper
+cannot simply submit a transaction naming the pool contract as seller because
+a contract address cannot independently sign a top-level transaction.
 
-- `seller`: account holding and authorizing the collateral transfer
-- `token` and `amount`: collateral asset and quantity to consign
-- `proceeds_token` and `proceeds_recipient`: payment asset and recipient
-- `start_price`, `floor_price`, and `duration_secs`: explicit sale policy
+Accordingly, the defaulted-invoice runbook ends its automated recovery sequence
+after the insurance claim. Auctioning pool-held seized collateral requires a
+separately reviewed contract integration that lets the pool authorize the
+auction transfer and supplies an explicit sale policy. Do not attempt to work
+around this custody boundary by transferring assets from the pool through an
+unrelated signer.
 
-The auction emits `sale_open`. Buyers can inspect `list_open_sales` and
-`current_sale_price(sale_id)`, then call `take_collateral_sale` while the
-sale is open and unexpired. The contract emits the sale-settlement event when
-the swap completes. Do not invent sale prices or durations in the keeper:
-these are risk and treasury policy inputs and must be supplied by the operator.
+For reference, the standalone auction sale lifecycle is:
+
+- An asset-holding seller calls `auction.open_collateral_sale` with
+  `CollateralSaleParams`: seller, token, amount, proceeds token, proceeds
+  recipient, start price, floor price, and duration.
+- The auction emits `sale_open`. Buyers inspect `list_open_sales` and
+  `current_sale_price(sale_id)`, then call `take_collateral_sale`.
+- A successful swap emits `sale_take` with sale ID, taker, and settled price.
+- If no buyer takes the sale before expiry, anyone can call
+  `reclaim_expired_sale`; it emits `sale_exp` and returns the consigned
+  asset to the original seller.
+
+The seller chooses the price and duration parameters. They are policy inputs,
+not values that the invoice monitor can safely infer.
 
 ## Keeper monitor automation
 
@@ -147,8 +164,9 @@ A production keeper workflow should:
 5. If an insurance contract is configured, call `insurance.file_claim` in a
    later transaction and record the returned payout or the explicit reason
    no payout was made.
-6. Keep auction creation as a separately configured policy action; never
-   infer pricing parameters from the invoice monitor.
+6. Do not automatically auction pool-held collateral until a reviewed
+   pool-to-auction contract integration exists; the current seller-auth model
+   does not let a keeper consign pool-held assets.
 7. Persist per-invoice stage and transaction hashes, use bounded retries with
    backoff for transient RPC failures, and make every stage safe to resume
    after a process restart.
