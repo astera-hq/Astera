@@ -8,6 +8,6 @@ RUN npm install --production
 COPY . .
 RUN npm run build
 
-EXPOSE 3001
+EXPOSE 3001 9091
 
 CMD ["node", "dist/index.js"]

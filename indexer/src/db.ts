@@ -30,6 +30,24 @@ export function initDb(dbPath: string): Database.Database {
       ON events(event_type);
     CREATE INDEX IF NOT EXISTS idx_events_ledger
       ON events(ledger_sequence);
+
+    CREATE TABLE IF NOT EXISTS pool_history (
+      token TEXT NOT NULL,
+      snapshot_date TEXT NOT NULL,
+      deposited REAL NOT NULL DEFAULT 0,
+      deployed REAL NOT NULL DEFAULT 0,
+      utilization REAL NOT NULL DEFAULT 0,
+      default_rate REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (token, snapshot_date)
+    );
+
+    CREATE TABLE IF NOT EXISTS analytics_summary (
+      snapshot_date TEXT PRIMARY KEY,
+      tvl REAL NOT NULL DEFAULT 0,
+      volume REAL NOT NULL DEFAULT 0,
+      default_rate REAL NOT NULL DEFAULT 0,
+      active_invoices INTEGER NOT NULL DEFAULT 0
+    );
   `);
 
   return db;
@@ -112,4 +130,59 @@ export function getLatestLedger(db: Database.Database): string | null {
     | undefined;
 
   return row ? row.ledger_sequence.toString() : null;
+}
+
+export function upsertPoolHistory(
+  db: Database.Database,
+  token: string,
+  snapshot: { deposited: number; deployed: number; utilization: number; defaultRate: number },
+): void {
+  const date = new Date().toISOString().slice(0, 10);
+  db.prepare(`
+    INSERT INTO pool_history (token, snapshot_date, deposited, deployed, utilization, default_rate)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(token, snapshot_date) DO UPDATE SET
+      deposited = excluded.deposited,
+      deployed = excluded.deployed,
+      utilization = excluded.utilization,
+      default_rate = excluded.default_rate
+  `).run(token, date, snapshot.deposited, snapshot.deployed, snapshot.utilization, snapshot.defaultRate);
+}
+
+export function getPoolHistory(db: Database.Database, token: string, limit = 90): any[] {
+  const safeLimit = Math.max(1, Math.min(limit, 365));
+  return db.prepare(`
+    SELECT snapshot_date AS time, deposited, deployed, utilization, default_rate AS defaultRate
+    FROM pool_history
+    WHERE token = ?
+    ORDER BY snapshot_date DESC
+    LIMIT ?
+  `).all(token, safeLimit).reverse();
+}
+
+export function upsertAnalyticsSummary(
+  db: Database.Database,
+  snapshot: { tvl: number; volume: number; defaultRate: number; activeInvoices: number },
+): void {
+  const date = new Date().toISOString().slice(0, 10);
+  db.prepare(`
+    INSERT INTO analytics_summary (snapshot_date, tvl, volume, default_rate, active_invoices)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(snapshot_date) DO UPDATE SET
+      tvl = excluded.tvl,
+      volume = excluded.volume,
+      default_rate = excluded.default_rate,
+      active_invoices = excluded.active_invoices
+  `).run(date, snapshot.tvl, snapshot.volume, snapshot.defaultRate, snapshot.activeInvoices);
+}
+
+export function getAnalyticsSummary(db: Database.Database, limit = 90): any[] {
+  const safeLimit = Math.max(1, Math.min(limit, 365));
+  return db.prepare(`
+    SELECT snapshot_date AS time, tvl, volume, default_rate AS defaultRate,
+           active_invoices AS activeInvoices
+    FROM analytics_summary
+    ORDER BY snapshot_date DESC
+    LIMIT ?
+  `).all(safeLimit).reverse();
 }

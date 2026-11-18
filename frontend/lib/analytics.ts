@@ -7,7 +7,6 @@ import { monitorService, ContractEvent } from './monitoring';
 import {
   getInvoiceCount,
   getPoolConfig,
-  getPoolTokenTotals,
   getMultipleInvoices,
 } from './contracts';
 import type { Invoice, InvoiceStatus } from './types';
@@ -20,6 +19,7 @@ interface CacheEntry<T> {
 }
 
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL || 'http://localhost:3001';
 const cache = new Map<string, CacheEntry<unknown>>();
 
 function getCached<T>(key: string): T | null {
@@ -78,60 +78,34 @@ export interface AnalyticsDashboardData {
   recentEvents: ContractEvent[];
 }
 
+// ---- Indexer-backed historical data ----
+
+async function fetchPoolUtilizationHistory(): Promise<PoolUtilizationPoint[]> {
+  const token = process.env.NEXT_PUBLIC_POOL_TOKEN || 'default';
+  const response = await fetch(`${INDEXER_URL}/pool/${encodeURIComponent(token)}/utilization-history`, {
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`Indexer utilization history returned ${response.status}`);
+  const payload = await response.json();
+  const history = payload.utilizationHistory ?? payload.history ?? [];
+  return history.map((row: any) => ({
+    time: String(row.time),
+    utilization: Number(row.utilization) || 0,
+    deployed: Number(row.deployed) || 0,
+    deposited: Number(row.deposited) || 0,
+  }));
+}
+
+async function fetchAnalyticsSummary(): Promise<Record<string, number> | null> {
+  const response = await fetch(`${INDEXER_URL}/analytics/summary`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Indexer analytics summary returned ${response.status}`);
+  const payload = await response.json();
+  return payload.latest ?? payload.summary ?? null;
+}
+
 // ---- Simulated Historical Data Generator ----
 // In production, this would query a time-series DB or subgraph.
 // For now, we generate realistic mock data based on current on-chain state.
-
-function generateHistoricalUtilization(
-  currentDeposited: bigint,
-  currentDeployed: bigint,
-  points: number = 30,
-): PoolUtilizationPoint[] {
-  const data: PoolUtilizationPoint[] = [];
-  const now = Date.now();
-  const depositedNum = Number(currentDeposited) / 10_000_000;
-  const deployedNum = Number(currentDeployed) / 10_000_000;
-
-  for (let i = points - 1; i >= 0; i--) {
-    const date = new Date(now - i * 24 * 60 * 60 * 1000);
-    // Simulate gradual growth with some variance
-    const growthFactor = 1 - i / points;
-    const variance = 0.8 + Math.random() * 0.4;
-    const dep = Math.round(depositedNum * growthFactor * variance);
-    const dployed = Math.min(dep, Math.round(deployedNum * growthFactor * variance));
-    const util = dep > 0 ? Math.round((dployed / dep) * 100) : 0;
-
-    data.push({
-      time: date.toISOString().slice(0, 10),
-      utilization: Math.min(util, 100),
-      deployed: dployed,
-      deposited: dep,
-    });
-  }
-
-  return data;
-}
-
-function generateYieldData(yieldBps: number, points: number = 30): YieldPoint[] {
-  const data: YieldPoint[] = [];
-  const now = Date.now();
-  const apy = yieldBps / 100;
-
-  for (let i = points - 1; i >= 0; i--) {
-    const date = new Date(now - i * 24 * 60 * 60 * 1000);
-    // Simulate slight APY variance around the target
-    const variance = apy * (0.95 + Math.random() * 0.1);
-    const interest = Math.round(variance * 10) / 10;
-
-    data.push({
-      time: date.toISOString().slice(0, 10),
-      apy: Math.round(variance * 100) / 100,
-      interest,
-    });
-  }
-
-  return data;
-}
 
 function generateInvoiceFunnel(invoices: Invoice[]): InvoiceFunnelData[] {
   const stages: Record<string, { count: number; value: number }> = {
@@ -173,19 +147,19 @@ function generateCreditScoreDistribution(invoices: Invoice[]): CreditScoreBucket
     let score: number;
     switch (inv.status as InvoiceStatus) {
       case 'Paid':
-        score = 700 + Math.floor(Math.random() * 150);
+        score = 700;
         break;
       case 'Funded':
-        score = 500 + Math.floor(Math.random() * 250);
+        score = 600;
         break;
       case 'Verified':
-        score = 400 + Math.floor(Math.random() * 300);
+        score = 500;
         break;
       case 'Defaulted':
-        score = 200 + Math.floor(Math.random() * 300);
+        score = 250;
         break;
       default:
-        score = 300 + Math.floor(Math.random() * 550);
+        score = 400;
     }
 
     if (score >= 850) buckets[5].count++;
@@ -235,10 +209,14 @@ export async function fetchAnalyticsData(): Promise<AnalyticsDashboardData> {
 
   try {
     // Fetch on-chain data in parallel
-    const [invoiceCount, poolConfig, poolTokenTotals] = await Promise.all([
+    const [invoiceCount, poolConfig] = await Promise.all([
       getInvoiceCount().catch(() => 0),
       getPoolConfig().catch(() => null),
-      getPoolTokenTotals('').catch(() => null),
+    ]);
+
+    const [poolUtilization, analyticsSummary] = await Promise.all([
+      fetchPoolUtilizationHistory().catch(() => []),
+      fetchAnalyticsSummary().catch(() => null),
     ]);
 
     // Fetch invoices (limit to reasonable number for dashboard)
@@ -248,13 +226,20 @@ export async function fetchAnalyticsData(): Promise<AnalyticsDashboardData> {
     // Fetch recent events
     const events = await monitorService.pollEvents().catch(() => []);
 
-    const deposited = poolTokenTotals?.totalDeposited ?? 0n;
-    const deployed = poolTokenTotals?.totalDeployed ?? 0n;
-    const yieldBps = poolConfig?.yieldBps ?? 800;
+    const yieldBps = poolConfig?.yieldBps;
+    const yieldPerformance: YieldPoint[] = yieldBps
+      ? [{ time: new Date().toISOString().slice(0, 10), apy: yieldBps / 100, interest: yieldBps / 100 }]
+      : analyticsSummary
+        ? [{
+            time: String(analyticsSummary.time || new Date().toISOString().slice(0, 10)),
+            apy: Number(analyticsSummary.defaultRate) || 0,
+            interest: Number(analyticsSummary.defaultRate) || 0,
+          }]
+        : [];
 
     const data: AnalyticsDashboardData = {
-      poolUtilization: generateHistoricalUtilization(deposited, deployed),
-      yieldPerformance: generateYieldData(yieldBps),
+      poolUtilization,
+      yieldPerformance,
       invoiceFunnel: generateInvoiceFunnel(invoices),
       creditScoreDistribution: generateCreditScoreDistribution(invoices),
       topSmes: generateTopSmes(invoices),
