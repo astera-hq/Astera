@@ -325,6 +325,7 @@ We welcome contributions from developers of all experience levels! Whether you'r
 - Read our [CONTRIBUTING.md](CONTRIBUTING.md) for a complete guide on how to set up your environment, run tests, and submit pull requests
 - Check out [good first issue](https://github.com/astera-hq/Astera/labels/good%20first%20issue) labels for beginner-friendly tasks
 - See the [security checklist](CONTRIBUTING.md#-security-checklist) before submitting smart contract changes
+- Report vulnerabilities privately using the [security policy](SECURITY.md)
 
 For more details on issue labels, workflow, and coding standards, please refer to [CONTRIBUTING.md](CONTRIBUTING.md).
 
