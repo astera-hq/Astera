@@ -22,6 +22,40 @@ For a full deployment, also set the remaining contract IDs your UI surfaces
 `referral`). Copy `frontend/.env.example` to `.env.local` (or your host's env
 config) and fill them in.
 
+
+## Server-side SEP-10 authentication secrets
+
+The authentication API routes require server-only signing and token secrets.
+Configure these in the deployment platform's **server environment variables**;
+do not prefix them with `NEXT_PUBLIC_`, commit real values, or expose them to
+browser code.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `SEP10_SERVER_SEED` | yes | Secret Stellar keypair seed used by the SEP-10 authentication server |
+| `SEP10_JWT_SECRET` | yes | High-entropy secret used to sign authentication JWTs |
+| `JWT_SECRET` | fallback | Compatibility fallback when `SEP10_JWT_SECRET` is not set |
+
+Generate a dedicated SEP-10 server keypair (do not reuse an administrator or
+personal wallet):
+
+```bash
+stellar keys generate --global sep10-server --network testnet
+stellar keys show --global sep10-server --secret-key
+```
+
+Copy the resulting secret seed into `SEP10_SERVER_SEED` in your deployment
+provider's secret store. Generate the JWT secret independently:
+
+```bash
+openssl rand -hex 32
+```
+
+Store that output as `SEP10_JWT_SECRET`. Use a separate value per environment
+and rotate it deliberately; rotating it invalidates tokens signed with the
+previous value. These values are required by the server-side auth routes even
+when the frontend's public contract-ID variables are correctly configured.
+
 ## Deploy with Vercel (one-click)
 
 Use the deploy button in the [README](../README.md#frontend-deployment) — it
