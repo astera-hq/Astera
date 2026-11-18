@@ -98,7 +98,7 @@ soroban contract invoke \
   -- file_claim --invoice_id "$INVOICE_ID"
 ```
 
-The call is permissionless. It independently verifies the default, calculates
+Expected event: insurance event `claimed`, containing invoice ID and payout. The call is permissionless. It independently verifies the default, calculates
 the remaining shortfall after collateral recovery, caps the payout by nominal
 coverage and available reserves, transfers the payout to the pool, and credits
 the pool through `receive_insurance_payout`. Check the returned payout and
