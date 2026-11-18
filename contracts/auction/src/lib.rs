@@ -146,8 +146,9 @@ pub enum DataKey {
     Auction(u64),
     // Legacy storage key retained for compatibility; new bids use a running best bid.
     AuctionBids(u64),
-    AuctionBidCount(u64),
     InvestorEscrow(Address, u64),
+    // Appended to preserve the serialized discriminants of existing storage keys.
+    AuctionBidCount(u64),
 }
 
 // #1036: local mirrors of pool's types, decoded by field name — same
