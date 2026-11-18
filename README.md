@@ -95,6 +95,7 @@ Start with the guide that matches how you want to work:
 - [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md)
 - [Testnet Deployment Guide](docs/deployment.md)
 - [Smart Contract Interaction Guide](docs/interacting-with-contracts.md)
+- [Co-funding Lifecycle and Refund Semantics](docs/co-funding.md)
 
 ### Rapid Local Development (Docker Compose)
 

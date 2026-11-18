@@ -1819,8 +1819,8 @@ fn fund_invoice_request(
     );
 
     // #275: check utilization after deployment
+    // The caller already supplied the pool config; do not reload it.
     if tt.pool_value > 0 {
-        let config = get_config_cached(env)?;
         let utilization = ((tt.total_deployed as u128 * 10_000u128) / tt.pool_value as u128) as u32;
         if utilization > config.max_utilization_bps {
             // Revert the deployment
@@ -1920,7 +1920,7 @@ fn fund_invoice_request(
     // funding source; any remainder still comes out of pool_value.
     if let Some(insurance_contract) = get_insurance_contract(env) {
         let insurance_client = InsuranceClient::new(env, &insurance_contract);
-        if let Ok(Ok(coverage)) = insurance_client.try_purchase_coverage(
+        match insurance_client.try_purchase_coverage(
             &env.current_contract_address(),
             &request.invoice_id,
             &request.principal,
@@ -1928,14 +1928,24 @@ fn fund_invoice_request(
             &request.due_date,
             &request.token,
         ) {
-            let mut tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&token_totals_key)
-                .unwrap_or_default();
-            tt.protocol_revenue = tt.protocol_revenue.saturating_sub(coverage.premium_paid);
-            tt.pool_value = tt.pool_value.saturating_sub(coverage.premium_paid);
-            env.storage().instance().set(&token_totals_key, &tt);
+            Ok(Ok(coverage)) => {
+                let mut tt: PoolTokenTotals = env
+                    .storage()
+                    .instance()
+                    .get(&token_totals_key)
+                    .unwrap_or_default();
+                tt.protocol_revenue = tt.protocol_revenue.saturating_sub(coverage.premium_paid);
+                tt.pool_value = tt.pool_value.saturating_sub(coverage.premium_paid);
+                env.storage().instance().set(&token_totals_key, &tt);
+            }
+            // Coverage is optional, so continue funding while making failures
+            // visible to indexers and monitoring for follow-up.
+            _ => {
+                env.events().publish(
+                    (EVT, symbol_short!("ins_fail")),
+                    (request.invoice_id, request.token.clone()),
+                );
+            }
         }
     }
 
@@ -2354,7 +2364,7 @@ impl FundingPool {
         let usdc_received = (amount * rate_bps as i128) / 10_000i128;
 
         // #233: enforce maximum single-investor concentration limit
-        let config = get_config_cached(&env)?;
+        // Reuse the config loaded for minimum deposit and min_rate checks.
         if config.max_single_investor_bps < 10_000 {
             let new_investor_total = investor_position.deposited + usdc_received;
             let new_pool_total = tt.pool_value + usdc_received;
@@ -3489,14 +3499,55 @@ impl FundingPool {
                 .unwrap_or_default();
 
             if let Some(round_id) = record.co_funding_round_id {
+                // #1746: fee-bearing co-funded invoices must reserve their
+                // factoring fee for the protocol rather than distributing it
+                // as investor principal/interest. Recognize the fee
+                // proportionally against the fixed principal + fee base,
+                // so partial repayments cannot bypass it and a later change
+                // in accrued interest does not change fees already collected.
+                let fee_base = record
+                    .principal
+                    .checked_add(record.factoring_fee)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let repaid_before = record
+                    .repaid_amount
+                    .checked_sub(actual_payment)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let fee_before = repaid_before
+                    .min(fee_base)
+                    .checked_mul(record.factoring_fee)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .checked_div(fee_base)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let fee_after = record
+                    .repaid_amount
+                    .min(fee_base)
+                    .checked_mul(record.factoring_fee)
+                    .ok_or(PoolError::AmountOverflow)?
+                    .checked_div(fee_base)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let fee_collected = fee_after
+                    .checked_sub(fee_before)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let investor_payment = actual_payment
+                    .checked_sub(fee_collected)
+                    .ok_or(PoolError::AmountOverflow)?;
                 distribute_pari_passu_repayment(
                     env,
                     round_id,
-                    actual_payment,
+                    investor_payment,
                     &mut tt,
                     &mut stats,
                     fully_repaid,
                 )?;
+                tt.total_fee_revenue = tt
+                    .total_fee_revenue
+                    .checked_add(fee_collected)
+                    .ok_or(PoolError::AmountOverflow)?;
+                tt.protocol_revenue = tt
+                    .protocol_revenue
+                    .checked_add(fee_collected)
+                    .ok_or(PoolError::AmountOverflow)?;
             } else if fully_repaid {
                 tt.total_deployed = tt
                     .total_deployed
@@ -6369,13 +6420,22 @@ impl FundingPool {
                 // too, so their repayment interest is computed from the same
                 // single source of truth as pool-funded invoices.
                 let config = get_config_cached(&env)?;
+                // #1746: match pool-funded invoices, including applicable
+                // credit-score fee tiers, when locking the fee at funding.
+                let factoring_fee = resolve_factoring_fee(
+                    &env,
+                    &config,
+                    round.committed_principal,
+                    round.sme.clone(),
+                    &round.token,
+                )?;
                 let funded = FundedInvoice {
                     invoice_id,
                     sme: round.sme.clone(),
                     token: round.token.clone(),
                     principal: round.committed_principal,
                     funded_at: now,
-                    factoring_fee: 0,
+                    factoring_fee,
                     due_date: round.due_date,
                     repaid_amount: 0,
                     co_funding_round_id: Some(invoice_id),
@@ -8335,6 +8395,46 @@ mod test {
         (client, admin, usdc_id, share_token)
     }
 
+    // #1747: a failed optional insurance purchase must be observable without
+    // cancelling an otherwise successful invoice funding.
+    #[test]
+    fn test_insurance_purchase_failure_emits_event_and_funding_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc, _share) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let unavailable_insurance = Address::generate(&env);
+        let principal: i128 = 1_000_000;
+
+        mint(&env, &usdc, &investor, principal);
+        client.deposit(&investor, &usdc, &principal, &None);
+        client.set_insurance_contract(&admin, &unavailable_insurance);
+        client.fund_invoice(
+            &admin,
+            &42u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + SECS_PER_DAY),
+            &usdc,
+        );
+
+        assert!(client.get_funded_invoice(&42u64).is_some());
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (EVT, symbol_short!("ins_fail")).into_val(&env);
+        let event = env
+            .events()
+            .all()
+            .iter()
+            .find(|e| e.1 == topics)
+            .expect("failed insurance purchase must emit ins_fail");
+        let (invoice_id, event_token): (u64, Address) = event.2.into_val(&env);
+        assert_eq!(invoice_id, 42);
+        assert_eq!(event_token, usdc);
+        // An unsuccessful purchase must not debit premium from pool NAV.
+        assert_eq!(client.get_token_totals(&usdc).pool_value, principal);
+    }
+
     // #915: only the configured insurance contract may credit a payout into
     // pool accounting. Any other caller must be rejected with no state change.
     #[test]
@@ -8563,6 +8663,70 @@ mod test {
         assert_eq!(tt.total_paid_out, expected_total_due);
         // pool_value grew by the yield
         assert!(tt.pool_value >= principal);
+    }
+
+    // #1746: co-funded invoices charge the same factoring fee as pool
+    // funding. Even with partial repayments, investor proceeds exclude the
+    // protocol fee, which can then be withdrawn by treasury.
+    #[test]
+    fn test_co_funded_invoice_fee_collected_from_partial_repayments() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc, _share) = setup(&env);
+        let investor_a = Address::generate(&env);
+        let investor_b = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let principal: i128 = 1_000_000_000;
+        let commitment: i128 = principal / 2;
+        let deposit: i128 = 600_000_000;
+        let invoice_id = 55u64;
+
+        client.set_factoring_fee(&admin, &250u32); // 2.5%
+        client.set_treasury(&admin, &treasury);
+        for investor in [&investor_a, &investor_b] {
+            mint(&env, &usdc, investor, deposit);
+            client.deposit(investor, &usdc, &deposit, &None);
+        }
+        mint(&env, &usdc, &sme, 50_000_000);
+        client.open_co_funding(
+            &admin,
+            &OpenCoFundingRequest {
+                invoice_id,
+                token: usdc.clone(),
+                sme: sme.clone(),
+                target_principal: principal,
+                due_date: env.ledger().timestamp() + 30 * SECS_PER_DAY,
+                funding_deadline: env.ledger().timestamp() + SECS_PER_DAY,
+                min_commitment: 0,
+                max_investor_bps: 0,
+            },
+        );
+        client.commit_to_invoice(&investor_a, &invoice_id, &commitment);
+        client.commit_to_invoice(&investor_b, &invoice_id, &commitment);
+        client.finalize_co_funding(&admin, &invoice_id);
+
+        let expected_fee = 25_000_000i128;
+        let funded = client.get_funded_invoice(&invoice_id).unwrap();
+        assert_eq!(funded.factoring_fee, expected_fee);
+        let total_due = client.estimate_repayment(&invoice_id, &None);
+        assert_eq!(total_due, principal + expected_fee);
+
+        client.repay_invoice(&invoice_id, &sme, &200_000_000i128);
+        let partial = client.get_token_totals(&usdc);
+        assert!(partial.total_fee_revenue > 0);
+        assert!(partial.total_fee_revenue < expected_fee);
+        client.repay_invoice(&invoice_id, &sme, &total_due);
+
+        let totals = client.get_token_totals(&usdc);
+        assert_eq!(totals.total_fee_revenue, expected_fee);
+        assert_eq!(totals.protocol_revenue, expected_fee);
+        assert_eq!(totals.total_paid_out, principal);
+        assert_eq!(totals.pool_value, 2 * deposit);
+
+        client.withdraw_revenue(&admin, &usdc, &expected_fee);
+        let token_client = token::Client::new(&env, &usdc);
+        assert_eq!(token_client.balance(&treasury), expected_fee);
     }
 
     // #784: fund an invoice, let its factoring fee accrue as protocol
