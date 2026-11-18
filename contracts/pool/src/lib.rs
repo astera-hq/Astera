@@ -184,6 +184,8 @@ pub enum PoolError {
     // as a typed error (instead of a raw `panic!` string) so frontends can
     // decode the failure like every other `PoolError`.
     ReentrantCall = 98,
+    // #1737: prevent seizure of collateral before a funded invoice is overdue.
+    InvoiceNotDue = 99,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -3738,6 +3740,30 @@ impl FundingPool {
     // the caller's decision entirely (same relationship market_settle_listing
     // has with secondary_market) — the at-risk flag itself is purely
     // informational and lives in the satellite's own storage, not here.
+    // Defense in depth for the trusted auction caller: collateral may only be
+    // seized for an existing, unpaid funded invoice after its due date.
+    fn ensure_risk_liquidation_eligible(env: &Env, invoice_id: u64) -> PoolResult<()> {
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+            .ok_or(PoolError::InvoiceNotFound)?;
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        let now = env.ledger().timestamp();
+        let (_interest, total_due) = calculate_total_due(&record, &config, now)?;
+        if record.repaid_amount >= total_due {
+            return Err(PoolError::AlreadyFullyRepaid);
+        }
+        if now <= record.due_date {
+            return Err(PoolError::InvoiceNotDue);
+        }
+        Ok(())
+    }
+
     pub fn risk_liquidate_collateral(
         env: Env,
         caller: Address,
@@ -3747,6 +3773,7 @@ impl FundingPool {
         Self::require_risk_contract(&env, &caller)?;
         bump_instance(&env);
         Self::require_not_paused(&env);
+        Self::ensure_risk_liquidation_eligible(&env, invoice_id)?;
 
         non_reentrant!(&env, {
             let key = DataKey::CollateralDeposit(invoice_id);
@@ -6842,6 +6869,15 @@ impl FundingPool {
             .get(&DataKey::FundedInvoice(invoice_id))
     }
 
+    /// Public, privacy-minimised eligibility check used by the invoice auction.
+    /// It returns only a combined boolean and reuses the pool's existing KYC
+    /// and compliance gates, failing closed if the compliance registry errors.
+    pub fn is_auction_bid_eligible(env: Env, investor: Address) -> bool {
+        bump_instance(&env);
+        require_kyc_approved(&env, &investor).is_ok()
+            && Self::require_compliance_cleared(&env, &investor).is_ok()
+    }
+
     pub fn get_funded_invoices_batch(
         env: Env,
         ids: Vec<u64>,
@@ -8317,6 +8353,49 @@ mod test {
         // Disable the concentration limit in this test harness.
         client.set_max_investor_concentration(&admin, &10_000u32);
         (client, admin, usdc_id, share_token)
+    }
+
+    #[test]
+    fn test_auction_bid_eligibility_reuses_pool_kyc_gate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        assert!(client.is_auction_bid_eligible(&investor));
+        client.set_kyc_required(&admin, &true);
+        assert!(!client.is_auction_bid_eligible(&investor));
+        client.approve_investor_kyc(&admin, &investor);
+        assert!(client.is_auction_bid_eligible(&investor));
+    }
+
+    #[test]
+    fn test_risk_liquidation_guard_requires_overdue_funded_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        assert_eq!(
+            FundingPool::ensure_risk_liquidation_eligible(&env, 1),
+            Err(PoolError::InvoiceNotFound)
+        );
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        let due_date = env.ledger().timestamp() + 86_400;
+        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &due_date, &usdc_id);
+
+        assert_eq!(
+            FundingPool::ensure_risk_liquidation_eligible(&env, 1),
+            Err(PoolError::InvoiceNotDue)
+        );
+        env.ledger().with_mut(|ledger| ledger.timestamp = due_date + 1);
+        assert_eq!(
+            FundingPool::ensure_risk_liquidation_eligible(&env, 1),
+            Ok(())
+        );
     }
 
     // #915: only the configured insurance contract may credit a payout into
