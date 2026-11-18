@@ -15,6 +15,7 @@ import {
 } from '@/lib/contracts';
 import { useCoFundingRounds, useCoFundingPositions } from '@/lib/cache';
 import { UseTrackTransaction } from '@/hooks/useTrackTransaction';
+import { useTranslations } from 'next-intl';
 
 const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
   Open: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
@@ -25,6 +26,7 @@ const STATUS_STYLES: Record<CoFundingRound['status'], string> = {
 
 export default function CoFundingPage() {
   const { wallet } = useStore();
+  const t = useTranslations('CoFunding');
   const [txLoading, setTxLoading] = useState(false);
   const trackedSubmit = UseTrackTransaction('Co-Funding');
 
@@ -55,7 +57,7 @@ export default function CoFundingPage() {
     const raw = commitAmounts[round.invoiceId];
     const amountNum = Number(raw);
     if (!raw || !Number.isFinite(amountNum) || amountNum <= 0) {
-      toast.error('Enter a valid commit amount.');
+      toast.error(t('toastInvalidAmount'));
       return;
     }
     setTxLoading(true);
@@ -67,12 +69,12 @@ export default function CoFundingPage() {
         amount: toStroops(amountNum),
       });
       await signAndSubmit(xdr, `Commit to #${round.invoiceId}`);
-      toast.success(`Committed to invoice #${round.invoiceId}.`);
+      toast.success(t('toastCommitSuccess', { id: round.invoiceId }));
       setCommitAmounts((prev) => ({ ...prev, [round.invoiceId]: '' }));
       mutate('co-funding-rounds');
       if (wallet.address) mutate(['co-funding-positions', wallet.address]);
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : 'Transaction failed.');
+      toast.error(e instanceof Error ? e.message : t('toastTxFailed'));
     } finally {
       setTxLoading(false);
     }
@@ -85,11 +87,11 @@ export default function CoFundingPage() {
       const investor = parseStellarAddress(wallet.address);
       const xdr = await buildWithdrawCoFundingCommitmentTx({ investor, invoiceId });
       await signAndSubmit(xdr, `Withdraw from #${invoiceId}`);
-      toast.success(`Withdrew commitment from invoice #${invoiceId}.`);
+      toast.success(t('toastWithdrawSuccess', { id: invoiceId }));
       mutate('co-funding-rounds');
       if (wallet.address) mutate(['co-funding-positions', wallet.address]);
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : 'Transaction failed.');
+      toast.error(e instanceof Error ? e.message : t('toastTxFailed'));
     } finally {
       setTxLoading(false);
     }
@@ -100,7 +102,7 @@ export default function CoFundingPage() {
     if (!wallet.address || transferTarget === null) return;
     const bps = Number(transferBps);
     if (!Number.isFinite(bps) || bps <= 0 || bps > 10_000) {
-      toast.error('Bps must be between 1 and 10000.');
+      toast.error(t('toastInvalidBps'));
       return;
     }
     setTxLoading(true);
@@ -117,12 +119,12 @@ export default function CoFundingPage() {
         bps,
       });
       await signAndSubmit(xdr, `Transfer #${transferTarget}`);
-      toast.success(`Transferred ${(bps / 100).toFixed(2)}% of invoice #${transferTarget}.`);
+      toast.success(t('toastTransferSuccess', { pct: (bps / 100).toFixed(2), id: transferTarget }));
       setTransferTarget(null);
       setTransferTo('');
       if (wallet.address) mutate(['co-funding-positions', wallet.address]);
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : 'Transaction failed.');
+      toast.error(e instanceof Error ? e.message : t('toastTxFailed'));
     } finally {
       setTxLoading(false);
     }
@@ -133,22 +135,20 @@ export default function CoFundingPage() {
   return (
     <div className="max-w-5xl space-y-8">
       <div>
-        <h1 className="text-3xl font-bold mb-2">Co-Funding Rounds</h1>
+        <h1 className="text-3xl font-bold mb-2">{t('title')}</h1>
         <p className="text-brand-muted text-sm">
-          Commit capital toward a specific invoice alongside other investors. Every co-funder ranks
-          pari passu and owns a proportional slice of that invoice&apos;s principal and interest —
-          separate from the general pool position, and tradeable once the round is filled.
+          {t('description')}
         </p>
       </div>
 
       {/* Open rounds */}
       <div className="space-y-4">
-        <h2 className="text-xl font-bold">Open Rounds</h2>
+        <h2 className="text-xl font-bold">{t('openRounds')}</h2>
         {loading ? (
           <Skeleton className="h-40 w-full rounded-2xl" />
         ) : openRounds.length === 0 ? (
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl text-center text-brand-muted text-sm">
-            No open co-funding rounds right now.
+            {t('noOpenRounds')}
           </div>
         ) : (
           <div className="space-y-4">
@@ -164,9 +164,9 @@ export default function CoFundingPage() {
                 >
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="font-semibold">Invoice #{round.invoiceId}</p>
+                      <p className="font-semibold">{t('invoiceLabel', { id: round.invoiceId })}</p>
                       <p className="text-xs text-brand-muted mt-0.5">
-                        Deadline: {new Date(round.fundingDeadline * 1000).toLocaleString()}
+                        {t('deadline', { date: new Date(round.fundingDeadline * 1000).toLocaleString() })}
                       </p>
                     </div>
                     <span
@@ -202,7 +202,7 @@ export default function CoFundingPage() {
                       type="number"
                       min="0"
                       step="0.01"
-                      placeholder="Amount (USDC)"
+                      placeholder={t('amountPlaceholder')}
                       value={commitAmounts[round.invoiceId] ?? ''}
                       onChange={(e) =>
                         setCommitAmounts((prev) => ({
@@ -218,7 +218,7 @@ export default function CoFundingPage() {
                       disabled={!wallet.connected || txLoading}
                       className="px-5 py-2.5 bg-brand-gold text-brand-dark rounded-xl text-sm font-semibold hover:bg-brand-amber transition-colors disabled:opacity-50"
                     >
-                      Commit
+                      {t('commit')}
                     </button>
                   </form>
                 </div>
@@ -230,16 +230,16 @@ export default function CoFundingPage() {
 
       {/* My positions */}
       <div className="space-y-4">
-        <h2 className="text-xl font-bold">My Co-Funding Positions</h2>
+        <h2 className="text-xl font-bold">{t('myPositions')}</h2>
         {!wallet.connected ? (
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl text-center text-brand-muted text-sm">
-            Connect your wallet to see your positions.
+            {t('connectWallet')}
           </div>
         ) : positionsLoading ? (
           <Skeleton className="h-24 w-full rounded-2xl" />
         ) : positions.length === 0 ? (
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl text-center text-brand-muted text-sm">
-            You have no co-funding positions yet.
+            {t('noPositions')}
           </div>
         ) : (
           <div className="bg-brand-card border border-brand-border rounded-2xl overflow-hidden">
@@ -247,10 +247,10 @@ export default function CoFundingPage() {
               <table className="w-full min-w-[640px] text-left text-sm">
                 <thead className="bg-brand-dark border-b border-brand-border text-brand-muted">
                   <tr>
-                    <th className="px-6 py-4 font-medium">Invoice</th>
-                    <th className="px-6 py-4 font-medium">Share</th>
-                    <th className="px-6 py-4 font-medium">Round Status</th>
-                    <th className="px-6 py-4 font-medium text-right">Actions</th>
+                    <th className="px-6 py-4 font-medium">{t('tableInvoice')}</th>
+                    <th className="px-6 py-4 font-medium">{t('tableShare')}</th>
+                    <th className="px-6 py-4 font-medium">{t('tableRoundStatus')}</th>
+                    <th className="px-6 py-4 font-medium text-right">{t('tableActions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-brand-border">
@@ -278,7 +278,7 @@ export default function CoFundingPage() {
                               disabled={txLoading}
                               className="px-3 py-1.5 bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg text-xs font-semibold hover:bg-red-500/30 transition-colors disabled:opacity-50"
                             >
-                              Withdraw
+                              {t('withdraw')}
                             </button>
                           )}
                           {round?.status === 'Filled' && (
@@ -290,7 +290,7 @@ export default function CoFundingPage() {
                               disabled={txLoading}
                               className="px-3 py-1.5 bg-brand-dark border border-brand-border rounded-lg text-xs font-semibold hover:bg-brand-border transition-colors disabled:opacity-50"
                             >
-                              Transfer
+                              {t('transfer')}
                             </button>
                           )}
                         </td>
@@ -308,17 +308,17 @@ export default function CoFundingPage() {
       {transferTarget !== null && (
         <div className="p-6 bg-brand-card border border-brand-border rounded-2xl space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="font-semibold">Transfer share in invoice #{transferTarget}</h3>
+            <h3 className="font-semibold">{t('transferTitle', { id: transferTarget })}</h3>
             <button
               onClick={() => setTransferTarget(null)}
               className="text-brand-muted hover:text-white text-sm"
             >
-              Cancel
+              {t('cancel')}
             </button>
           </div>
           <form onSubmit={handleTransfer} className="space-y-3">
             <div>
-              <label className="block text-sm text-brand-muted mb-1">Recipient Address</label>
+              <label className="block text-sm text-brand-muted mb-1">{t('recipientAddress')}</label>
               <input
                 type="text"
                 value={transferTo}
@@ -330,7 +330,7 @@ export default function CoFundingPage() {
             </div>
             <div>
               <label className="block text-sm text-brand-muted mb-1">
-                Amount (basis points, 1-10000)
+                {t('amountBps')}
               </label>
               <input
                 type="number"
@@ -346,16 +346,16 @@ export default function CoFundingPage() {
               disabled={txLoading}
               className="w-full py-2.5 bg-brand-gold text-brand-dark rounded-xl text-sm font-semibold hover:bg-brand-amber transition-colors disabled:opacity-50"
             >
-              {txLoading ? 'Processing…' : 'Transfer Share'}
+              {txLoading ? t('processing') : t('transferShare')}
             </button>
           </form>
         </div>
       )}
 
       <div className="p-4 bg-brand-dark border border-brand-border rounded-xl text-xs text-brand-muted space-y-1">
-        <p>• Commits above the remaining target are automatically clamped, not rejected.</p>
-        <p>• Withdrawing a commitment returns 100% of your committed principal.</p>
-        <p>• Shares can only be transferred once a round is Filled.</p>
+        <p>• {t('note1')}</p>
+        <p>• {t('note2')}</p>
+        <p>• {t('note3')}</p>
       </div>
     </div>
   );
