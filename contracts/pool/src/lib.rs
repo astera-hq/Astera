@@ -570,6 +570,7 @@ pub struct CollateralConfig {
 pub enum AdminOperation {
     RemoveToken(Address),
     SetCollateralConfig(i128, u32),
+    SetRiskContract(Address),
     SeizeCollateral(u64),
 }
 
@@ -3700,22 +3701,32 @@ impl FundingPool {
         required_collateral(principal, &cfg)
     }
 
-    // #1036: registers the trusted collateral-risk-response satellite
-    // (contracts/auction) — the only caller risk_liquidate_collateral
-    // accepts. Direct admin setter (not the propose_operation timelock) —
-    // same tier of trust as set_oracle_contract.
+    // #1736: changing the trusted collateral-risk satellite is critical
+    // because it can liquidate any posted collateral. Keep the legacy
+    // entrypoint but require propose_operation/execute_operation so LPs
+    // receive the configured review delay.
     pub fn set_risk_contract(
         env: Env,
         admin: Address,
-        risk_contract: Address,
+        _risk_contract: Address,
     ) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
-        env.storage().instance().set(&RISK_CONTRACT, &risk_contract);
-        env.events()
-            .publish((EVT, symbol_short!("set_risk")), (admin, risk_contract));
+        Err(PoolError::OperationRequiresProposal)
+    }
+
+    fn execute_set_risk_contract(
+        env: &Env,
+        admin: &Address,
+        risk_contract: &Address,
+    ) -> PoolResult<()> {
+        env.storage().instance().set(&RISK_CONTRACT, risk_contract);
+        env.events().publish(
+            (EVT, symbol_short!("set_risk")),
+            (admin.clone(), risk_contract.clone()),
+        );
         Ok(())
     }
 
@@ -7704,7 +7715,9 @@ impl FundingPool {
             AdminOperation::SetCollateralConfig(threshold, collateral_bps) => {
                 Self::validate_collateral_config(*threshold, *collateral_bps)?
             }
-            AdminOperation::RemoveToken(_) | AdminOperation::SeizeCollateral(_) => {}
+            AdminOperation::RemoveToken(_)
+            | AdminOperation::SetRiskContract(_)
+            | AdminOperation::SeizeCollateral(_) => {}
         }
 
         let now = env.ledger().timestamp();
@@ -7776,6 +7789,9 @@ impl FundingPool {
             AdminOperation::RemoveToken(token) => Self::execute_remove_token(&env, &admin, &token)?,
             AdminOperation::SetCollateralConfig(threshold, collateral_bps) => {
                 Self::execute_set_collateral_config(&env, &admin, threshold, collateral_bps)?
+            }
+            AdminOperation::SetRiskContract(risk_contract) => {
+                Self::execute_set_risk_contract(&env, &admin, &risk_contract)?
             }
             AdminOperation::SeizeCollateral(invoice_id) => {
                 Self::execute_seize_collateral(&env, &admin, invoice_id)?
@@ -12632,4 +12648,40 @@ mod test {
             }
         }
     }
+
+    // #1736: the trusted collateral-liquidation satellite cannot be replaced
+    // through the legacy setter; the proposal delay must elapse first.
+    #[test]
+    fn test_set_risk_contract_requires_operation_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _usdc, _share) = setup(&env);
+        let trusted = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        assert_eq!(
+            client.try_set_risk_contract(&admin, &attacker),
+            Err(Ok(PoolError::OperationRequiresProposal))
+        );
+
+        let proposal_id =
+            client.propose_operation(&admin, &AdminOperation::SetRiskContract(trusted.clone()));
+        assert_eq!(
+            client.try_execute_operation(&admin, &proposal_id),
+            Err(Ok(PoolError::ProposalNotReady))
+        );
+
+        advance_past_operation_delay(&env, &client);
+        client.execute_operation(&admin, &proposal_id);
+
+        assert_eq!(
+            client.try_risk_liquidate_collateral(&trusted, &1u64),
+            Err(Ok(PoolError::CollateralNotFound))
+        );
+        assert_eq!(
+            client.try_risk_liquidate_collateral(&attacker, &1u64),
+            Err(Ok(PoolError::Unauthorized))
+        );
+    }
+
 }
