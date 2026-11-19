@@ -211,6 +211,7 @@ pub struct OracleRegistryContract;
 #[contractimpl]
 impl OracleRegistryContract {
     pub fn initialize(env: Env, admin: Address, stake_token: Address, min_stake: i128) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, OracleRegistryError::AlreadyInitialized);
         }

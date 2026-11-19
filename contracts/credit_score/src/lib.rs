@@ -903,6 +903,7 @@ fn compute_trend_adjustment(
 #[contractimpl]
 impl CreditScoreContract {
     pub fn initialize(env: Env, admin: Address, invoice_contract: Address, pool_contract: Address) {
+        admin.require_auth();
         bump_instance(&env);
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, CreditScoreError::AlreadyInitialized);

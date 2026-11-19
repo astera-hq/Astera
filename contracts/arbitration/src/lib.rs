@@ -291,6 +291,7 @@ impl ArbitrationContract {
         stake_token: Address,
         min_stake: i128,
     ) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, ArbitrationError::AlreadyInitialized);
         }

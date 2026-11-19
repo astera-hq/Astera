@@ -926,6 +926,7 @@ impl AuctionContract {
     // ── #1036: collateral-risk-response (permissionless monitoring/liquidation) ──
 
     pub fn initialize(env: Env, admin: Address, pool: Address) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, AuctionError::AlreadyInitialized);
         }
