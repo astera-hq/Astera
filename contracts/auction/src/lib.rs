@@ -144,8 +144,11 @@ pub enum DataKey {
     // #1054: invoice auction support
     NextAuctionId,
     Auction(u64),
+    // Legacy storage key retained for compatibility; new bids use a running best bid.
     AuctionBids(u64),
     InvestorEscrow(Address, u64),
+    // Appended to preserve the serialized discriminants of existing storage keys.
+    AuctionBidCount(u64),
 }
 
 // #1036: local mirrors of pool's types, decoded by field name — same
@@ -197,6 +200,8 @@ pub struct CollateralRiskConfig {
 }
 
 const BPS_DENOM: i128 = 10_000;
+// #1740: keep each auction's bid path and settlement bounded.
+const MAX_INVOICE_AUCTION_BIDS: u32 = 64;
 const DEFAULT_DANGER_BPS: u32 = 12_000; // 120%
 const MAX_DANGER_BPS: u32 = 30_000; // sanity ceiling
 const DEFAULT_GRACE_PERIOD_SECS: u64 = 259_200; // 3 days
@@ -246,6 +251,8 @@ pub enum AuctionError {
     BidEscrowFailed = 34,
     BidWithdrawFailed = 35,
     UnauthorizedSettlement = 36,
+    TooManyBids = 37,
+    InvestorNotEligible = 38,
 }
 
 // ── Clearing Algorithm (pure function) ────────────────────────────────────────
@@ -702,7 +709,7 @@ impl AuctionContract {
         discount_bps: u32,
     ) -> Result<(), AuctionError> {
         investor.require_auth();
-        let auction: InvoiceAuction = env
+        let mut auction: InvoiceAuction = env
             .storage()
             .persistent()
             .get(&DataKey::Auction(auction_id))
@@ -718,39 +725,76 @@ impl AuctionContract {
             return Err(AuctionError::InvalidSaleParams);
         }
 
-        // Escrow the bid amount
-        let token_client = token::Client::new(&env, &auction.token);
-        token_client.transfer(&investor, &env.current_contract_address(), &bid_amount);
+        // #1739: ask the configured pool to apply the same KYC and compliance
+        // gates used by normal pool deposits. A false result fails closed.
+        let pool = Self::require_pool(&env)?;
+        let eligible: bool = env.invoke_contract(
+            &pool,
+            &Symbol::new(&env, "is_auction_bid_eligible"),
+            Vec::from_array(&env, [investor.clone().into_val(&env)]),
+        );
+        if !eligible {
+            return Err(AuctionError::InvestorNotEligible);
+        }
 
-        // Record the bid
+        // #1740: a bid must be at least 1% of principal (rounded up), with a
+        // one-stroop floor for small-principal invoices.
+        let min_bid_amount = (auction.principal / 100)
+            + if auction.principal % 100 == 0 { 0 } else { 1 };
+        let min_bid_amount = if min_bid_amount < 1 { 1 } else { min_bid_amount };
+        if bid_amount < min_bid_amount {
+            return Err(AuctionError::BidAmountTooLow);
+        }
+
+        // Count bid submissions, not just distinct investors: repeat calls
+        // cannot create unbounded work or storage for one auction.
+        let count_key = DataKey::AuctionBidCount(auction_id);
+        let bid_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0);
+        if bid_count >= MAX_INVOICE_AUCTION_BIDS {
+            return Err(AuctionError::TooManyBids);
+        }
+
+        // Check escrow arithmetic before moving funds.
         let escrow_key = DataKey::InvestorEscrow(investor.clone(), auction_id);
         let existing = env
             .storage()
             .persistent()
             .get::<DataKey, i128>(&escrow_key)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&escrow_key, &(existing + bid_amount));
+        let new_escrow = existing
+            .checked_add(bid_amount)
+            .ok_or(AuctionError::AmountOverflow)?;
 
-        // Add to auction bids list
-        let mut bids: Vec<InvestorBid> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AuctionBids(auction_id))
-            .unwrap_or(Vec::new(&env));
-        bids.push_back(InvestorBid {
-            auction_id,
-            investor: investor.clone(),
-            bid_amount,
-            discount_bps,
-        });
+        let token_client = token::Client::new(&env, &auction.token);
+        token_client.transfer(&investor, &env.current_contract_address(), &bid_amount);
+        env.storage().persistent().set(&escrow_key, &new_escrow);
+
         env.storage()
             .persistent()
-            .set(&DataKey::AuctionBids(auction_id), &bids);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::AuctionBids(auction_id), auction.duration_secs as u32, auction.duration_secs as u32);
+            .set(&count_key, &(bid_count + 1));
+        env.storage().persistent().extend_ttl(
+            &count_key,
+            auction.duration_secs as u32,
+            auction.duration_secs as u32,
+        );
+
+        // Track the best discount as bids arrive. Strictly-lower comparison
+        // preserves the original first-bid-wins behavior for ties.
+        let is_better = match auction.winning_discount_bps {
+            Some(best_discount) => discount_bps < best_discount,
+            None => true,
+        };
+        if is_better {
+            auction.winning_bid = Some(investor.clone());
+            auction.winning_discount_bps = Some(discount_bps);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Auction(auction_id), &auction);
+        }
 
         env.events()
             .publish((EVT, symbol_short!("bid")), (auction_id, investor, bid_amount, discount_bps));
@@ -820,44 +864,33 @@ impl AuctionContract {
             return Err(AuctionError::AuctionNotOpen);
         }
 
-        let bids: Vec<InvestorBid> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AuctionBids(auction_id))
-            .unwrap_or(Vec::new(&env));
+        // #1740: settlement is O(1); the winning bid was maintained during
+        // place_bid, so settlement never deserializes or scans an attacker-
+        // controlled list.
+        let (winning_investor, winning_discount) =
+            match (auction.winning_bid.clone(), auction.winning_discount_bps) {
+                (Some(investor), Some(discount)) => (investor, discount),
+                _ => {
+                    auction.status = AuctionStatus::Cancelled;
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::Auction(auction_id), &auction);
+                    env.events()
+                        .publish((EVT, symbol_short!("inv_cncl")), auction_id);
+                    return Err(AuctionError::NoBids);
+                }
+            };
 
-        if bids.is_empty() {
-            auction.status = AuctionStatus::Cancelled;
-            env.storage()
-                .persistent()
-                .set(&DataKey::Auction(auction_id), &auction);
-            env.events()
-                .publish((EVT, symbol_short!("inv_cncl")), auction_id);
-            return Err(AuctionError::NoBids);
-        }
-
-        // Find winning bid (best discount)
-        let mut best_idx = 0;
-        let mut best_discount = 10_001u32;
-        for i in 0..bids.len() {
-            let bid = bids.get(i).unwrap();
-            if bid.discount_bps < best_discount {
-                best_discount = bid.discount_bps;
-                best_idx = i;
-            }
-        }
-
-        let winning_bid = bids.get(best_idx).unwrap();
-        auction.winning_bid = Some(winning_bid.investor.clone());
-        auction.winning_discount_bps = Some(winning_bid.discount_bps);
         auction.status = AuctionStatus::Settled;
         env.storage()
             .persistent()
             .set(&DataKey::Auction(auction_id), &auction);
 
-        env.events()
-            .publish((EVT, symbol_short!("inv_stl")), (auction_id, winning_bid.investor.clone(), winning_bid.discount_bps));
-        Ok(winning_bid.investor.clone())
+        env.events().publish(
+            (EVT, symbol_short!("inv_stl")),
+            (auction_id, winning_investor.clone(), winning_discount),
+        );
+        Ok(winning_investor)
     }
 
     /// Permissionless expiry handler: if no bids after duration, mark as cancelled.
@@ -1455,6 +1488,90 @@ mod tests {
 
         let result = client.simulate_clearing(&bids, &3000, &scores);
         assert_eq!(result.len(), 2);
+    }
+
+    // Small pool stand-in for the invoice-auction eligibility view.
+    #[contract]
+    pub struct MockAuctionEligibilityPool;
+    #[contractimpl]
+    impl MockAuctionEligibilityPool {
+        pub fn is_auction_bid_eligible(_env: Env, _investor: Address) -> bool {
+            true
+        }
+    }
+
+    fn setup_invoice_auction(
+        env: &Env,
+    ) -> (AuctionContractClient<'_>, Address, Address, Address) {
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+        env.mock_all_auths();
+        let pool = env.register_contract(None, MockAuctionEligibilityPool);
+        let contract_id = env.register_contract(None, AuctionContract);
+        let client = AuctionContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(&admin, &pool);
+
+        let token_admin = Address::generate(env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let caller = Address::generate(env);
+        (client, pool, token_id, caller)
+    }
+
+    #[test]
+    fn test_invoice_auction_rejects_sub_minimum_bid() {
+        let env = test_env();
+        let (client, _pool, token_id, caller) = setup_invoice_auction(&env);
+        let sme = Address::generate(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &token_id, &investor, 100);
+        let auction_id = client
+            .open_invoice_auction(&caller, &1u64, &sme, &token_id, &1_000i128, &500u32, &3_600u64);
+
+        let result = client.try_place_bid(&investor, &auction_id, &9i128, &200u32);
+        assert_eq!(result, Err(Ok(AuctionError::BidAmountTooLow)));
+    }
+
+    #[test]
+    fn test_invoice_auction_caps_bid_submissions() {
+        let env = test_env();
+        let (client, _pool, token_id, caller) = setup_invoice_auction(&env);
+        let sme = Address::generate(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &token_id, &investor, 1_000);
+        let auction_id = client
+            .open_invoice_auction(&caller, &1u64, &sme, &token_id, &1_000i128, &500u32, &3_600u64);
+
+        for _ in 0..MAX_INVOICE_AUCTION_BIDS {
+            client.place_bid(&investor, &auction_id, &10i128, &500u32);
+        }
+        let result = client.try_place_bid(&investor, &auction_id, &10i128, &400u32);
+        assert_eq!(result, Err(Ok(AuctionError::TooManyBids)));
+    }
+
+    #[test]
+    fn test_invoice_auction_settlement_uses_best_discount_without_list_scan() {
+        let env = test_env();
+        let (client, pool, token_id, caller) = setup_invoice_auction(&env);
+        let sme = Address::generate(&env);
+        let first = Address::generate(&env);
+        let best = Address::generate(&env);
+        let third = Address::generate(&env);
+        for investor in [&first, &best, &third] {
+            mint(&env, &token_id, investor, 100);
+        }
+        let auction_id = client
+            .open_invoice_auction(&caller, &1u64, &sme, &token_id, &1_000i128, &500u32, &3_600u64);
+
+        client.place_bid(&first, &auction_id, &10i128, &500u32);
+        client.place_bid(&best, &auction_id, &10i128, &200u32);
+        client.place_bid(&third, &auction_id, &10i128, &400u32);
+
+        let winner = client.settle_invoice_auction(&pool, &auction_id);
+        assert_eq!(winner, best);
+        let auction = client.get_invoice_auction(&auction_id).unwrap();
+        assert_eq!(auction.winning_discount_bps, Some(200));
     }
 
     // #1036: collateral-liquidation Dutch auction

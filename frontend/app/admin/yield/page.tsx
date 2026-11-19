@@ -16,8 +16,9 @@ import {
   submitTx,
   getAcceptedTokens,
   getRateModelConfig,
-  buildProposeRateModelTx,
-} from '@/lib/contracts';
+  getPoolClient,
+  sdkSigner,
+} from '@/lib/sdk';
 
 export default function AdminYieldPage() {
   const t = useTranslations('Admin.yield');
@@ -195,8 +196,12 @@ export default function AdminYieldPage() {
     setTxLoading(true);
 
     try {
-      const xdr = await buildProposeRateModelTx(wallet.address, rateToken, draftModel);
-      await signAndSubmit(xdr);
+      await getPoolClient().proposeRateModelChange({
+        signer: await sdkSigner(wallet.address),
+        admin: wallet.address,
+        token: rateToken,
+        config: draftModel,
+      });
       toast.success(t('rateModelProposed', { token: stablecoinLabel(rateToken) }));
 
       const model = await getRateModelConfig(rateToken);

@@ -11,7 +11,7 @@ import {
   getExchangeRate,
   buildSetExchangeRateTx,
   submitTx,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
 import { NETWORK, stablecoinLabel } from '@/lib/stellar';
 
 export default function AdminExchangeRatesPage() {

@@ -15,7 +15,7 @@ import {
   submitTx,
   fetchKycInvestors,
   KycInvestor,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
 
 const PAGE_SIZE = 20;
 

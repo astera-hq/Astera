@@ -10,10 +10,10 @@ import {
   getMultipleInvoices,
   getInvoiceCount,
   getPoolTokenTotals,
-  buildOpenCoFundingTx,
-  submitTx,
-} from '@/lib/contracts';
-import { NETWORK, formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
+  getPoolClient,
+  sdkSigner,
+} from '@/lib/sdk';
+import { formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 
 /** Number of invoices to scan per batch */
@@ -178,7 +178,8 @@ export default function AdminInvoicesPage() {
         setBatchProgress({ current: index + 1, total: invoicesToFund.length, finished: false });
 
         try {
-          const xdr = await buildOpenCoFundingTx({
+          await getPoolClient().openCoFunding({
+            signer: await sdkSigner(wallet.address),
             admin: wallet.address,
             invoiceId: invoice.id,
             targetPrincipal: invoice.amount,
@@ -186,22 +187,11 @@ export default function AdminInvoicesPage() {
             dueDate: invoice.dueDate,
             token: invoice.poolContract,
             // Quick one-click "approve for co-funding" — a 7-day funding
-            // window, no minimum raise, no per-investor cap. Admins who
-            // want custom terms use the dedicated co-funding round form.
+            // window, no minimum raise, no per-investor cap.
             fundingDeadline: Math.floor(Date.now() / 1000) + COFUNDING_DEFAULT_WINDOW_SECS,
             minCommitment: 0n,
             maxInvestorBps: 0,
           });
-
-          const freighter = await import('@stellar/freighter-api');
-          const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-            networkPassphrase: NETWORK,
-            address: wallet.address,
-          });
-
-          if (signError) throw new Error(signError.message || 'Signing rejected.');
-
-          await submitTx(signedTxXdr);
           results[invoice.id] = { status: 'success' };
         } catch (error: unknown) {
           const message = error instanceof Error ? error.message : t('unknownError');
@@ -229,7 +219,8 @@ export default function AdminInvoicesPage() {
     setActionLoading(invoice.id);
 
     try {
-      const xdr = await buildOpenCoFundingTx({
+      await getPoolClient().openCoFunding({
+        signer: await sdkSigner(wallet.address),
         admin: wallet.address,
         invoiceId: invoice.id,
         targetPrincipal: invoice.amount,
@@ -240,16 +231,6 @@ export default function AdminInvoicesPage() {
         minCommitment: 0n,
         maxInvestorBps: 0,
       });
-
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
-      });
-
-      if (signError) throw new Error(signError.message || 'Signing rejected.');
-
-      await submitTx(signedTxXdr);
       toast.success(t('approvedInvoice', { id: invoice.id }));
       await loadInvoices();
     } catch (e: unknown) {

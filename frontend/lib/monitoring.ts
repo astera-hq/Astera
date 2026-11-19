@@ -7,7 +7,7 @@ import {
   POOL_CONTRACT_ID,
   scValToNative,
 } from './stellar';
-import { getInvoiceCount, getMultipleInvoices } from './contracts';
+import { getInvoiceCount, getMultipleInvoices } from './sdk';
 import { notificationService } from './notifications';
 import {
   LARGE_TX_THRESHOLD,

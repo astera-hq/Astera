@@ -21,7 +21,9 @@
     "plugins": [{ "name": "next" }],
     "types": ["node", "react", "react-dom", "jest"],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "@astera/sdk": ["../packages/sdk/src/index.ts"],
+      "@astera/sdk/*": ["../packages/sdk/src/*"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],

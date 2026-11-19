@@ -121,13 +121,13 @@ describe('SSE Events Polling Service', () => {
       expect(sseEventsService.isActive()).toBe(false);
     });
 
-    it('should warn and skip if started twice', () => {
+    it('should be idempotent when started twice', () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
       sseEventsService.start();
       sseEventsService.start();
-      expect(warnSpy).toHaveBeenCalledWith(
-        '[SSE Events] Polling is already running. Call stop() first.',
-      );
+      // start() is consumer-counted and only sets up one polling loop.
+      expect(sseEventsService.isActive()).toBe(true);
+      expect(warnSpy).not.toHaveBeenCalled();
       warnSpy.mockRestore();
     });
   });

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
+import { useTranslations } from 'next-intl';
 import { StatCardSkeleton, ChartSkeleton } from '@/components/Skeleton';
 import {
   PoolUtilizationChart,
@@ -10,13 +11,8 @@ import {
   RecentEventsFeed,
   RateCurveChart,
 } from '@/components/analytics';
-import {
-  getPoolConfig,
-  getAcceptedTokens,
-  getPoolTokenTotals,
-  getRateModelConfig,
-  getCurrentRate,
-} from '@/lib/contracts';
+import { getAcceptedTokens } from '@/lib/contracts';
+import { sdk } from '@/lib/sdk';
 import {
   fetchAnalyticsData,
   clearAnalyticsCache,
@@ -36,7 +32,7 @@ interface TokenData {
 interface TokenRateModel {
   token: string;
   config: RateModelConfig;
-  currentRateBps: number | null;
+  currentRateBps: number;
   utilizationBps: number;
 }
 
@@ -62,14 +58,22 @@ function StatCard({
   );
 }
 
-function UtilizationBar({ deployed, total }: { deployed: bigint; total: bigint }) {
+function UtilizationBar({
+  deployed,
+  total,
+  label,
+}: {
+  deployed: bigint;
+  total: bigint;
+  label: string;
+}) {
   const pct = total > 0n ? Number((deployed * 100n) / total) : 0;
   const barColor = pct > 90 ? 'bg-red-500' : pct > 70 ? 'bg-yellow-400' : 'bg-brand-gold';
   const textColor = pct > 90 ? 'text-red-400' : pct > 70 ? 'text-yellow-400' : 'text-white';
   return (
     <div className="space-y-1.5">
       <div className="flex justify-between text-xs text-brand-muted">
-        <span>Utilization</span>
+        <span>{label}</span>
         <span className={textColor}>{pct.toFixed(1)}%</span>
       </div>
       <div className="h-2.5 bg-brand-dark rounded-full overflow-hidden border border-brand-border">
@@ -83,6 +87,7 @@ function UtilizationBar({ deployed, total }: { deployed: bigint; total: bigint }
 }
 
 export default function AnalyticsPage() {
+  const t = useTranslations('Analytics');
   const [config, setConfig] = useState<PoolConfig | null>(null);
   const [tokens, setTokens] = useState<TokenData[]>([]);
   const [rateModels, setRateModels] = useState<TokenRateModel[]>([]);
@@ -131,12 +136,15 @@ export default function AnalyticsPage() {
 
   async function loadStats() {
     try {
-      const [cfg, acceptedTokens] = await Promise.all([getPoolConfig(), getAcceptedTokens()]);
-      setConfig(cfg);
+      const [cfg, acceptedTokens] = await Promise.all([
+        sdk.pool.getConfig(),
+        getAcceptedTokens(),
+      ]);
+      setConfig(cfg as PoolConfig);
       const tokenData = await Promise.all(
         acceptedTokens.map(async (token) => ({
           token,
-          totals: await getPoolTokenTotals(token),
+          totals: await sdk.pool.getPoolTokenTotals(token),
         })),
       );
       setTokens(tokenData);
@@ -144,9 +152,9 @@ export default function AnalyticsPage() {
       // #863: load each token's rate model (if any) for the curve charts.
       const models = await Promise.all(
         tokenData.map(async ({ token, totals }) => {
-          const modelConfig = await getRateModelConfig(token);
+          const modelConfig = (await sdk.pool.getRateModelConfig(token)) as RateModelConfig | null;
           if (!modelConfig) return null;
-          const currentRateBps = await getCurrentRate(token);
+          const currentRateBps = await sdk.pool.getCurrentRate(token);
           const utilizationBps =
             totals.totalDeposited > 0n
               ? Number((totals.totalDeployed * 10_000n) / totals.totalDeposited)
@@ -156,7 +164,7 @@ export default function AnalyticsPage() {
       );
       setRateModels(models.filter((m): m is TokenRateModel => m !== null));
     } catch (e) {
-      setStatsError(e instanceof Error ? e.message : 'Failed to load analytics data.');
+      setStatsError(e instanceof Error ? e.message : t('error.loadFailed'));
     } finally {
       setStatsLoading(false);
     }
@@ -181,15 +189,13 @@ export default function AnalyticsPage() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
           <div>
-            <h1 className="text-3xl font-bold mb-1">Pool Analytics</h1>
-            <p className="text-brand-muted">
-              Real-time performance metrics and historical trends for the Astera liquidity pool.
-            </p>
+            <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
+            <p className="text-brand-muted">{t('intro')}</p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
             {lastRefresh && (
               <span className="text-xs text-brand-muted hidden sm:block">
-                Updated {lastRefresh.toLocaleTimeString()}
+                {t('updated', { time: lastRefresh.toLocaleTimeString() })}
               </span>
             )}
             <button
@@ -200,16 +206,16 @@ export default function AnalyticsPage() {
               disabled={chartsLoading}
               className="px-4 py-2 bg-brand-gold text-brand-dark text-sm font-bold rounded-xl hover:bg-brand-gold-light disabled:opacity-50 transition-all"
             >
-              {chartsLoading ? 'Loading…' : 'Refresh'}
+              {chartsLoading ? t('loading') : t('refresh')}
             </button>
           </div>
         </div>
 
         {!POOL_CONFIGURED && (
           <div className="p-6 bg-brand-card border border-brand-border rounded-2xl text-brand-muted text-sm mb-6">
-            Pool contracts are not yet deployed. Configure{' '}
-            <code className="text-brand-gold text-xs">NEXT_PUBLIC_POOL_CONTRACT_ID</code> to see
-            live data.
+            {t('notConfiguredPrefix')}{' '}
+            <code className="text-brand-gold text-xs">NEXT_PUBLIC_POOL_CONTRACT_ID</code>{' '}
+            {t('notConfiguredSuffix')}
           </div>
         )}
 
@@ -230,29 +236,34 @@ export default function AnalyticsPage() {
             ) : (
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                 <StatCard
-                  label="Total Pool Value"
+                  label={t('stats.totalPoolValue')}
                   value={formatUSDC(agg.poolValue)}
-                  sub="Net asset value"
+                  sub={t('stats.totalPoolValueSub')}
                   highlight
                 />
                 <StatCard
-                  label="Deployed Capital"
+                  label={t('stats.deployedCapital')}
                   value={formatUSDC(agg.deployed)}
-                  sub="Funding active invoices"
+                  sub={t('stats.deployedCapitalSub')}
                 />
                 <StatCard
-                  label="Available Liquidity"
+                  label={t('stats.availableLiquidity')}
                   value={formatUSDC(available)}
-                  sub="Ready to deploy"
+                  sub={t('stats.availableLiquiditySub')}
                 />
-                <StatCard label="Target APY" value={`${apy}%`} sub="Current yield rate" highlight />
+                <StatCard
+                  label={t('stats.targetApy')}
+                  value={`${apy}%`}
+                  sub={t('stats.targetApySub')}
+                  highlight
+                />
               </div>
             )}
 
             {/* Per-token utilization */}
             {!statsLoading && !statsError && tokens.length > 0 && (
               <div className="p-6 bg-brand-card border border-brand-border rounded-2xl mb-6">
-                <h2 className="text-lg font-semibold mb-4">Capital Allocation by Token</h2>
+                <h2 className="text-lg font-semibold mb-4">{t('allocation.title')}</h2>
                 <div className="space-y-6">
                   {tokens.map(({ token, totals }) => (
                     <div key={token} className="space-y-3">
@@ -260,22 +271,23 @@ export default function AnalyticsPage() {
                       <UtilizationBar
                         deployed={totals.totalDeployed}
                         total={totals.totalDeposited}
+                        label={t('allocation.utilization')}
                       />
                       <div className="grid grid-cols-3 gap-2 text-xs">
                         <div className="text-center p-2 bg-brand-dark rounded-lg">
-                          <p className="text-brand-muted mb-0.5">Pool NAV</p>
+                          <p className="text-brand-muted mb-0.5">{t('allocation.nav')}</p>
                           <p className="text-white font-medium">
                             {formatUSDC(totals.totalDeposited)}
                           </p>
                         </div>
                         <div className="text-center p-2 bg-brand-dark rounded-lg">
-                          <p className="text-brand-muted mb-0.5">Deployed</p>
+                          <p className="text-brand-muted mb-0.5">{t('allocation.deployed')}</p>
                           <p className="text-brand-gold font-medium">
                             {formatUSDC(totals.totalDeployed)}
                           </p>
                         </div>
                         <div className="text-center p-2 bg-brand-dark rounded-lg">
-                          <p className="text-brand-muted mb-0.5">Available</p>
+                          <p className="text-brand-muted mb-0.5">{t('allocation.available')}</p>
                           <p className="text-white font-medium">
                             {formatUSDC(totals.totalDeposited - totals.totalDeployed)}
                           </p>
@@ -296,7 +308,7 @@ export default function AnalyticsPage() {
                     config={m.config}
                     currentUtilizationBps={m.utilizationBps}
                     currentRateBps={m.currentRateBps ?? undefined}
-                    title={`Rate Curve — ${stablecoinLabel(m.token)}`}
+                    title={t('rateCurveTitle', { token: stablecoinLabel(m.token) })}
                   />
                 ))}
               </div>
@@ -327,8 +339,7 @@ export default function AnalyticsPage() {
         </div>
 
         <div className="mt-6 p-4 bg-brand-dark border border-brand-border rounded-2xl text-xs text-brand-muted">
-          Historical trends are derived from on-chain event data and current pool state. Data
-          refreshes every 5 minutes.
+          {t('footer')}
         </div>
 
         <div className="flex items-center gap-4 mt-6">
@@ -336,13 +347,13 @@ export default function AnalyticsPage() {
             href="/invest"
             className="px-5 py-2.5 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors text-sm"
           >
-            Invest Now
+            {t('links.invest')}
           </Link>
           <Link
             href="/portfolio"
             className="px-5 py-2.5 border border-brand-border text-white rounded-xl hover:border-brand-gold/50 transition-colors text-sm"
           >
-            View Portfolio
+            {t('links.portfolio')}
           </Link>
         </div>
       </div>

@@ -13,6 +13,7 @@ const config: Config = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
+    '^@astera/sdk$': '<rootDir>/../packages/sdk/src/index.ts',
     '^next-intl$': '<rootDir>/__mocks__/next-intl.js',
     '^next-intl/server$': '<rootDir>/__mocks__/next-intl-server.js',
     '^next/navigation$': '<rootDir>/__mocks__/next-navigation.js',

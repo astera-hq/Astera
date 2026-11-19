@@ -7,7 +7,8 @@ import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import { parseStellarAddress } from '@/lib/types';
 import {
-  buildSubmitScreeningResultTx,
+  getComplianceClient,
+  sdkSigner,
   fetchComplianceServiceFlags,
   getComplianceHistory,
   getComplianceRecord,
@@ -17,7 +18,8 @@ import {
   type ComplianceRecordUi,
   type ComplianceStatusUi,
   type RiskTierUi,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
+import { NETWORK } from '@/lib/stellar';
 
 export default function AdminCompliancePage() {
   const t = useTranslations('Admin.compliance');
@@ -98,7 +100,8 @@ export default function AdminCompliancePage() {
       const address = parseStellarAddress(decisionAddress.trim());
       const expiresAt =
         decisionStatus === 'Cleared' ? Math.floor(Date.now() / 1000) + 180 * 24 * 60 * 60 : 0;
-      const xdr = await buildSubmitScreeningResultTx({
+      await getComplianceClient().submitScreeningResult({
+        signer: await sdkSigner(wallet.address),
         screener,
         address,
         status: decisionStatus,
@@ -107,7 +110,6 @@ export default function AdminCompliancePage() {
         expiresAt,
         notesHash: decisionNotes.slice(0, 64) || 'admin-decision',
       });
-      await signAndSubmit(xdr);
       toast.success(t('submitResult'));
       await loadQueues();
       const [r, h] = await Promise.all([

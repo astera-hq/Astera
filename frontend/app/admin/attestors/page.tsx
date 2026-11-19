@@ -9,13 +9,14 @@ import { parseStellarAddress } from '@/lib/types';
 import type { AttestorInfo, AttestorType, Attestation } from '@/lib/types';
 import {
   listActiveAttestors,
-  buildRegisterAttestorTx,
-  buildDeactivateAttestorTx,
+  getCreditScoreClient,
+  sdkSigner,
   getAttestation,
   buildResolveAttestationDisputeTx,
   submitTx,
   getContractErrorMessage,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
+import { NETWORK } from '@/lib/stellar';
 
 const ATTESTOR_TYPES: AttestorType[] = [
   'BusinessRegistry',
@@ -77,13 +78,13 @@ export default function AttestorsAdminPage() {
     try {
       const admin = parseStellarAddress(wallet.address);
       const address = parseStellarAddress(newAddress.trim());
-      const xdr = await buildRegisterAttestorTx({
+      await getCreditScoreClient().registerAttestor({
+        signer: await sdkSigner(wallet.address),
         admin,
         address,
         attestorType: newType,
         weightBps,
       });
-      await signAndSubmit(xdr);
       toast.success(t('registerSuccess', { address: newAddress.slice(0, 8) }));
       setNewAddress('');
       setNewWeightBps('10000');
@@ -101,8 +102,11 @@ export default function AttestorsAdminPage() {
     setTxLoading(true);
     try {
       const admin = parseStellarAddress(wallet.address);
-      const xdr = await buildDeactivateAttestorTx({ admin, address });
-      await signAndSubmit(xdr);
+      await getCreditScoreClient().deactivateAttestor({
+        signer: await sdkSigner(wallet.address),
+        admin,
+        address,
+      });
       toast.success(t('deactivateSuccess', { address: address.slice(0, 8) }));
       await load();
     } catch (e: unknown) {

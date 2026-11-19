@@ -27,7 +27,7 @@ import {
   buildPauseProtocolTx,
   buildUnpauseProtocolTx,
   submitTx,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
 import { NETWORK, formatUSDC } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 

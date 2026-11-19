@@ -4,8 +4,8 @@ import { useState, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
-import { buildCreateInvoiceTx, submitTx } from '@/lib/contracts';
-import { NETWORK, toStroops, formatUSDC } from '@/lib/stellar';
+import { getInvoiceClient, sdkSigner } from '@/lib/sdk';
+import { toStroops, formatUSDC } from '@/lib/stellar';
 
 const MAX_INVOICES_PER_DAY = 10;
 
@@ -194,22 +194,14 @@ export default function ImportInvoicePage() {
         const dueTimestamp = Math.floor(new Date(row.dueDate).getTime() / 1000);
         const amountStroops = toStroops(parseFloat(row.amount));
 
-        const xdr = await buildCreateInvoiceTx({
+        await getInvoiceClient().createInvoice({
+          signer: await sdkSigner(wallet.address),
           owner: wallet.address,
           debtor: row.debtor,
           amount: amountStroops,
           dueDate: dueTimestamp,
           description: row.description,
         });
-
-        const freighter = await import('@stellar/freighter-api');
-        const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-          networkPassphrase: NETWORK,
-          address: wallet.address,
-        });
-        if (signError) throw new Error(signError.message);
-
-        await submitTx(signedTxXdr);
 
         setResults((prev) => [...prev, { row, success: true, invoiceId: i + 1 }]);
       } catch (e) {

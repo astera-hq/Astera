@@ -13,7 +13,8 @@ import {
   buildDisputeAttestationTx,
   submitTx,
   getContractErrorMessage,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
+import { NETWORK } from '@/lib/stellar';
 
 const STATUS_STYLES: Record<Attestation['status'], string> = {
   Active: 'bg-green-500/20 text-green-400 border-green-500/30',

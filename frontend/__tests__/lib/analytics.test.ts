@@ -11,7 +11,7 @@ import {
   getMultipleInvoices,
   getPoolConfig,
   getPoolTokenTotals,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
 
 // Mock the dependencies
 jest.mock('@/lib/monitoring', () => ({
@@ -20,7 +20,7 @@ jest.mock('@/lib/monitoring', () => ({
   },
 }));
 
-jest.mock('@/lib/contracts', () => ({
+jest.mock('@/lib/sdk', () => ({
   getInvoiceCount: jest.fn().mockResolvedValue(0),
   getPoolConfig: jest.fn().mockResolvedValue({
     invoiceContract: 'TEST',

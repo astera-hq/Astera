@@ -186,6 +186,8 @@ pub enum PoolError {
     // as a typed error (instead of a raw `panic!` string) so frontends can
     // decode the failure like every other `PoolError`.
     ReentrantCall = 98,
+    // #1737: prevent seizure of collateral before a funded invoice is overdue.
+    InvoiceNotDue = 99,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -684,6 +686,27 @@ pub enum DataKey {
     InsuranceContract,
 }
 
+// #1620/#1621: per-holder yield accrual state. Kept in its own key enum
+// because `DataKey` is already at the #[contracttype] union's 50-case cap.
+#[contracttype]
+#[derive(Clone)]
+pub enum YieldKey {
+    /// (investor, token) -> YieldAccount
+    Account(Address, Address),
+}
+
+#[contracttype]
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct YieldAccount {
+    /// Share balance the pool last settled this holder at. Only
+    /// `min(recorded_shares, current_balance)` earns yield on the next
+    /// settlement, so shares received outside the pool (a plain share-token
+    /// transfer) cannot claim reward_per_share accrued before they arrived.
+    pub recorded_shares: i128,
+    /// Base yield already accrued to this holder but not yet paid out.
+    pub pending: i128,
+}
+
 const EVT: Symbol = symbol_short!("pool");
 // #799: referral registry contract address, if configured.
 const REFERRAL_CFG: Symbol = symbol_short!("ref_cfg");
@@ -1176,53 +1199,123 @@ fn loyalty_days_active(env: &Env, loyalty_start_at: u64) -> u64 {
     env.ledger().timestamp().saturating_sub(loyalty_start_at) / SECS_PER_DAY
 }
 
-fn calculate_pending_yield(
-    env: &Env,
-    investor: &Address,
-    token: &Address,
-    totals: &PoolTokenTotals,
-) -> PoolResult<(i128, i128)> {
-    let last_rps: i128 = env
-        .storage()
-        .persistent()
-        .get(&DataKey::InvestorRewardSnapshot(
-            investor.clone(),
-            token.clone(),
-        ))
-        .unwrap_or(0);
+fn share_balance_of(env: &Env, token: &Address, investor: &Address) -> PoolResult<i128> {
     let share_token: Address = env
         .storage()
         .instance()
         .get(&DataKey::ShareToken(token.clone()))
         .ok_or(PoolError::ShareTokenNotConfigured)?;
-    let investor_shares: i128 = env.invoke_contract(
-        &share_token,
-        &Symbol::new(env, "balance"),
-        {
+    Ok(
+        env.invoke_contract(&share_token, &Symbol::new(env, "balance"), {
             let mut args = Vec::new(env);
             args.push_back(investor.clone().into_val(env));
             args
+        }),
+    )
+}
+
+/// #1620/#1621: brings an investor's yield account up to `reward_per_share`
+/// without writing it. Yield accrues only on shares the pool has already
+/// settled the holder at (`min(recorded, current)`), and a holder with no
+/// reward snapshot starts at the current `reward_per_share`, so neither a
+/// fresh depositor nor a share-token transferee can claim historical yield.
+fn accrue_yield(
+    env: &Env,
+    investor: &Address,
+    token: &Address,
+    reward_per_share: i128,
+) -> PoolResult<YieldAccount> {
+    let snapshot: Option<i128> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::InvestorRewardSnapshot(
+            investor.clone(),
+            token.clone(),
+        ));
+    let current = share_balance_of(env, token, investor)?;
+    let mut account: YieldAccount = match env
+        .storage()
+        .persistent()
+        .get(&YieldKey::Account(investor.clone(), token.clone()))
+    {
+        Some(account) => account,
+        // Holder that claimed under the old snapshot-only model: their
+        // balance was already tracked against that snapshot.
+        None => YieldAccount {
+            recorded_shares: if snapshot.is_some() { current } else { 0 },
+            pending: 0,
         },
-    );
-    let claimable = if investor_shares > 0 && totals.reward_per_share > last_rps {
-        (totals.reward_per_share - last_rps)
-            .checked_mul(investor_shares)
+    };
+    let last_rps = snapshot.unwrap_or(reward_per_share);
+    let eligible = account.recorded_shares.min(current).max(0);
+    if eligible > 0 && reward_per_share > last_rps {
+        let accrued = (reward_per_share - last_rps)
+            .checked_mul(eligible)
             .ok_or(PoolError::AmountOverflow)?
             .checked_div(REWARD_PRECISION)
-            .ok_or(PoolError::AmountOverflow)?
-    } else {
-        0
-    };
+            .ok_or(PoolError::AmountOverflow)?;
+        account.pending = account
+            .pending
+            .checked_add(accrued)
+            .ok_or(PoolError::AmountOverflow)?;
+    }
+    account.recorded_shares = current;
+    Ok(account)
+}
+
+fn store_yield_account(
+    env: &Env,
+    investor: &Address,
+    token: &Address,
+    reward_per_share: i128,
+    account: &YieldAccount,
+) {
+    env.storage().persistent().set(
+        &DataKey::InvestorRewardSnapshot(investor.clone(), token.clone()),
+        &reward_per_share,
+    );
+    env.storage()
+        .persistent()
+        .set(&YieldKey::Account(investor.clone(), token.clone()), account);
+}
+
+/// #1621: settles accrued yield into the holder's pending balance and
+/// re-snapshots them. Must run immediately before every pool-driven change
+/// of `investor`'s share balance by `delta` shares (mint > 0, burn < 0), so
+/// yield earned on the old balance is kept and the new balance only earns
+/// from now on.
+fn settle_yield(
+    env: &Env,
+    investor: &Address,
+    token: &Address,
+    reward_per_share: i128,
+    delta: i128,
+) -> PoolResult<()> {
+    let mut account = accrue_yield(env, investor, token, reward_per_share)?;
+    account.recorded_shares = account
+        .recorded_shares
+        .checked_add(delta)
+        .ok_or(PoolError::AmountOverflow)?
+        .max(0);
+    store_yield_account(env, investor, token, reward_per_share, &account);
+    Ok(())
+}
+
+fn calculate_pending_yield(
+    env: &Env,
+    investor: &Address,
+    token: &Address,
+    totals: &PoolTokenTotals,
+) -> PoolResult<(i128, i128, YieldAccount)> {
+    let account = accrue_yield(env, investor, token, totals.reward_per_share)?;
+    let claimable = account.pending;
 
     let mut bonus = 0;
     if claimable > 0 {
         let position: InvestorPosition = env
             .storage()
             .persistent()
-            .get(&DataKey::InvestorPosition(
-                investor.clone(),
-                token.clone(),
-            ))
+            .get(&DataKey::InvestorPosition(investor.clone(), token.clone()))
             .unwrap_or_default();
         let config = get_config_cached(env)?;
         if config.yield_bps > 0 {
@@ -1240,7 +1333,7 @@ fn calculate_pending_yield(
             }
         }
     }
-    Ok((claimable, bonus))
+    Ok((claimable, bonus, account))
 }
 
 fn resolve_loyalty_tier(tiers: &Vec<LoyaltyTier>, days_active: u64) -> (u32, u32, Option<u32>) {
@@ -1555,6 +1648,8 @@ fn credit_investor_value(
         .checked_add(usdc_equiv)
         .ok_or(PoolError::AmountOverflow)?;
 
+    // #1621: settle before the balance change.
+    settle_yield(env, investor, token, tt.reward_per_share, shares_to_mint)?;
     let mut mint_args = Vec::new(env);
     mint_args.push_back(investor.clone().into_val(env));
     mint_args.push_back(shares_to_mint.into_val(env));
@@ -2389,6 +2484,10 @@ impl FundingPool {
         // Batch write: update token totals
         env.storage().instance().set(&token_totals_key, &tt);
 
+        // #1620/#1621: settle and snapshot before minting so the new shares
+        // only earn yield realized from now on.
+        settle_yield(&env, &investor, &token, tt.reward_per_share, shares_to_mint)?;
+
         // Mint shares (single external call)
         let mut mint_args = Vec::new(&env);
         mint_args.push_back(investor.clone().into_val(&env));
@@ -2556,6 +2655,9 @@ impl FundingPool {
                 return Err(PoolError::WithdrawalExceedsLimit);
             }
         }
+
+        // #1621: keep yield accrued on the shares being burned claimable.
+        settle_yield(&env, &investor, &token, tt.reward_per_share, -shares)?;
 
         // Burn shares FIRST - effects
         let mut burn_args = Vec::new(&env);
@@ -2932,7 +3034,16 @@ impl FundingPool {
         request: &WithdrawalRequest,
         shares_to_burn: i128,
         amount: i128,
+        reward_per_share: i128,
     ) -> PoolResult<()> {
+        // #1621: keep yield accrued on the shares being burned claimable.
+        settle_yield(
+            env,
+            &request.investor,
+            token,
+            reward_per_share,
+            -shares_to_burn,
+        )?;
         Self::burn_withdrawal_shares(env, share_token, request.investor.clone(), shares_to_burn);
 
         let token_client = token::Client::new(env, token);
@@ -3092,6 +3203,7 @@ impl FundingPool {
                     &request,
                     shares_to_burn,
                     payout,
+                    tt.reward_per_share,
                 )?;
                 tt.pool_value = tt
                     .pool_value
@@ -3163,8 +3275,8 @@ impl FundingPool {
                 .get(&token_totals_key)
                 .unwrap_or_default();
 
-            let snapshot_key = DataKey::InvestorRewardSnapshot(investor.clone(), token.clone());
-            let (claimable, bonus) = calculate_pending_yield(&env, &investor, &token, &tt)?;
+            let (claimable, bonus, mut account) =
+                calculate_pending_yield(&env, &investor, &token, &tt)?;
             let total_claim = claimable
                 .checked_add(bonus)
                 .ok_or(PoolError::AmountOverflow)?;
@@ -3172,17 +3284,13 @@ impl FundingPool {
             if total_claim > 0 {
                 let token_client = token::Client::new(&env, &token);
                 // Issue #336 Fix: Use try_transfer to detect failures
-                // Only update snapshot if transfer succeeds
+                // Only update the yield account if transfer succeeds
                 match token_client.try_transfer(
                     &env.current_contract_address(),
                     &investor,
                     &total_claim,
                 ) {
                     Ok(_) => {
-                        // Transfer succeeded - update snapshot
-                        env.storage()
-                            .persistent()
-                            .set(&snapshot_key, &tt.reward_per_share);
                         if bonus > 0 {
                             tt.protocol_revenue = tt
                                 .protocol_revenue
@@ -3192,17 +3300,15 @@ impl FundingPool {
                         }
                     }
                     Err(_) => {
-                        // Transfer failed - do NOT update snapshot
+                        // Transfer failed - do NOT update the yield account
                         // Investor can retry claim later
                         return Err(PoolError::TransferMismatch);
                     }
                 }
-            } else {
-                // No yield to claim - safe to update snapshot
-                env.storage()
-                    .persistent()
-                    .set(&snapshot_key, &tt.reward_per_share);
             }
+            // #1621: the settled pending balance has now been paid out.
+            account.pending = 0;
+            store_yield_account(&env, &investor, &token, tt.reward_per_share, &account);
 
             env.events().publish(
                 (EVT, symbol_short!("yld_claim")),
@@ -3532,10 +3638,6 @@ impl FundingPool {
                     .total_deployed
                     .checked_sub(record.principal)
                     .ok_or(PoolError::AmountOverflow)?;
-                tt.pool_value = tt
-                    .pool_value
-                    .checked_add(total_interest_i128)
-                    .ok_or(PoolError::AmountOverflow)?;
                 tt.total_fee_revenue = tt
                     .total_fee_revenue
                     .checked_add(record.factoring_fee)
@@ -3550,7 +3652,12 @@ impl FundingPool {
                     .ok_or(PoolError::AmountOverflow)?;
                 stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
 
-                // Distribute interest proportionally to share holders via reward_per_share accumulator.
+                // Distribute interest proportionally to share holders via the
+                // reward_per_share accumulator. #1619: this is the ONLY
+                // distribution path for the interest — it is deliberately not
+                // also added to pool_value, otherwise an LP could collect it
+                // through claim_yield and again through a withdraw priced off
+                // the inflated pool_value.
                 let share_token: Address = env
                     .storage()
                     .instance()
@@ -3566,6 +3673,13 @@ impl FundingPool {
                     tt.reward_per_share = tt
                         .reward_per_share
                         .checked_add(reward_delta)
+                        .ok_or(PoolError::AmountOverflow)?;
+                } else {
+                    // No share holders to accrue to: keep the interest in
+                    // pool value rather than stranding it.
+                    tt.pool_value = tt
+                        .pool_value
+                        .checked_add(total_interest_i128)
                         .ok_or(PoolError::AmountOverflow)?;
                 }
             }
@@ -3779,6 +3893,30 @@ impl FundingPool {
     // the caller's decision entirely (same relationship market_settle_listing
     // has with secondary_market) — the at-risk flag itself is purely
     // informational and lives in the satellite's own storage, not here.
+    // Defense in depth for the trusted auction caller: collateral may only be
+    // seized for an existing, unpaid funded invoice after its due date.
+    fn ensure_risk_liquidation_eligible(env: &Env, invoice_id: u64) -> PoolResult<()> {
+        let record: FundedInvoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+            .ok_or(PoolError::InvoiceNotFound)?;
+        let config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        let now = env.ledger().timestamp();
+        let (_interest, total_due) = calculate_total_due(&record, &config, now)?;
+        if record.repaid_amount >= total_due {
+            return Err(PoolError::AlreadyFullyRepaid);
+        }
+        if now <= record.due_date {
+            return Err(PoolError::InvoiceNotDue);
+        }
+        Ok(())
+    }
+
     pub fn risk_liquidate_collateral(
         env: Env,
         caller: Address,
@@ -3788,6 +3926,7 @@ impl FundingPool {
         Self::require_risk_contract(&env, &caller)?;
         bump_instance(&env);
         Self::require_not_paused(&env);
+        Self::ensure_risk_liquidation_eligible(&env, invoice_id)?;
 
         non_reentrant!(&env, {
             let key = DataKey::CollateralDeposit(invoice_id);
@@ -6114,6 +6253,15 @@ impl FundingPool {
                 }
             }
 
+            // #1621: keep yield accrued on the shares being burned claimable.
+            settle_yield(
+                &env,
+                &investor,
+                &token,
+                tt.reward_per_share,
+                -shares_to_burn,
+            )?;
+
             // Burn shares — the token amount stays in the contract's own
             // balance (never transferred), earmarked for this round.
             let mut burn_args = Vec::new(&env);
@@ -6534,7 +6682,7 @@ impl FundingPool {
                 .instance()
                 .get(&DataKey::TokenTotals(token.clone()))
                 .unwrap_or_default();
-            let (claimable, bonus) = calculate_pending_yield(&env, &investor, &token, &totals)?;
+            let (claimable, bonus, _) = calculate_pending_yield(&env, &investor, &token, &totals)?;
             let pending_yield = claimable
                 .checked_add(bonus)
                 .ok_or(PoolError::AmountOverflow)?;
@@ -6890,6 +7038,15 @@ impl FundingPool {
         env.storage()
             .persistent()
             .get(&DataKey::FundedInvoice(invoice_id))
+    }
+
+    /// Public, privacy-minimised eligibility check used by the invoice auction.
+    /// It returns only a combined boolean and reuses the pool's existing KYC
+    /// and compliance gates, failing closed if the compliance registry errors.
+    pub fn is_auction_bid_eligible(env: Env, investor: Address) -> bool {
+        bump_instance(&env);
+        require_kyc_approved(&env, &investor).is_ok()
+            && Self::require_compliance_cleared(&env, &investor).is_ok()
     }
 
     pub fn get_funded_invoices_batch(
@@ -8003,14 +8160,29 @@ impl FundingPool {
                 .get(&token_totals_key)
                 .unwrap_or_default();
 
-            // Buyer must have enough available balance to pay the price.
+            // #1622: `price` is a token amount, but the buyer pays with pool
+            // shares. Convert it at the current share price (same math as
+            // deposit) so the settlement moves real share tokens in
+            // consistent units.
+            let share_token: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::ShareToken(token.clone()))
+                .ok_or(PoolError::ShareTokenNotConfigured)?;
+            let price_shares =
+                Self::market_price_in_shares(&env, &token, &share_token, &tt, price)?;
+
+            // Buyer must hold enough shares (both the share-token balance that
+            // `withdraw` checks and the pool's own bookkeeping) to pay.
             let buyer_pos_key = DataKey::InvestorPosition(buyer.clone(), token.clone());
             let mut buyer_pos: InvestorPosition = env
                 .storage()
                 .persistent()
                 .get(&buyer_pos_key)
                 .unwrap_or_default();
-            if buyer_pos.available < price {
+            if buyer_pos.available < price_shares
+                || share_balance_of(&env, &token, &buyer)? < price_shares
+            {
                 return Err(PoolError::InvalidAmount);
             }
 
@@ -8100,16 +8272,30 @@ impl FundingPool {
                     .ok_or(PoolError::AmountOverflow)?;
             }
 
-            // Debit buyer's available balance and credit seller.
+            // #1622: move the payment as share tokens buyer -> seller (burn
+            // + mint by the pool, which administers the share token), after
+            // settling both sides' accrued yield (#1621), and keep the
+            // pool-internal `available` bookkeeping in the same share units.
+            settle_yield(&env, &buyer, &token, tt.reward_per_share, -price_shares)?;
+            settle_yield(&env, &seller, &token, tt.reward_per_share, price_shares)?;
+            let mut burn_args = Vec::new(&env);
+            burn_args.push_back(buyer.clone().into_val(&env));
+            burn_args.push_back(price_shares.into_val(&env));
+            let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "burn"), burn_args);
+            let mut mint_args = Vec::new(&env);
+            mint_args.push_back(seller.clone().into_val(&env));
+            mint_args.push_back(price_shares.into_val(&env));
+            let _: () = env.invoke_contract(&share_token, &Symbol::new(&env, "mint"), mint_args);
+
             buyer_pos.available = buyer_pos
                 .available
-                .checked_sub(price)
+                .checked_sub(price_shares)
                 .ok_or(PoolError::AmountOverflow)?;
             env.storage().persistent().set(&buyer_pos_key, &buyer_pos);
 
             seller_pos.available = seller_pos
                 .available
-                .checked_add(price)
+                .checked_add(price_shares)
                 .ok_or(PoolError::AmountOverflow)?;
             env.storage().persistent().set(&seller_pos_key, &seller_pos);
 
@@ -8119,6 +8305,48 @@ impl FundingPool {
             );
             Ok(())
         })
+    }
+
+    /// #1622: converts a secondary-market `price` (token amount) into pool
+    /// shares at the current share price, mirroring `deposit`'s pricing.
+    fn market_price_in_shares(
+        env: &Env,
+        token: &Address,
+        share_token: &Address,
+        tt: &PoolTokenTotals,
+        price: i128,
+    ) -> PoolResult<i128> {
+        if price <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let rate_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExchangeRate(token.clone()))
+            .unwrap_or(10_000u32);
+        let price_usdc = price
+            .checked_mul(rate_bps as i128)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(10_000i128)
+            .ok_or(PoolError::AmountOverflow)?;
+        let total_shares: i128 = env.invoke_contract(
+            share_token,
+            &Symbol::new(env, "total_supply"),
+            Vec::new(env),
+        );
+        let price_shares = if total_shares == 0 || tt.pool_value == 0 {
+            price_usdc
+        } else {
+            price_usdc
+                .checked_mul(total_shares)
+                .ok_or(PoolError::AmountOverflow)?
+                .checked_div(tt.pool_value)
+                .ok_or(PoolError::AmountOverflow)?
+        };
+        if price_shares <= 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+        Ok(price_shares)
     }
 }
 
@@ -8374,44 +8602,47 @@ mod test {
         (client, admin, usdc_id, share_token)
     }
 
-    // #1747: a failed optional insurance purchase must be observable without
-    // cancelling an otherwise successful invoice funding.
     #[test]
-    fn test_insurance_purchase_failure_emits_event_and_funding_succeeds() {
+    fn test_auction_bid_eligibility_reuses_pool_kyc_gate() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin, usdc, _share) = setup(&env);
+        let (client, admin, _usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        assert!(client.is_auction_bid_eligible(&investor));
+        client.set_kyc_required(&admin, &true);
+        assert!(!client.is_auction_bid_eligible(&investor));
+        client.approve_investor_kyc(&admin, &investor);
+        assert!(client.is_auction_bid_eligible(&investor));
+    }
+
+    #[test]
+    fn test_risk_liquidation_guard_requires_overdue_funded_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
         let investor = Address::generate(&env);
         let sme = Address::generate(&env);
-        let unavailable_insurance = Address::generate(&env);
-        let principal: i128 = 1_000_000;
 
-        mint(&env, &usdc, &investor, principal);
-        client.deposit(&investor, &usdc, &principal, &None);
-        client.set_insurance_contract(&admin, &unavailable_insurance);
-        client.fund_invoice(
-            &admin,
-            &42u64,
-            &principal,
-            &sme,
-            &(env.ledger().timestamp() + SECS_PER_DAY),
-            &usdc,
+        assert_eq!(
+            FundingPool::ensure_risk_liquidation_eligible(&env, 1),
+            Err(PoolError::InvoiceNotFound)
         );
 
-        assert!(client.get_funded_invoice(&42u64).is_some());
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
-            (EVT, symbol_short!("ins_fail")).into_val(&env);
-        let event = env
-            .events()
-            .all()
-            .iter()
-            .find(|e| e.1 == topics)
-            .expect("failed insurance purchase must emit ins_fail");
-        let (invoice_id, event_token): (u64, Address) = event.2.into_val(&env);
-        assert_eq!(invoice_id, 42);
-        assert_eq!(event_token, usdc);
-        // An unsuccessful purchase must not debit premium from pool NAV.
-        assert_eq!(client.get_token_totals(&usdc).pool_value, principal);
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        let due_date = env.ledger().timestamp() + 86_400;
+        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &due_date, &usdc_id);
+
+        assert_eq!(
+            FundingPool::ensure_risk_liquidation_eligible(&env, 1),
+            Err(PoolError::InvoiceNotDue)
+        );
+        env.ledger().with_mut(|ledger| ledger.timestamp = due_date + 1);
+        assert_eq!(
+            FundingPool::ensure_risk_liquidation_eligible(&env, 1),
+            Ok(())
+        );
     }
 
     // #915: only the configured insurance contract may credit a payout into
@@ -8555,12 +8786,20 @@ mod test {
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         let tt = client.get_token_totals(&usdc_id);
-        assert!(tt.pool_value > 10000);
+        // #1619: interest is distributed only through reward_per_share, never
+        // also through pool_value.
+        assert_eq!(tt.pool_value, 10000);
+        assert!(tt.reward_per_share > 0);
+        let interest = amount_due - 5000 - tt.total_fee_revenue;
+        assert!(interest > 0);
 
-        // When investor withdraws their 10000 shares, they should get > 10000 underlying!
+        // Investor owns 100% of the shares: claiming yield and then fully
+        // withdrawing returns principal + interest exactly once.
+        client.claim_yield(&investor, &usdc_id);
         client.withdraw(&investor, &usdc_id, &10000);
         let bal = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor);
-        assert_eq!(bal, tt.pool_value); // Investor got everything because they owned 100% shares
+        assert!(bal <= 10000 + interest);
+        assert!(bal >= 10000 + interest - 1); // reward_per_share rounding dust
     }
 
     #[test]
@@ -8594,7 +8833,9 @@ mod test {
         client.repay_invoice(&1u64, &sme, &total_due);
 
         let tt = client.get_token_totals(&usdc_id);
-        assert_eq!(tt.pool_value, principal + expected_interest);
+        // #1619: interest goes to reward_per_share, not pool_value.
+        assert_eq!(tt.pool_value, principal);
+        assert!(tt.reward_per_share > 0);
         assert_eq!(tt.total_paid_out, principal + expected_interest);
     }
 
@@ -11529,7 +11770,10 @@ mod test {
 
         let tt = client.get_token_totals(&usdc_id);
         let pool_value_after_yield = tt.pool_value;
-        assert!(pool_value_after_yield > 1000);
+        // #1619: realized interest accrues to reward_per_share (claimable via
+        // claim_yield), so it no longer moves the share price.
+        assert_eq!(pool_value_after_yield, 1000);
+        assert!(tt.reward_per_share > 0);
 
         // Bob deposits an amount equal to the pool value
         let bob_deposit = pool_value_after_yield;

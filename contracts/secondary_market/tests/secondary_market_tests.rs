@@ -102,6 +102,10 @@ fn mint(env: &Env, token_id: &Address, to: &Address, amount: i128) {
     token::StellarAssetClient::new(env, token_id).mint(to, &amount);
 }
 
+fn share_balance(env: &Env, share_token: &Address, who: &Address) -> i128 {
+    DummyShareClient::new(env, share_token).balance(who)
+}
+
 fn available_of(env: &Env, pool_id: &Address, investor: &Address, token: &Address) -> i128 {
     env.as_contract(pool_id, || {
         env.storage()
@@ -399,6 +403,67 @@ fn test_buy_cofund_listing_transfers_share_and_price() {
     let seller_available_after = available_of(&env, &pool_client.address, &seller, &usdc);
     assert_eq!(buyer_available_after, buyer_available_before - price);
     assert_eq!(seller_available_after, seller_available_before + price);
+}
+
+// #1622: a fill must move real share tokens buyer -> seller, so the seller
+// can actually redeem the sale proceeds and the buyer cannot keep the shares
+// they paid with.
+#[test]
+fn test_buy_listing_moves_share_tokens_and_seller_withdraws_proceeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool_client, market_client, admin, usdc) = setup(&env);
+    let (invoice_id, seller) = setup_filled_cofund_round(&env, &pool_client, &admin, &usdc);
+    let share_token = pool_client.get_share_token(&usdc).unwrap();
+
+    let seller_bps = pool_client.get_co_fund_share(&invoice_id, &seller);
+    let price = 800i128;
+    let listing_id = market_client.list_position(
+        &seller,
+        &invoice_id,
+        &ListingKind::CoFunding,
+        &(seller_bps as u64),
+        &price,
+    );
+
+    let buyer = Address::generate(&env);
+    mint(&env, &usdc, &buyer, 2_000);
+    pool_client.deposit(&buyer, &usdc, &2_000i128, &None);
+
+    let buyer_shares_before = share_balance(&env, &share_token, &buyer);
+    let seller_shares_before = share_balance(&env, &share_token, &seller);
+
+    market_client.buy_listing(&buyer, &listing_id);
+
+    // Pool is at a 1:1 share price here, so `price` tokens == `price` shares.
+    let buyer_shares_after = share_balance(&env, &share_token, &buyer);
+    let seller_shares_after = share_balance(&env, &share_token, &seller);
+    assert_eq!(buyer_shares_after, buyer_shares_before - price);
+    assert_eq!(seller_shares_after, seller_shares_before + price);
+    // Bookkeeping stays consistent with the share-token balances.
+    assert_eq!(
+        available_of(&env, &pool_client.address, &buyer, &usdc),
+        buyer_shares_after
+    );
+    assert_eq!(
+        available_of(&env, &pool_client.address, &seller, &usdc),
+        seller_shares_after
+    );
+
+    // Seller redeems everything, including the sale proceeds.
+    let usdc_client = token::Client::new(&env, &usdc);
+    let seller_usdc_before = usdc_client.balance(&seller);
+    pool_client.withdraw(&seller, &usdc, &seller_shares_after);
+    assert_eq!(
+        usdc_client.balance(&seller),
+        seller_usdc_before + seller_shares_before + price
+    );
+    assert_eq!(share_balance(&env, &share_token, &seller), 0);
+
+    // Buyer can only redeem what is left after paying.
+    let result = pool_client.try_withdraw(&buyer, &usdc, &buyer_shares_before);
+    assert!(result.is_err());
+    pool_client.withdraw(&buyer, &usdc, &buyer_shares_after);
 }
 
 #[test]

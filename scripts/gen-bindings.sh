@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Generates TypeScript type definitions / contract clients from the compiled
 # contract WASM using `stellar contract bindings typescript`, and writes the
-# resulting module to frontend/src/generated/<contract>.ts.
+# resulting module to packages/sdk/src/generated/<contract>.ts.
 #
 # Usage: ./scripts/gen-bindings.sh [contract...]
 #   contract:  one or more contract names (default: all 14 contracts)
@@ -31,7 +31,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 WASM_DIR="target/wasm32-unknown-unknown/release"
-OUTPUT_DIR="frontend/src/generated"
+OUTPUT_DIR="packages/sdk/src/generated"
 
 # #1563: all 14 contracts — previously only 4 were listed here.
 DEFAULT_CONTRACTS=(

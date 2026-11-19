@@ -962,5 +962,280 @@
     "toastFailedCancel": "Failed to cancel withdrawal request.",
     "toastFailedDrain": "Failed to drain withdrawal queue.",
     "toastFailedLoad": "Failed to load portfolio data. Please try again."
+  },
+  "Landing": {
+    "metadata": {
+      "title": "Astera — Real World Assets on Stellar",
+      "description": "Tokenize invoices. Fund real businesses. Earn on-chain yield. Built on Stellar Soroban."
+    },
+    "hero": {
+      "badge": "Built on Stellar Soroban · Testnet Live",
+      "heading1": "Real invoices.",
+      "heading2": "Real yield.",
+      "heading3": "Real impact.",
+      "description": "Astera tokenizes SME invoices as on-chain assets on Stellar. Businesses in emerging markets access working capital instantly. Investors earn verified yield.",
+      "ctaTokenize": "Tokenize an Invoice",
+      "ctaInvest": "Invest in the Pool"
+    },
+    "stats": {
+      "gapLabel": "Trade Finance Gap",
+      "gapSub": "in emerging markets",
+      "settlementLabel": "Settlement Time",
+      "settlementSub": "on Stellar network",
+      "apyLabel": "Target APY",
+      "apySub": "for pool investors",
+      "feeLabel": "Transaction Fee",
+      "feeSub": "per operation"
+    },
+    "features": {
+      "headingPrefix": "The infrastructure layer for",
+      "headingAccent": "emerging market finance",
+      "intro": "Astera reimagines invoice factoring — traditionally accessible only to large corporations — as an open, on-chain protocol.",
+      "tokenizeTitle": "Tokenize Invoices",
+      "tokenizeDesc": "SMEs mint unpaid invoices as Soroban-based RWA tokens in minutes. No paperwork, no banks, no middlemen.",
+      "liquidityTitle": "Instant Liquidity",
+      "liquidityDesc": "Community investors fund invoice pools. Working capital reaches businesses within the same transaction.",
+      "escrowTitle": "Smart Escrow",
+      "escrowDesc": "Soroban contracts handle payment release automatically when invoices are settled. Zero trust required.",
+      "creditTitle": "On-Chain Credit",
+      "creditDesc": "Every paid invoice builds a verifiable credit history on Stellar — a credit score earned through real work.",
+      "usdcTitle": "USDC Settlement",
+      "usdcDesc": "All transactions settle in native USDC on Stellar. No bridging risk, no price volatility for business ops.",
+      "diasporaTitle": "Diaspora Investing",
+      "diasporaDesc": "Remittance senders can now invest in businesses back home — turning payments into productive capital."
+    },
+    "steps": {
+      "heading": "How Astera works",
+      "smeRole": "SME",
+      "smeTitle": "Tokenize your invoice",
+      "smeDesc": "Connect Freighter, upload invoice details, mint it as an on-chain RWA token.",
+      "poolRole": "Pool",
+      "poolTitle": "Invoice gets funded",
+      "poolDesc": "Astera’s liquidity pool reviews and funds the invoice. USDC hits your wallet instantly.",
+      "investorRole": "Investor",
+      "investorTitle": "Earn yield",
+      "investorDesc": "When your customer pays, principal + interest flows to investors. SME builds credit history."
+    },
+    "cta": {
+      "title": "Ready to put your invoices to work?",
+      "description": "Connect your Freighter wallet and tokenize your first invoice in under 2 minutes.",
+      "button": "Get Started"
+    },
+    "footer": {
+      "builtOnPrefix": "Built on Stellar · Powered by",
+      "builtOnSuffix": "· USDC Settlement",
+      "dashboard": "Dashboard",
+      "invest": "Invest",
+      "glossary": "Glossary"
+    }
+  },
+  "History": {
+    "title": "Transaction History",
+    "subtitle": "On-chain activity for your wallet",
+    "exportCsv": "Export CSV",
+    "exportPdf": "Export PDF",
+    "filterAll": "All",
+    "sortNewest": "↓ Newest",
+    "sortOldest": "↑ Oldest",
+    "kinds": {
+      "invoiceCreated": "Invoice Created",
+      "invoiceFunded": "Invoice Funded",
+      "invoicePaid": "Invoice Repaid",
+      "invoiceDefaulted": "Invoice Defaulted",
+      "poolDeposit": "Pool Deposit",
+      "poolFunded": "Pool Funded Invoice",
+      "poolRepaid": "Repayment Received",
+      "poolWithdraw": "Pool Withdrawal"
+    },
+    "connect": {
+      "title": "Connect your wallet",
+      "description": "Connect Freighter to view your transaction history."
+    },
+    "empty": {
+      "filtered": "No events match the selected filter.",
+      "none": "No on-chain activity found for this wallet."
+    },
+    "invoice": "Invoice #{id}",
+    "interest": "+{amount} {symbol} interest",
+    "viewTx": "View tx ↗",
+    "loading": "Loading…",
+    "loadMore": "Load more",
+    "error": {
+      "notConfigured": "Contract IDs not configured. Set NEXT_PUBLIC_INVOICE_CONTRACT_ID and NEXT_PUBLIC_POOL_CONTRACT_ID.",
+      "loadFailed": "Failed to load transaction history. Make sure contracts are deployed."
+    },
+    "csv": {
+      "date": "Date",
+      "type": "Type",
+      "invoiceId": "Invoice ID",
+      "amount": "Amount ({symbol})",
+      "interest": "Interest ({symbol})",
+      "address": "Address",
+      "txHash": "Tx Hash"
+    }
+  },
+  "Governance": {
+    "eyebrow": "Governance",
+    "title": "Proposal voting and history",
+    "intro": "Share holders can create proposals, vote by balance weight, and review the full execution history from the same interface.",
+    "votingPower": "Voting Power:",
+    "minRequired": "(min {min} required)",
+    "refresh": "Refresh",
+    "refreshing": "Refreshing...",
+    "hideForm": "Hide Form",
+    "newProposal": "New Proposal",
+    "notConfigured": "Governance contract ID is not configured yet. The page is ready, but voting and proposal creation stay disabled until the contract is deployed.",
+    "form": {
+      "title": "Create Proposal",
+      "intro": "Add a protocol change, governance action, or parameter update.",
+      "shareWeighted": "Share-weighted",
+      "targetContract": "Target contract",
+      "functionName": "Function name",
+      "description": "Description",
+      "descriptionPlaceholder": "Raise the pool yield by 50 bps",
+      "calldata": "Calldata",
+      "submitting": "Submitting...",
+      "insufficient": "Insufficient Balance",
+      "create": "Create Proposal",
+      "insufficientTitle": "Insufficient voting power. You need at least {min} shares to create a proposal."
+    },
+    "history": {
+      "title": "Proposal History",
+      "loading": "Loading proposals...",
+      "total": "{count} proposals total · showing {visible}",
+      "filtered": "{count} {status} · showing {visible}",
+      "selected": "Selected #{id}"
+    },
+    "filters": {
+      "all": "All",
+      "active": "Active",
+      "passed": "Passed",
+      "rejected": "Rejected",
+      "executed": "Executed",
+      "expired": "Expired"
+    },
+    "empty": {
+      "none": "No proposals have been submitted yet.",
+      "filtered": "No {status} proposals match this filter."
+    },
+    "proposal": {
+      "proposer": "Proposer {address}",
+      "ends": "Ends {date}",
+      "for": "For {count}",
+      "against": "Against {count}"
+    },
+    "loadMore": "Load more ({remaining} remaining)",
+    "vote": {
+      "title": "Vote",
+      "power": "Voting power:",
+      "target": "Target: {address}",
+      "function": "Function: {name}",
+      "for": "Vote For",
+      "against": "Vote Against",
+      "select": "Select a proposal to vote."
+    },
+    "execute": {
+      "title": "Execute",
+      "intro": "Once a proposal is passed and the execution delay has elapsed, any wallet can trigger execution.",
+      "button": "Execute Selected"
+    },
+    "toast": {
+      "loadFailed": "Unable to load governance proposals.",
+      "connectFirst": "Connect a wallet first.",
+      "submitted": "Governance transaction submitted.",
+      "failed": "Transaction failed."
+    }
+  },
+  "Analytics": {
+    "title": "Pool Analytics",
+    "intro": "Real-time performance metrics and historical trends for the Astera liquidity pool.",
+    "updated": "Updated {time}",
+    "refresh": "Refresh",
+    "loading": "Loading…",
+    "notConfiguredPrefix": "Pool contracts are not yet deployed. Configure",
+    "notConfiguredSuffix": "to see live data.",
+    "error": {
+      "loadFailed": "Failed to load analytics data."
+    },
+    "stats": {
+      "totalPoolValue": "Total Pool Value",
+      "totalPoolValueSub": "Net asset value",
+      "deployedCapital": "Deployed Capital",
+      "deployedCapitalSub": "Funding active invoices",
+      "availableLiquidity": "Available Liquidity",
+      "availableLiquiditySub": "Ready to deploy",
+      "targetApy": "Target APY",
+      "targetApySub": "Current yield rate"
+    },
+    "allocation": {
+      "title": "Capital Allocation by Token",
+      "utilization": "Utilization",
+      "nav": "Pool NAV",
+      "deployed": "Deployed",
+      "available": "Available"
+    },
+    "rateCurveTitle": "Rate Curve — {token}",
+    "footer": "Historical trends are derived from on-chain event data and current pool state. Data refreshes every 5 minutes.",
+    "links": {
+      "invest": "Invest Now",
+      "portfolio": "View Portfolio"
+    }
+  },
+  "NotificationSettings": {
+    "title": "Notification settings",
+    "intro": "Choose which events you want to see in-app, and optionally subscribe to email or webhook delivery.",
+    "inApp": {
+      "title": "In-app notifications",
+      "description": "These preferences are stored locally in this browser."
+    },
+    "reset": "Reset",
+    "email": {
+      "title": "Email notifications",
+      "description": "Delivery is configured server-side and can be triggered by the event indexer.",
+      "subscribe": "Subscribe to email alerts",
+      "subscribeDesc": "Requires a valid email address.",
+      "address": "Email address",
+      "invalid": "Enter a valid email address.",
+      "events": "Events to send via email"
+    },
+    "webhook": {
+      "title": "Webhook forwarding",
+      "description": "Forward selected events to a custom endpoint. Use “Test webhook” to send a sample payload.",
+      "enable": "Enable webhook forwarding",
+      "enableDesc": "Requires a valid URL.",
+      "url": "Webhook URL",
+      "invalid": "Enter a valid http/https URL.",
+      "test": "Test webhook",
+      "testing": "Testing…",
+      "events": "Events to forward"
+    },
+    "save": "Save email & webhook",
+    "saving": "Saving…",
+    "audience": {
+      "sme": "SME",
+      "investor": "Investor",
+      "both": "Both"
+    },
+    "toast": {
+      "unsubscribed": "Email notifications have been unsubscribed in this browser.",
+      "invalidEmail": "Please enter a valid email address before enabling email notifications.",
+      "noEmailEvents": "Select at least one event for email notifications (or disable email).",
+      "invalidWebhook": "Please enter a valid webhook URL (http/https) before enabling webhooks.",
+      "noWebhookEvents": "Select at least one event for webhook forwarding (or disable webhooks).",
+      "saved": "Notification delivery preferences saved.",
+      "saveFailed": "Failed to save preferences.",
+      "enterWebhook": "Enter a valid webhook URL first.",
+      "testSent": "Test webhook sent.",
+      "testFailed": "Failed to send test webhook.",
+      "reset": "Reset in-app preferences to defaults."
+    }
+  },
+  "Glossary": {
+    "metadata": {
+      "title": "Glossary — Astera",
+      "description": "Plain-language explanations of the Stellar and Soroban terms used across Astera."
+    },
+    "title": "Glossary",
+    "intro": "Astera runs on Stellar and Soroban, which come with their own vocabulary. Here’s what the terms you’ll see around the app actually mean."
   }
 }

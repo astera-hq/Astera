@@ -18,17 +18,12 @@ import {
   getOrder,
   getOrderBook,
   listOrdersForOwner,
-  buildDepositTx,
-  buildWithdrawTx,
-  buildCommitToInvoiceTx,
-  buildCreateInvoiceTx,
   buildMarkDefaultedTx,
   buildSetYieldTx,
   submitTx,
   getReferrer,
   getReferralStats,
-  buildRegisterReferralTx,
-} from './contracts';
+} from './sdk';
 import type {
   Invoice,
   InvestorPosition,
@@ -408,7 +403,6 @@ export function useRegisterReferral(referee: string) {
   });
 }
 
-export { buildRegisterReferralTx };
 
 // ---- Mutations with Cache Invalidation ----
 

@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { isInvoicePrivate } from '@/lib/contracts';
+import { isInvoicePrivate } from '@/lib/sdk';
 
 // #783: /invoice/[id] is a client component (page.tsx), which can't itself
 // export `metadata` — a sibling server-component layout is the standard
