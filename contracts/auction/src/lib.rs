@@ -149,6 +149,8 @@ pub enum DataKey {
     InvestorEscrow(Address, u64),
     // Appended to preserve the serialized discriminants of existing storage keys.
     AuctionBidCount(u64),
+    // #1664: prevent duplicate auctions for the same invoice
+    InvoiceAuctionByInvoiceId(u64),
 }
 
 // #1036: local mirrors of pool's types, decoded by field name — same
@@ -657,8 +659,18 @@ impl AuctionContract {
         duration_secs: u64,
     ) -> Result<u64, AuctionError> {
         caller.require_auth();
+        let pool = Self::require_pool(&env)?;
+        if caller != pool {
+            return Err(AuctionError::UnauthorizedSettlement);
+        }
         if principal <= 0 || target_discount_bps > 10_000 || duration_secs == 0 {
             return Err(AuctionError::InvalidSaleParams);
+        }
+
+        // Check that no auction already exists for this invoice
+        let invoice_auction_key = DataKey::InvoiceAuctionByInvoiceId(invoice_id);
+        if env.storage().persistent().has(&invoice_auction_key) {
+            return Err(AuctionError::Unauthorized);
         }
 
         let auction_id: u64 = env
@@ -689,6 +701,14 @@ impl AuctionContract {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Auction(auction_id), duration_secs as u32, duration_secs as u32);
+
+        // #1664: track invoice_id -> auction_id to prevent duplicate auctions
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvoiceAuctionByInvoiceId(invoice_id), &auction_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::InvoiceAuctionByInvoiceId(invoice_id), duration_secs as u32, duration_secs as u32);
 
         env.events()
             .publish((EVT, symbol_short!("inv_open")), (auction_id, invoice_id, sme, principal));
@@ -801,7 +821,7 @@ impl AuctionContract {
         Ok(())
     }
 
-    /// Withdraws a non-winning bid after auction settlement or expiry.
+    /// Withdraws non-winning bids or remaining escrow after auction settlement or expiry.
     pub fn withdraw_bid(
         env: Env,
         investor: Address,
@@ -827,11 +847,8 @@ impl AuctionContract {
             return Err(AuctionError::BidWithdrawFailed);
         }
 
-        // Check if this investor won
-        let is_winner = auction.winning_bid.as_ref() == Some(&investor);
-        if is_winner {
-            return Err(AuctionError::Unauthorized);
-        }
+        // #1662: allow winners to withdraw remaining escrowed funds (pool receives the winning escrow on settlement)
+        // non-winners can always withdraw their bids after settlement/expiry
 
         env.storage().persistent().remove(&escrow_key);
 
@@ -850,6 +867,7 @@ impl AuctionContract {
         caller: Address,
         auction_id: u64,
     ) -> Result<Option<Address>, AuctionError> {
+        caller.require_auth();
         let pool = Self::require_pool(&env)?;
         if caller != pool {
             return Err(AuctionError::UnauthorizedSettlement);
@@ -888,6 +906,19 @@ impl AuctionContract {
         env.storage()
             .persistent()
             .set(&DataKey::Auction(auction_id), &auction);
+
+        // #1662: transfer winner's escrow to pool for funding and refund handling
+        let escrow_key = DataKey::InvestorEscrow(winning_investor.clone(), auction_id);
+        let escrowed = env
+            .storage()
+            .persistent()
+            .get::<DataKey, i128>(&escrow_key)
+            .unwrap_or(0);
+        if escrowed > 0 {
+            let token_client = token::Client::new(&env, &auction.token);
+            token_client.transfer(&env.current_contract_address(), &pool, &escrowed);
+            env.storage().persistent().remove(&escrow_key);
+        }
 
         env.events().publish(
             (EVT, symbol_short!("inv_stl")),
