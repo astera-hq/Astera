@@ -1,83 +1,85 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { getTranslations } from 'next-intl/server';
 import GlossaryTerm from '@/components/GlossaryTerm';
 
 // #783: canonical tag for the landing page — resolved against
 // metadataBase (set in the root layout) into an absolute URL.
-export const metadata: Metadata = {
-  title: 'Astera — Real World Assets on Stellar',
-  description: 'Tokenize invoices. Fund real businesses. Earn on-chain yield. Built on Stellar Soroban.',
-  alternates: { canonical: '/' },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslations('Landing');
+  return {
+    title: t('metadata.title'),
+    description: t('metadata.description'),
+    alternates: { canonical: '/' },
+  };
+}
 
-const stats = [
-  { label: 'Trade Finance Gap', value: '$1.7T', sub: 'in emerging markets' },
-  { label: 'Settlement Time', value: '3-5s', sub: 'on Stellar network' },
-  { label: 'Target APY', value: '8%', sub: 'for pool investors' },
-  { label: 'Transaction Fee', value: '<$0.01', sub: 'per operation' },
-];
+export default async function Home() {
+  const t = await getTranslations('Landing');
 
-const features = [
-  {
-    icon: '◈',
-    title: 'Tokenize Invoices',
-    description:
-      'SMEs mint unpaid invoices as Soroban-based RWA tokens in minutes. No paperwork, no banks, no middlemen.',
-  },
-  {
-    icon: '◉',
-    title: 'Instant Liquidity',
-    description:
-      'Community investors fund invoice pools. Working capital reaches businesses within the same transaction.',
-  },
-  {
-    icon: '◎',
-    title: 'Smart Escrow',
-    description:
-      'Soroban contracts handle payment release automatically when invoices are settled. Zero trust required.',
-  },
-  {
-    icon: '◐',
-    title: 'On-Chain Credit',
-    description:
-      'Every paid invoice builds a verifiable credit history on Stellar — a credit score earned through real work.',
-  },
-  {
-    icon: '◑',
-    title: 'USDC Settlement',
-    description:
-      'All transactions settle in native USDC on Stellar. No bridging risk, no price volatility for business ops.',
-  },
-  {
-    icon: '◒',
-    title: 'Diaspora Investing',
-    description:
-      'Remittance senders can now invest in businesses back home — turning payments into productive capital.',
-  },
-];
+  // Numeric values and glyph icons are intentionally kept as-is; only the
+  // user-facing copy is translated.
+  const stats = [
+    { label: t('stats.gapLabel'), value: '$1.7T', sub: t('stats.gapSub') },
+    { label: t('stats.settlementLabel'), value: '3-5s', sub: t('stats.settlementSub') },
+    { label: t('stats.apyLabel'), value: '8%', sub: t('stats.apySub') },
+    { label: t('stats.feeLabel'), value: '<$0.01', sub: t('stats.feeSub') },
+  ];
 
-const steps = [
-  {
-    n: '01',
-    role: 'SME',
-    title: 'Tokenize your invoice',
-    desc: 'Connect Freighter, upload invoice details, mint it as an on-chain RWA token.',
-  },
-  {
-    n: '02',
-    role: 'Pool',
-    title: 'Invoice gets funded',
-    desc: "Astera's liquidity pool reviews and funds the invoice. USDC hits your wallet instantly.",
-  },
-  {
-    n: '03',
-    role: 'Investor',
-    title: 'Earn yield',
-    desc: 'When your customer pays, principal + interest flows to investors. SME builds credit history.',
-  },
-];
+  const features = [
+    {
+      icon: '◈',
+      title: t('features.tokenizeTitle'),
+      description: t('features.tokenizeDesc'),
+    },
+    {
+      icon: '◉',
+      title: t('features.liquidityTitle'),
+      description: t('features.liquidityDesc'),
+    },
+    {
+      icon: '◎',
+      title: t('features.escrowTitle'),
+      description: t('features.escrowDesc'),
+    },
+    {
+      icon: '◐',
+      title: t('features.creditTitle'),
+      description: t('features.creditDesc'),
+    },
+    {
+      icon: '◑',
+      title: t('features.usdcTitle'),
+      description: t('features.usdcDesc'),
+    },
+    {
+      icon: '◒',
+      title: t('features.diasporaTitle'),
+      description: t('features.diasporaDesc'),
+    },
+  ];
 
-export default function Home() {
+  const steps = [
+    {
+      n: '01',
+      role: t('steps.smeRole'),
+      title: t('steps.smeTitle'),
+      desc: t('steps.smeDesc'),
+    },
+    {
+      n: '02',
+      role: t('steps.poolRole'),
+      title: t('steps.poolTitle'),
+      desc: t('steps.poolDesc'),
+    },
+    {
+      n: '03',
+      role: t('steps.investorRole'),
+      title: t('steps.investorTitle'),
+      desc: t('steps.investorDesc'),
+    },
+  ];
+
   return (
     <div className="overflow-x-hidden">
       {/* Hero */}
@@ -96,18 +98,17 @@ export default function Home() {
         <div className="relative z-10 max-w-4xl mx-auto">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-brand-gold/30 bg-brand-gold/10 text-brand-gold text-sm font-medium mb-8">
             <span className="w-1.5 h-1.5 rounded-full bg-brand-gold animate-pulse" />
-            Built on Stellar Soroban · Testnet Live
+            {t('hero.badge')}
           </div>
 
           <h1 className="text-5xl md:text-7xl font-bold leading-tight mb-6">
-            Real invoices. <span className="gradient-text">Real yield.</span>
+            {t('hero.heading1')} <span className="gradient-text">{t('hero.heading2')}</span>
             <br />
-            Real impact.
+            {t('hero.heading3')}
           </h1>
 
           <p className="text-xl text-brand-muted max-w-2xl mx-auto mb-12 leading-relaxed">
-            Astera tokenizes SME invoices as on-chain assets on Stellar. Businesses in emerging
-            markets access working capital instantly. Investors earn verified yield.
+            {t('hero.description')}
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -115,13 +116,13 @@ export default function Home() {
               href="/dashboard"
               className="px-8 py-4 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors gold-glow text-lg"
             >
-              Tokenize an Invoice
+              {t('hero.ctaTokenize')}
             </Link>
             <Link
               href="/invest"
               className="px-8 py-4 bg-brand-card border border-brand-border text-white font-semibold rounded-xl hover:border-brand-gold/50 transition-colors text-lg"
             >
-              Invest in the Pool
+              {t('hero.ctaInvest')}
             </Link>
           </div>
         </div>
@@ -145,13 +146,10 @@ export default function Home() {
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-16">
             <h2 className="text-3xl md:text-4xl font-bold mb-4">
-              The infrastructure layer for{' '}
-              <span className="gradient-text">emerging market finance</span>
+              {t('features.headingPrefix')}{' '}
+              <span className="gradient-text">{t('features.headingAccent')}</span>
             </h2>
-            <p className="text-brand-muted max-w-xl mx-auto">
-              Astera reimagines invoice factoring — traditionally accessible only to large
-              corporations — as an open, on-chain protocol.
-            </p>
+            <p className="text-brand-muted max-w-xl mx-auto">{t('features.intro')}</p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -175,11 +173,11 @@ export default function Home() {
       <section className="py-24 px-6 bg-brand-navy/30">
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-bold mb-4">How Astera works</h2>
+            <h2 className="text-3xl md:text-4xl font-bold mb-4">{t('steps.heading')}</h2>
           </div>
 
           <div className="space-y-6">
-            {steps.map((s, i) => (
+            {steps.map((s) => (
               <div
                 key={s.n}
                 className="flex gap-6 p-6 bg-brand-card border border-brand-border rounded-2xl"
@@ -203,17 +201,13 @@ export default function Home() {
       {/* CTA */}
       <section className="py-24 px-6 text-center">
         <div className="max-w-2xl mx-auto">
-          <h2 className="text-3xl md:text-4xl font-bold mb-6">
-            Ready to put your invoices to work?
-          </h2>
-          <p className="text-brand-muted mb-10">
-            Connect your Freighter wallet and tokenize your first invoice in under 2 minutes.
-          </p>
+          <h2 className="text-3xl md:text-4xl font-bold mb-6">{t('cta.title')}</h2>
+          <p className="text-brand-muted mb-10">{t('cta.description')}</p>
           <Link
             href="/dashboard"
             className="inline-block px-10 py-4 bg-brand-gold text-brand-dark font-semibold rounded-xl hover:bg-brand-amber transition-colors gold-glow text-lg"
           >
-            Get Started
+            {t('cta.button')}
           </Link>
         </div>
       </section>
@@ -223,17 +217,17 @@ export default function Home() {
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="font-semibold text-white">Astera</div>
           <div>
-            Built on Stellar · Powered by <GlossaryTerm id="soroban" /> · USDC Settlement
+            {t('footer.builtOnPrefix')} <GlossaryTerm id="soroban" /> {t('footer.builtOnSuffix')}
           </div>
           <div className="flex gap-6">
             <Link href="/dashboard" className="hover:text-white transition-colors">
-              Dashboard
+              {t('footer.dashboard')}
             </Link>
             <Link href="/invest" className="hover:text-white transition-colors">
-              Invest
+              {t('footer.invest')}
             </Link>
             <Link href="/glossary" className="hover:text-white transition-colors">
-              Glossary
+              {t('footer.glossary')}
             </Link>
           </div>
         </div>

@@ -12,7 +12,7 @@
  */
 
 import { Pool } from "pg";
-import { Horizon } from "stellar-sdk";
+import { Horizon } from "@stellar/stellar-sdk";
 import { logger } from "./logger";
 
 export interface LedgerMeta {

@@ -3,6 +3,8 @@
 For vulnerabilities, follow the [security policy](SECURITY.md) and use private
 reporting rather than a public issue.
 
+By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 Thank you for your interest in contributing to **Astera**! We welcome developers of all experience levels, especially those interested in Soroban smart contract development and tokenized real-world asset infrastructure.
 
 ---

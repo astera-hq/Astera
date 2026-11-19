@@ -7,8 +7,9 @@ import { monitorService, ContractEvent } from './monitoring';
 import {
   getInvoiceCount,
   getPoolConfig,
+  getPoolTokenTotals,
   getMultipleInvoices,
-} from './contracts';
+} from './sdk';
 import type { Invoice, InvoiceStatus } from './types';
 
 // ---- Cache with 5-minute TTL ----
@@ -209,9 +210,10 @@ export async function fetchAnalyticsData(): Promise<AnalyticsDashboardData> {
 
   try {
     // Fetch on-chain data in parallel
-    const [invoiceCount, poolConfig] = await Promise.all([
+    const [invoiceCount, poolConfig, liveTotals] = await Promise.all([
       getInvoiceCount().catch(() => 0),
       getPoolConfig().catch(() => null),
+      getPoolTokenTotals(process.env.NEXT_PUBLIC_POOL_TOKEN || 'default').catch(() => null),
     ]);
 
     const [poolUtilization, analyticsSummary] = await Promise.all([
@@ -237,8 +239,25 @@ export async function fetchAnalyticsData(): Promise<AnalyticsDashboardData> {
           }]
         : [];
 
+    // Fall back to a live on-chain utilization point when the indexer has no
+    // history yet, so the utilization chart is never empty on a fresh deployment.
+    const utilizationSeries: PoolUtilizationPoint[] =
+      poolUtilization.length > 0
+        ? poolUtilization
+        : liveTotals && liveTotals.totalDeposited > 0n
+          ? [
+              {
+                time: new Date().toISOString().slice(0, 10),
+                utilization:
+                  (Number(liveTotals.totalDeployed) / Number(liveTotals.totalDeposited)) * 100,
+                deployed: Number(liveTotals.totalDeployed) / 10_000_000,
+                deposited: Number(liveTotals.totalDeposited) / 10_000_000,
+              },
+            ]
+          : [];
+
     const data: AnalyticsDashboardData = {
-      poolUtilization,
+      poolUtilization: utilizationSeries,
       yieldPerformance,
       invoiceFunnel: generateInvoiceFunnel(invoices),
       creditScoreDistribution: generateCreditScoreDistribution(invoices),

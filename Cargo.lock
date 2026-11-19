@@ -6,6 +6,7 @@ version = 4
 name = "access_control"
 version = "0.1.0"
 dependencies = [
+ "astera-types",
  "soroban-sdk",
 ]
 
@@ -64,6 +65,7 @@ dependencies = [
 name = "arbitration"
 version = "0.1.0"
 dependencies = [
+ "astera-types",
  "soroban-sdk",
 ]
 
@@ -186,9 +188,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "astera-types"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "auction"
 version = "0.1.0"
 dependencies = [
+ "astera-types",
  "pool",
  "soroban-sdk",
 ]
@@ -392,6 +402,7 @@ name = "compliance"
 version = "0.1.0"
 dependencies = [
  "access_control",
+ "astera-types",
  "soroban-sdk",
 ]
 
@@ -432,6 +443,7 @@ name = "credit_score"
 version = "0.1.0"
 dependencies = [
  "access_control",
+ "astera-types",
  "proptest",
  "soroban-sdk",
 ]
@@ -933,6 +945,7 @@ name = "governance"
 version = "0.1.0"
 dependencies = [
  "access_control",
+ "astera-types",
  "proptest",
  "share",
  "soroban-sdk",
@@ -1074,6 +1087,7 @@ checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 name = "insurance"
 version = "0.1.0"
 dependencies = [
+ "astera-types",
  "proptest",
  "soroban-sdk",
 ]
@@ -1090,6 +1104,7 @@ name = "invoice"
 version = "0.1.0"
 dependencies = [
  "access_control",
+ "astera-types",
  "proptest",
  "soroban-sdk",
 ]
@@ -1297,6 +1312,7 @@ name = "oracle_registry"
 version = "0.1.0"
 dependencies = [
  "access_control",
+ "astera-types",
  "proptest",
  "soroban-sdk",
 ]
@@ -1368,6 +1384,7 @@ name = "pool"
 version = "0.1.0"
 dependencies = [
  "access_control",
+ "astera-types",
  "compliance",
  "proptest",
  "referral",
@@ -1591,6 +1608,7 @@ name = "referral"
 version = "0.1.0"
 dependencies = [
  "access_control",
+ "astera-types",
  "soroban-sdk",
 ]
 
@@ -1723,6 +1741,7 @@ dependencies = [
 name = "secondary_market"
 version = "0.1.0"
 dependencies = [
+ "astera-types",
  "pool",
  "proptest",
  "soroban-sdk",
@@ -1835,6 +1854,7 @@ dependencies = [
 name = "share"
 version = "0.1.0"
 dependencies = [
+ "astera-types",
  "proptest",
  "soroban-sdk",
 ]
@@ -2262,6 +2282,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 name = "tranche"
 version = "0.1.0"
 dependencies = [
+ "astera-types",
  "proptest",
  "soroban-sdk",
 ]

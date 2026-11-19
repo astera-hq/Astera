@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import type { AlertType } from '@/lib/alert-rules';
 import { csrfFetch } from '@/lib/csrf';
@@ -57,7 +58,13 @@ function Toggle({
   );
 }
 
-function EventPill({ audience }: { audience: 'SME' | 'Investor' | 'Both' }) {
+function EventPill({
+  audience,
+  label,
+}: {
+  audience: 'SME' | 'Investor' | 'Both';
+  label: string;
+}) {
   const styles =
     audience === 'Both'
       ? 'bg-brand-border text-brand-muted'
@@ -68,16 +75,23 @@ function EventPill({ audience }: { audience: 'SME' | 'Investor' | 'Both' }) {
     <span
       className={`shrink-0 text-[10px] border px-2 py-0.5 rounded-full font-semibold ${styles}`}
     >
-      {audience}
+      {label}
     </span>
   );
 }
 
 export default function NotificationSettingsPage() {
+  const t = useTranslations('NotificationSettings');
   const searchParams = useSearchParams();
   const [prefs, setPrefs] = useState<NotificationPreferences>(DEFAULT_NOTIFICATION_PREFERENCES);
   const [saving, setSaving] = useState(false);
   const [testingWebhook, setTestingWebhook] = useState(false);
+
+  const audienceLabel = {
+    SME: t('audience.sme'),
+    Investor: t('audience.investor'),
+    Both: t('audience.both'),
+  };
 
   useEffect(() => {
     setPrefs(loadNotificationPreferences());
@@ -91,8 +105,8 @@ export default function NotificationSettingsPage() {
       saveNotificationPreferences(next);
       return next;
     });
-    toast.success('Email notifications have been unsubscribed in this browser.');
-  }, [searchParams]);
+    toast.success(t('toast.unsubscribed'));
+  }, [searchParams, t]);
 
   const inAppEvents = useMemo(() => NOTIFICATION_EVENTS, []);
 
@@ -113,22 +127,22 @@ export default function NotificationSettingsPage() {
   async function saveExternalPreferences() {
     if (prefs.email.enabled) {
       if (!isValidEmail(prefs.email.email)) {
-        toast.error('Please enter a valid email address before enabling email notifications.');
+        toast.error(t('toast.invalidEmail'));
         return;
       }
       if (prefs.email.events.length === 0) {
-        toast.error('Select at least one event for email notifications (or disable email).');
+        toast.error(t('toast.noEmailEvents'));
         return;
       }
     }
 
     if (prefs.webhook.enabled) {
       if (!isValidWebhookUrl(prefs.webhook.url)) {
-        toast.error('Please enter a valid webhook URL (http/https) before enabling webhooks.');
+        toast.error(t('toast.invalidWebhook'));
         return;
       }
       if (prefs.webhook.events.length === 0) {
-        toast.error('Select at least one event for webhook forwarding (or disable webhooks).');
+        toast.error(t('toast.noWebhookEvents'));
         return;
       }
     }
@@ -142,9 +156,9 @@ export default function NotificationSettingsPage() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       saveNotificationPreferences(prefs);
-      toast.success('Notification delivery preferences saved.');
+      toast.success(t('toast.saved'));
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to save preferences.';
+      const msg = e instanceof Error ? e.message : t('toast.saveFailed');
       toast.error(msg);
     } finally {
       setSaving(false);
@@ -153,7 +167,7 @@ export default function NotificationSettingsPage() {
 
   async function testWebhook() {
     if (!isValidWebhookUrl(prefs.webhook.url)) {
-      toast.error('Enter a valid webhook URL first.');
+      toast.error(t('toast.enterWebhook'));
       return;
     }
 
@@ -166,9 +180,9 @@ export default function NotificationSettingsPage() {
       });
       const body = (await res.json()) as { ok?: boolean; error?: string };
       if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
-      toast.success('Test webhook sent.');
+      toast.success(t('toast.testSent'));
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to send test webhook.';
+      const msg = e instanceof Error ? e.message : t('toast.testFailed');
       toast.error(msg);
     } finally {
       setTestingWebhook(false);
@@ -178,34 +192,29 @@ export default function NotificationSettingsPage() {
   function resetToDefaults() {
     setPrefs(DEFAULT_NOTIFICATION_PREFERENCES);
     saveNotificationPreferences(DEFAULT_NOTIFICATION_PREFERENCES);
-    toast.success('Reset in-app preferences to defaults.');
+    toast.success(t('toast.reset'));
   }
 
   return (
     <div className="max-w-3xl mx-auto px-6 pt-28 pb-16 space-y-8">
       <div className="space-y-2">
-        <h1 className="text-3xl font-bold text-white">Notification settings</h1>
-        <p className="text-sm text-brand-muted">
-          Choose which events you want to see in-app, and optionally subscribe to email or webhook
-          delivery.
-        </p>
+        <h1 className="text-3xl font-bold text-white">{t('title')}</h1>
+        <p className="text-sm text-brand-muted">{t('intro')}</p>
       </div>
 
       {/* In-app */}
       <section className="p-8 bg-brand-card border border-brand-border rounded-2xl shadow-sm">
         <div className="flex items-start justify-between gap-4 mb-6">
           <div>
-            <h2 className="text-lg font-bold text-white">In-app notifications</h2>
-            <p className="text-xs text-brand-muted mt-1">
-              These preferences are stored locally in this browser.
-            </p>
+            <h2 className="text-lg font-bold text-white">{t('inApp.title')}</h2>
+            <p className="text-xs text-brand-muted mt-1">{t('inApp.description')}</p>
           </div>
           <button
             type="button"
             onClick={resetToDefaults}
             className="text-xs text-brand-muted hover:text-white transition-colors"
           >
-            Reset
+            {t('reset')}
           </button>
         </div>
 
@@ -217,7 +226,7 @@ export default function NotificationSettingsPage() {
               onChange={(next) => setInAppEventEnabled(e.type, next)}
               label={e.label}
               description={e.description}
-              rightMeta={<EventPill audience={e.audience} />}
+              rightMeta={<EventPill audience={e.audience} label={audienceLabel[e.audience]} />}
             />
           ))}
         </div>
@@ -226,23 +235,21 @@ export default function NotificationSettingsPage() {
       {/* Email */}
       <section className="p-8 bg-brand-card border border-brand-border rounded-2xl shadow-sm space-y-6">
         <div>
-          <h2 className="text-lg font-bold text-white">Email notifications</h2>
-          <p className="text-xs text-brand-muted mt-1">
-            Delivery is configured server-side and can be triggered by the event indexer.
-          </p>
+          <h2 className="text-lg font-bold text-white">{t('email.title')}</h2>
+          <p className="text-xs text-brand-muted mt-1">{t('email.description')}</p>
         </div>
 
         <Toggle
           checked={prefs.email.enabled}
           onChange={(next) => setPrefs((p) => ({ ...p, email: { ...p.email, enabled: next } }))}
-          label="Subscribe to email alerts"
-          description="Requires a valid email address."
+          label={t('email.subscribe')}
+          description={t('email.subscribeDesc')}
         />
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="md:col-span-2">
             <label className="block text-xs font-semibold text-brand-muted mb-2 uppercase tracking-wider">
-              Email address
+              {t('email.address')}
             </label>
             <input
               type="email"
@@ -256,14 +263,14 @@ export default function NotificationSettingsPage() {
             {prefs.email.enabled &&
               prefs.email.email.trim() &&
               !isValidEmail(prefs.email.email) && (
-                <p className="mt-2 text-xs text-red-400">Enter a valid email address.</p>
+                <p className="mt-2 text-xs text-red-400">{t('email.invalid')}</p>
               )}
           </div>
         </div>
 
         <div className="border-t border-brand-border pt-6">
           <p className="text-xs font-semibold text-brand-muted mb-3 uppercase tracking-wider">
-            Events to send via email
+            {t('email.events')}
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {NOTIFICATION_EVENTS.map((e) => {
@@ -290,7 +297,7 @@ export default function NotificationSettingsPage() {
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm text-white truncate">{e.label}</span>
-                      <EventPill audience={e.audience} />
+                      <EventPill audience={e.audience} label={audienceLabel[e.audience]} />
                     </div>
                     <span className="text-xs text-brand-muted">{e.description}</span>
                   </div>
@@ -304,24 +311,21 @@ export default function NotificationSettingsPage() {
       {/* Webhook */}
       <section className="p-8 bg-brand-card border border-brand-border rounded-2xl shadow-sm space-y-6">
         <div>
-          <h2 className="text-lg font-bold text-white">Webhook forwarding</h2>
-          <p className="text-xs text-brand-muted mt-1">
-            Forward selected events to a custom endpoint. Use “Test webhook” to send a sample
-            payload.
-          </p>
+          <h2 className="text-lg font-bold text-white">{t('webhook.title')}</h2>
+          <p className="text-xs text-brand-muted mt-1">{t('webhook.description')}</p>
         </div>
 
         <Toggle
           checked={prefs.webhook.enabled}
           onChange={(next) => setPrefs((p) => ({ ...p, webhook: { ...p.webhook, enabled: next } }))}
-          label="Enable webhook forwarding"
-          description="Requires a valid URL."
+          label={t('webhook.enable')}
+          description={t('webhook.enableDesc')}
         />
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="md:col-span-2">
             <label className="block text-xs font-semibold text-brand-muted mb-2 uppercase tracking-wider">
-              Webhook URL
+              {t('webhook.url')}
             </label>
             <input
               type="url"
@@ -335,7 +339,7 @@ export default function NotificationSettingsPage() {
             {prefs.webhook.enabled &&
               prefs.webhook.url.trim() &&
               !isValidWebhookUrl(prefs.webhook.url) && (
-                <p className="mt-2 text-xs text-red-400">Enter a valid http/https URL.</p>
+                <p className="mt-2 text-xs text-red-400">{t('webhook.invalid')}</p>
               )}
           </div>
 
@@ -346,14 +350,14 @@ export default function NotificationSettingsPage() {
               disabled={testingWebhook}
               className="w-full py-3 bg-white text-brand-dark font-bold rounded-xl hover:bg-stone-200 transition-all shadow-lg active:scale-[0.98] disabled:opacity-50"
             >
-              {testingWebhook ? 'Testing…' : 'Test webhook'}
+              {testingWebhook ? t('webhook.testing') : t('webhook.test')}
             </button>
           </div>
         </div>
 
         <div className="border-t border-brand-border pt-6">
           <p className="text-xs font-semibold text-brand-muted mb-3 uppercase tracking-wider">
-            Events to forward
+            {t('webhook.events')}
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {NOTIFICATION_EVENTS.map((e) => {
@@ -380,7 +384,7 @@ export default function NotificationSettingsPage() {
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm text-white truncate">{e.label}</span>
-                      <EventPill audience={e.audience} />
+                      <EventPill audience={e.audience} label={audienceLabel[e.audience]} />
                     </div>
                     <span className="text-xs text-brand-muted">{e.description}</span>
                   </div>
@@ -397,7 +401,7 @@ export default function NotificationSettingsPage() {
             disabled={saving}
             className="px-6 py-3 bg-brand-gold text-brand-dark font-bold rounded-xl hover:bg-brand-amber transition-all shadow-lg active:scale-[0.98] disabled:opacity-50"
           >
-            {saving ? 'Saving…' : 'Save email & webhook'}
+            {saving ? t('saving') : t('save')}
           </button>
         </div>
       </section>

@@ -1,4 +1,4 @@
-import { getInvoice } from '@/lib/contracts';
+import { getInvoice } from '@/lib/sdk';
 import { OG_IMAGE_SIZE, renderBrandOgImage } from '@/lib/og-image';
 
 export const alt = 'Astera Invoice';

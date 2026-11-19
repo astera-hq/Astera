@@ -18,9 +18,9 @@ import {
   getPoolTokenTotals,
   getWithdrawalQueue,
   getLiquidityForecast,
-  buildDrainWithdrawalQueueTx,
-  submitTx,
-} from '@/lib/contracts';
+  getPoolClient,
+  sdkSigner,
+} from '@/lib/sdk';
 import { NETWORK, formatUSDC, stablecoinLabel } from '@/lib/stellar';
 import type { PoolTokenTotals, WithdrawalRequest, LiquidityForecastPoint } from '@/lib/types';
 
@@ -89,14 +89,11 @@ export default function AdminLiquidityPage() {
     }
     setDrainLoading((p) => ({ ...p, [token]: true }));
     try {
-      const xdr = await buildDrainWithdrawalQueueTx(wallet.address, token);
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
+      await getPoolClient().drainWithdrawalQueue({
+        signer: await sdkSigner(wallet.address),
+        caller: wallet.address,
+        token,
       });
-      if (signError) throw new Error(signError.message);
-      await submitTx(signedTxXdr);
       toast.success(t('drainSuccess', { token: stablecoinLabel(token) }));
       await load(horizon);
     } catch (e: unknown) {

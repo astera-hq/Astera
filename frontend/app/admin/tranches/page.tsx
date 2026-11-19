@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import toast from 'react-hot-toast';
 import { TrancheConfig } from '@/../packages/sdk/src/generated/tranche';
-import { buildSetTrancheConfigTx } from '@/lib/contracts';
+import { getTrancheClient, sdkSigner } from '@/lib/sdk';
 import { NETWORK, submitTx } from '@/lib/stellar';
 import { useStore } from '@/lib/store';
 
@@ -71,20 +71,14 @@ export default function TrancheConfigPage() {
     }
     setSaving(true);
     try {
-      const xdr = await buildSetTrancheConfigTx(
-        wallet.address,
-        selectedToken,
-        editingConfig.senior_target_yield_bps,
-        editingConfig.senior_advance_rate_bps,
-        editingConfig.junior_first_loss_bps,
-      );
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
+      await getTrancheClient().setTrancheConfig({
+        signer: await sdkSigner(wallet.address),
+        admin: wallet.address,
+        token: selectedToken,
+        seniorTargetYieldBps: editingConfig.senior_target_yield_bps,
+        seniorAdvanceRateBps: editingConfig.senior_advance_rate_bps,
+        juniorFirstLossBps: editingConfig.junior_first_loss_bps,
       });
-      if (signError) throw new Error(signError.message);
-      await submitTx(signedTxXdr);
 
       // Reflect the persisted config in local state after the on-chain write.
       setConfigs(

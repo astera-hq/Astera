@@ -6,6 +6,8 @@ use soroban_sdk::{
     Env, String, Symbol, Vec,
 };
 
+pub use astera_types::{CollateralConfig, FeeTier, LoyaltyTier, QuorumTier};
+
 
 const LEDGERS_PER_DAY: u32 = 17_280;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
@@ -151,37 +153,6 @@ pub enum GovernanceAction {
     Compliance(ComplianceAction),
 }
 
-/// Placeholder types for Vec payloads - these should match the actual types
-/// in their respective contracts. For now, using simple representations.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct LoyaltyTier {
-    pub days_threshold: u32,
-    pub bonus_bps: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct FeeTier {
-    pub min_amount: i128,
-    pub max_amount: i128,
-    pub min_credit_score: u32,
-    pub fee_bps: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct CollateralConfig {
-    pub threshold: i128,
-    pub collateral_bps: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct QuorumTier {
-    pub min_invoice_amount: i128,
-    pub quorum_bps: u32,
-}
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -565,6 +536,7 @@ impl Governance {
         execution_delay_secs: u64,
         min_share_balance: i128,
     ) -> Result<(), GovernanceError> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(GovernanceError::AlreadyInitialized);
         }

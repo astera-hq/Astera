@@ -34,10 +34,10 @@ describe('NetworkMismatchBanner', () => {
     render(<NetworkMismatchBanner />);
 
     expect(screen.getByText('Notifications.networkMismatch.title')).toBeInTheDocument();
-    expect(screen.getByText(/Notifications\.networkMismatch\.messageStart/)).toBeInTheDocument();
+    expect(screen.getByText(/Notifications\.networkMismatch\.description/)).toBeInTheDocument();
     expect(
       screen.getByRole('link', {
-        name: /Notifications\.networkMismatch\.helpLink/,
+        name: /Notifications\.networkMismatch\.switchNetworks/,
       }),
     ).toHaveAttribute('href', 'https://www.freighter.app/help#how-do-i-switch-networks');
     expect(

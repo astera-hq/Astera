@@ -1,23 +1,26 @@
 import type { Metadata } from 'next';
+import { getTranslations } from 'next-intl/server';
 import { glossary } from '@/lib/glossary';
 
-export const metadata: Metadata = {
-  title: 'Glossary — Astera',
-  description: 'Plain-language explanations of the Stellar and Soroban terms used across Astera.',
-  // #783: canonical tag, resolved against metadataBase in the root layout.
-  alternates: { canonical: '/glossary' },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslations('Glossary');
+  return {
+    title: t('metadata.title'),
+    description: t('metadata.description'),
+    // #783: canonical tag, resolved against metadataBase in the root layout.
+    alternates: { canonical: '/glossary' },
+  };
+}
 
-export default function GlossaryPage() {
+export default async function GlossaryPage() {
+  const t = await getTranslations('Glossary');
+
   return (
     <div className="min-h-screen pt-24 pb-16 px-6">
       <div className="max-w-2xl mx-auto">
         <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-1">Glossary</h1>
-          <p className="text-brand-muted">
-            Astera runs on Stellar and Soroban, which come with their own vocabulary. Here&apos;s
-            what the terms you&apos;ll see around the app actually mean.
-          </p>
+          <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
+          <p className="text-brand-muted">{t('intro')}</p>
         </div>
 
         <dl className="space-y-4">

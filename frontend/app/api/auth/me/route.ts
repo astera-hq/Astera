@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { jwtVerify } from 'jose';
+import { getSep10Secret, SEP10_AUDIENCE, SEP10_ISSUER, sep10Key } from '@/lib/sep10-jwt';
 
 export const dynamic = 'force-dynamic';
 
-const JWT_SECRET = process.env.SEP10_JWT_SECRET || process.env.JWT_SECRET;
+const JWT_SECRET = getSep10Secret();
 
 export async function GET(request: Request) {
   try {
@@ -14,8 +15,10 @@ export async function GET(request: Request) {
     if (!m) return NextResponse.json({ authenticated: false }, { status: 401 });
 
     const token = m[1]!;
-    const key = new TextEncoder().encode(JWT_SECRET);
-    const { payload } = await jwtVerify(token, key);
+    const { payload } = await jwtVerify(token, sep10Key(JWT_SECRET), {
+      issuer: SEP10_ISSUER,
+      audience: SEP10_AUDIENCE,
+    });
     const sub = payload.sub as string | undefined;
     if (!sub) return NextResponse.json({ authenticated: false }, { status: 401 });
 

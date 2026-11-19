@@ -178,6 +178,32 @@ fn setup(env: &Env) -> Harness<'_> {
 }
 
 #[test]
+fn admin_rotation_config_and_credit_score_wiring() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let h = setup(&env);
+    let configured = h.client.get_config().unwrap();
+    assert_eq!(configured.admin, h.admin);
+    assert_eq!(configured.pool_contract, h.pool_id);
+    let credit = Address::generate(&env);
+    h.client.set_credit_score_contract(&h.admin, &credit);
+    assert_eq!(h.client.get_credit_score_contract(), Some(credit));
+
+    let next_admin = Address::generate(&env);
+    h.client.rotate_admin(&h.admin, &next_admin);
+    assert_eq!(h.client.get_config().unwrap().admin, next_admin);
+    let replacement = Address::generate(&env);
+    assert_eq!(
+        h.client
+            .try_set_credit_score_contract(&h.admin, &replacement),
+        Err(Ok(InsuranceError::Unauthorized))
+    );
+    h.client
+        .set_credit_score_contract(&next_admin, &replacement);
+    assert_eq!(h.client.get_credit_score_contract(), Some(replacement));
+}
+
+#[test]
 fn test_purchase_coverage_and_reserve_status() {
     let env = Env::default();
     env.mock_all_auths();
@@ -824,7 +850,10 @@ fn test_real_score_of_300_uses_tier_multiplier() {
     let h = setup(&env);
     let sme = Address::generate(&env);
     h.credit_client.set_score(&sme, &300);
-    assert_eq!(h.client.estimate_premium(&PRINCIPAL, &sme, &0u32), PREMIUM_AT_TIER_300);
+    assert_eq!(
+        h.client.estimate_premium(&PRINCIPAL, &sme, &0u32),
+        PREMIUM_AT_TIER_300
+    );
 }
 
 #[test]

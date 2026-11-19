@@ -25,6 +25,10 @@ jobs:
           targets: wasm32-unknown-unknown,wasm32v1-none
           components: clippy, rustfmt, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit workspace dependencies
+        run: cargo audit
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - run: cargo clippy -- -D warnings
@@ -39,7 +43,7 @@ jobs:
         timeout-minutes: 10
       - name: Run fuzz tests (short)
         timeout-minutes: 10
-        run: cargo test --locked -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests
+        run: cargo test --locked -p invoice --test fuzz_tests -p pool --test fuzz_tests -p credit_score --test fuzz_tests -p share --test fuzz_tests -p oracle_registry --test fuzz_tests -p secondary_market --test fuzz_tests
       - name: Run integration tests
         timeout-minutes: 15
         run: cargo test --locked -p integration-tests --test integration_tests
@@ -172,7 +176,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: frontend/package-lock.json
       - name: Start local Stellar network & deploy contracts
         working-directory: .
         run: |
@@ -208,7 +212,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npx playwright install chromium
       - name: Build and run Lighthouse CI
@@ -258,7 +262,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: indexer/package-lock.json
       - run: npm ci
       - name: Check indexer formatting
         run: npx prettier --check .
@@ -282,6 +286,8 @@ jobs:
           cache: npm
           cache-dependency-path: compliance-service/package-lock.json
       - run: npm ci
+      - name: Check compliance-service formatting
+        run: npx prettier --check .
       - name: Build compliance-service
         run: npm run build
       - name: Test compliance-service
@@ -467,3 +473,20 @@ jobs:
           name: deployed-contract-ids
           path: contract-ids.txt
           retention-days: 30
+
+  bindings:
+    name: Generated SDK Bindings
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+      - name: Regenerate bindings for all contracts
+        run: scripts/gen-bindings.sh
+      - name: Fail if generated bindings are stale
+        run: git diff --exit-code -- packages/sdk/src/generated

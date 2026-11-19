@@ -953,5 +953,280 @@
     "toastFailedCancel": "Échec de l'annulation de la demande de retrait.",
     "toastFailedDrain": "Échec du vidage de la file d'attente de retrait.",
     "toastFailedLoad": "Échec du chargement des données du portefeuille. Veuillez réessayer."
+  },
+  "Landing": {
+    "metadata": {
+      "title": "Astera — Actifs réels sur Stellar",
+      "description": "Tokenisez des factures. Financez des entreprises réelles. Gagnez du rendement on-chain. Construit sur Stellar Soroban."
+    },
+    "hero": {
+      "badge": "Construit sur Stellar Soroban · Testnet en direct",
+      "heading1": "De vraies factures.",
+      "heading2": "Un vrai rendement.",
+      "heading3": "Un vrai impact.",
+      "description": "Astera tokenise les factures des PME en actifs on-chain sur Stellar. Les entreprises des marchés émergents accèdent immédiatement au fonds de roulement. Les investisseurs gagnent un rendement vérifié.",
+      "ctaTokenize": "Tokeniser une facture",
+      "ctaInvest": "Investir dans le pool"
+    },
+    "stats": {
+      "gapLabel": "Déficit de financement commercial",
+      "gapSub": "dans les marchés émergents",
+      "settlementLabel": "Délai de règlement",
+      "settlementSub": "sur le réseau Stellar",
+      "apyLabel": "Rendement cible",
+      "apySub": "pour les investisseurs du pool",
+      "feeLabel": "Frais de transaction",
+      "feeSub": "par opération"
+    },
+    "features": {
+      "headingPrefix": "La couche d’infrastructure pour",
+      "headingAccent": "la finance des marchés émergents",
+      "intro": "Astera réinvente l’affacturage — traditionnellement réservé aux grandes entreprises — en un protocole ouvert on-chain.",
+      "tokenizeTitle": "Tokeniser les factures",
+      "tokenizeDesc": "Les PME créent en quelques minutes des jetons RWA basés sur Soroban à partir de factures impayées. Aucun papier, aucune banque, aucun intermédiaire.",
+      "liquidityTitle": "Liquidité instantanée",
+      "liquidityDesc": "La communauté finance les pools de factures. Le fonds de roulement parvient aux entreprises dans la même transaction.",
+      "escrowTitle": "Séquestre intelligent",
+      "escrowDesc": "Les contrats Soroban libèrent automatiquement les paiements lors du règlement des factures. Aucune confiance requise.",
+      "creditTitle": "Crédit on-chain",
+      "creditDesc": "Chaque facture payée construit un historique de crédit vérifiable sur Stellar — une note de crédit gagnée grâce à un travail réel.",
+      "usdcTitle": "Règlement USDC",
+      "usdcDesc": "Toutes les transactions sont réglées en USDC natif sur Stellar. Aucun risque de pont, aucune volatilité de prix pour les opérations.",
+      "diasporaTitle": "Investissement de la diaspora",
+      "diasporaDesc": "Les envoyeurs de remises peuvent désormais investir dans des entreprises de leur pays — transformant les paiements en capital productif."
+    },
+    "steps": {
+      "heading": "Comment fonctionne Astera",
+      "smeRole": "PME",
+      "smeTitle": "Tokenisez votre facture",
+      "smeDesc": "Connectez Freighter, téléversez les détails de la facture et créez-en un jeton RWA on-chain.",
+      "poolRole": "Pool",
+      "poolTitle": "La facture est financée",
+      "poolDesc": "Le pool de liquidité d’Astera examine et finance la facture. L’USDC arrive instantanément dans votre portefeuille.",
+      "investorRole": "Investisseur",
+      "investorTitle": "Gagnez du rendement",
+      "investorDesc": "Lorsque votre client paie, le capital et les intérêts reviennent aux investisseurs. La PME construit son historique de crédit."
+    },
+    "cta": {
+      "title": "Prêt à mettre vos factures au travail ?",
+      "description": "Connectez votre portefeuille Freighter et tokenisez votre première facture en moins de 2 minutes.",
+      "button": "Commencer"
+    },
+    "footer": {
+      "builtOnPrefix": "Construit sur Stellar · Propulsé par",
+      "builtOnSuffix": "· Règlement USDC",
+      "dashboard": "Tableau de bord",
+      "invest": "Investir",
+      "glossary": "Glossaire"
+    }
+  },
+  "History": {
+    "title": "Historique des transactions",
+    "subtitle": "Activité on-chain de votre portefeuille",
+    "exportCsv": "Exporter CSV",
+    "exportPdf": "Exporter PDF",
+    "filterAll": "Tous",
+    "sortNewest": "↓ Plus récents",
+    "sortOldest": "↑ Plus anciens",
+    "kinds": {
+      "invoiceCreated": "Facture créée",
+      "invoiceFunded": "Facture financée",
+      "invoicePaid": "Facture remboursée",
+      "invoiceDefaulted": "Facture en défaut",
+      "poolDeposit": "Dépôt dans le pool",
+      "poolFunded": "Facture financée par le pool",
+      "poolRepaid": "Remboursement reçu",
+      "poolWithdraw": "Retrait du pool"
+    },
+    "connect": {
+      "title": "Connectez votre portefeuille",
+      "description": "Connectez Freighter pour consulter votre historique de transactions."
+    },
+    "empty": {
+      "filtered": "Aucun événement ne correspond au filtre sélectionné.",
+      "none": "Aucune activité on-chain trouvée pour ce portefeuille."
+    },
+    "invoice": "Facture n° {id}",
+    "interest": "+{amount} {symbol} d’intérêts",
+    "viewTx": "Voir la tx ↗",
+    "loading": "Chargement…",
+    "loadMore": "Charger plus",
+    "error": {
+      "notConfigured": "Identifiants de contrat non configurés. Définissez NEXT_PUBLIC_INVOICE_CONTRACT_ID et NEXT_PUBLIC_POOL_CONTRACT_ID.",
+      "loadFailed": "Échec du chargement de l’historique des transactions. Vérifiez que les contrats sont déployés."
+    },
+    "csv": {
+      "date": "Date",
+      "type": "Type",
+      "invoiceId": "ID de facture",
+      "amount": "Montant ({symbol})",
+      "interest": "Intérêts ({symbol})",
+      "address": "Adresse",
+      "txHash": "Hash de tx"
+    }
+  },
+  "Governance": {
+    "eyebrow": "Gouvernance",
+    "title": "Vote sur les propositions et historique",
+    "intro": "Les actionnaires peuvent créer des propositions, voter selon le poids de leur solde et consulter l’historique d’exécution complet depuis la même interface.",
+    "votingPower": "Pouvoir de vote :",
+    "minRequired": "(min {min} requis)",
+    "refresh": "Actualiser",
+    "refreshing": "Actualisation...",
+    "hideForm": "Masquer le formulaire",
+    "newProposal": "Nouvelle proposition",
+    "notConfigured": "L’identifiant du contrat de gouvernance n’est pas encore configuré. La page est prête, mais le vote et la création de propositions restent désactivés jusqu’au déploiement du contrat.",
+    "form": {
+      "title": "Créer une proposition",
+      "intro": "Ajoutez un changement de protocole, une action de gouvernance ou une mise à jour de paramètre.",
+      "shareWeighted": "Pondéré par les parts",
+      "targetContract": "Contrat cible",
+      "functionName": "Nom de la fonction",
+      "description": "Description",
+      "descriptionPlaceholder": "Augmenter le rendement du pool de 50 pdb",
+      "calldata": "Données d’appel",
+      "submitting": "Envoi...",
+      "insufficient": "Solde insuffisant",
+      "create": "Créer la proposition",
+      "insufficientTitle": "Pouvoir de vote insuffisant. Vous devez détenir au moins {min} parts pour créer une proposition."
+    },
+    "history": {
+      "title": "Historique des propositions",
+      "loading": "Chargement des propositions...",
+      "total": "{count} propositions au total · {visible} affichées",
+      "filtered": "{count} {status} · {visible} affichées",
+      "selected": "Sélection n° {id}"
+    },
+    "filters": {
+      "all": "Toutes",
+      "active": "Actives",
+      "passed": "Adoptées",
+      "rejected": "Rejetées",
+      "executed": "Exécutées",
+      "expired": "Expirées"
+    },
+    "empty": {
+      "none": "Aucune proposition n’a encore été soumise.",
+      "filtered": "Aucune proposition {status} ne correspond à ce filtre."
+    },
+    "proposal": {
+      "proposer": "Proposant {address}",
+      "ends": "Fin {date}",
+      "for": "Pour {count}",
+      "against": "Contre {count}"
+    },
+    "loadMore": "Charger plus ({remaining} restantes)",
+    "vote": {
+      "title": "Voter",
+      "power": "Pouvoir de vote :",
+      "target": "Cible : {address}",
+      "function": "Fonction : {name}",
+      "for": "Voter pour",
+      "against": "Voter contre",
+      "select": "Sélectionnez une proposition pour voter."
+    },
+    "execute": {
+      "title": "Exécuter",
+      "intro": "Une fois une proposition adoptée et le délai d’exécution écoulé, tout portefeuille peut déclencher l’exécution.",
+      "button": "Exécuter la sélection"
+    },
+    "toast": {
+      "loadFailed": "Impossible de charger les propositions de gouvernance.",
+      "connectFirst": "Connectez d’abord un portefeuille.",
+      "submitted": "Transaction de gouvernance soumise.",
+      "failed": "Échec de la transaction."
+    }
+  },
+  "Analytics": {
+    "title": "Analytique du pool",
+    "intro": "Métriques de performance en temps réel et tendances historiques du pool de liquidité Astera.",
+    "updated": "Mis à jour {time}",
+    "refresh": "Actualiser",
+    "loading": "Chargement…",
+    "notConfiguredPrefix": "Les contrats du pool ne sont pas encore déployés. Configurez",
+    "notConfiguredSuffix": "pour voir les données en direct.",
+    "error": {
+      "loadFailed": "Échec du chargement des données d’analytique."
+    },
+    "stats": {
+      "totalPoolValue": "Valeur totale du pool",
+      "totalPoolValueSub": "Valeur d’actifs nets",
+      "deployedCapital": "Capital déployé",
+      "deployedCapitalSub": "Financement des factures actives",
+      "availableLiquidity": "Liquidité disponible",
+      "availableLiquiditySub": "Prêt à être déployé",
+      "targetApy": "Rendement cible",
+      "targetApySub": "Taux de rendement actuel"
+    },
+    "allocation": {
+      "title": "Répartition du capital par jeton",
+      "utilization": "Utilisation",
+      "nav": "Valeur nette du pool",
+      "deployed": "Déployé",
+      "available": "Disponible"
+    },
+    "rateCurveTitle": "Courbe de taux — {token}",
+    "footer": "Les tendances historiques proviennent des événements on-chain et de l’état actuel du pool. Les données sont actualisées toutes les 5 minutes.",
+    "links": {
+      "invest": "Investir maintenant",
+      "portfolio": "Voir le portefeuille"
+    }
+  },
+  "NotificationSettings": {
+    "title": "Paramètres de notification",
+    "intro": "Choisissez les événements que vous souhaitez voir dans l’application et abonnez-vous si vous le souhaitez aux notifications par e-mail ou webhook.",
+    "inApp": {
+      "title": "Notifications dans l’application",
+      "description": "Ces préférences sont stockées localement dans ce navigateur."
+    },
+    "reset": "Réinitialiser",
+    "email": {
+      "title": "Notifications par e-mail",
+      "description": "La livraison est configurée côté serveur et peut être déclenchée par l’indexeur d’événements.",
+      "subscribe": "S’abonner aux alertes par e-mail",
+      "subscribeDesc": "Nécessite une adresse e-mail valide.",
+      "address": "Adresse e-mail",
+      "invalid": "Saisissez une adresse e-mail valide.",
+      "events": "Événements à envoyer par e-mail"
+    },
+    "webhook": {
+      "title": "Transfert par webhook",
+      "description": "Transférez les événements sélectionnés vers un point de terminaison personnalisé. Utilisez « Tester le webhook » pour envoyer un exemple de charge utile.",
+      "enable": "Activer le transfert par webhook",
+      "enableDesc": "Nécessite une URL valide.",
+      "url": "URL du webhook",
+      "invalid": "Saisissez une URL http/https valide.",
+      "test": "Tester le webhook",
+      "testing": "Test en cours…",
+      "events": "Événements à transférer"
+    },
+    "save": "Enregistrer e-mail et webhook",
+    "saving": "Enregistrement…",
+    "audience": {
+      "sme": "PME",
+      "investor": "Investisseur",
+      "both": "Les deux"
+    },
+    "toast": {
+      "unsubscribed": "Les notifications par e-mail ont été désactivées dans ce navigateur.",
+      "invalidEmail": "Saisissez une adresse e-mail valide avant d’activer les notifications par e-mail.",
+      "noEmailEvents": "Sélectionnez au moins un événement pour les notifications par e-mail (ou désactivez-les).",
+      "invalidWebhook": "Saisissez une URL de webhook valide (http/https) avant d’activer les webhooks.",
+      "noWebhookEvents": "Sélectionnez au moins un événement à transférer par webhook (ou désactivez les webhooks).",
+      "saved": "Préférences de livraison des notifications enregistrées.",
+      "saveFailed": "Échec de l’enregistrement des préférences.",
+      "enterWebhook": "Saisissez d’abord une URL de webhook valide.",
+      "testSent": "Webhook de test envoyé.",
+      "testFailed": "Échec de l’envoi du webhook de test.",
+      "reset": "Préférences dans l’application réinitialisées aux valeurs par défaut."
+    }
+  },
+  "Glossary": {
+    "metadata": {
+      "title": "Glossaire — Astera",
+      "description": "Explications en langage clair des termes Stellar et Soroban utilisés dans Astera."
+    },
+    "title": "Glossaire",
+    "intro": "Astera repose sur Stellar et Soroban, qui ont leur propre vocabulaire. Voici ce que signifient réellement les termes que vous verrez dans l’application."
   }
 }

@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+astera-types = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
@@ -29,3 +30,11 @@ path = "tests/fuzz_tests.rs"
 [[test]]
 name = "access_control_tests"
 path = "tests/access_control_tests.rs"
+
+[[test]]
+name = "pause_coverage_tests"
+path = "tests/pause_coverage_tests.rs"
+
+[[test]]
+name = "view_and_snapshot_tests"
+path = "tests/view_and_snapshot_tests.rs"

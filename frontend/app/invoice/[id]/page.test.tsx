@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import InvoiceDetailPage from './page';
 import { useParams } from 'next/navigation';
 import { useStore } from '@/lib/store';
+import { sdk } from '@/lib/sdk';
 import {
   getInvoice,
   getInvoiceMetadata,
@@ -49,6 +50,37 @@ jest.mock('@/lib/contracts', () => ({
   getArbitrationCaseByInvoice: jest.fn(),
   getArbitrationEvidence: jest.fn(),
   buildSubmitEvidenceTx: jest.fn(),
+}));
+
+// Contract reads/writes with an SDK equivalent now go through @/lib/sdk.
+jest.mock('@/lib/sdk', () => ({
+  sdkSigner: jest.fn(async () => jest.fn()),
+  sdk: {
+    invoice: {
+      getInvoice: jest.fn().mockResolvedValue(null),
+      getMetadata: jest.fn().mockResolvedValue(null),
+    },
+    pool: {
+      getConfig: jest.fn().mockResolvedValue(null),
+      getFundedInvoice: jest.fn().mockResolvedValue(null),
+      getCollateralConfig: jest.fn().mockResolvedValue(null),
+      getCollateralDeposit: jest.fn().mockResolvedValue(null),
+      getCoFundingRound: jest.fn().mockResolvedValue(null),
+      repay: jest.fn(),
+      depositCollateral: jest.fn(),
+      topUpCollateral: jest.fn(),
+      commitToInvoice: jest.fn(),
+    },
+    auction: {
+      getLiveCollateralRatio: jest.fn().mockResolvedValue(0),
+      getCollateralRiskConfig: jest.fn().mockResolvedValue(null),
+      getAtRiskSince: jest.fn().mockResolvedValue(null),
+    },
+    arbitration: {
+      getEvidence: jest.fn().mockResolvedValue([]),
+      submitEvidence: jest.fn(),
+    },
+  },
 }));
 
 jest.mock('@/lib/stellar', () => ({
@@ -122,7 +154,7 @@ describe('InvoiceDetailPage private access', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (useParams as jest.Mock).mockReturnValue({ id: '42' });
-    (useStore as jest.Mock).mockReturnValue({
+    (useStore as unknown as jest.Mock).mockReturnValue({
       wallet: { address: 'GBOWNER', connected: false, network: 'testnet' },
     });
     (isInvoicePrivate as jest.Mock).mockResolvedValue(true);
@@ -174,6 +206,32 @@ describe('InvoiceDetailPage private access', () => {
     (getCollateralDeposit as jest.Mock).mockResolvedValue(null);
     (getFullCreditScore as jest.Mock).mockResolvedValue(null);
     (getCoFundingRound as jest.Mock).mockResolvedValue(null);
+    // SDK-backed reads mirror the legacy mocks so the private-access guard is
+    // the only thing under test here.
+    (sdk.invoice.getInvoice as jest.Mock).mockResolvedValue({
+      id: 42,
+      owner: 'GBOWNER',
+      debtor: 'Acme',
+      amount: 10_000n,
+      dueDate: 1_700_000_000,
+      description: 'Invoice',
+      status: 'Funded',
+      createdAt: 1,
+      fundedAt: 1,
+      paidAt: 0,
+      poolContract: 'CPOOL',
+    });
+    (sdk.invoice.getMetadata as jest.Mock).mockResolvedValue({
+      name: 'Private invoice title',
+      description: 'Invoice description',
+      image: '',
+      amount: 10_000n,
+      debtor: 'Acme',
+      dueDate: 1_700_000_000,
+      status: 'Funded',
+      symbol: 'USDC',
+      decimals: 6,
+    });
   });
 
   it('blocks private invoices for non-owners before rendering invoice content', async () => {

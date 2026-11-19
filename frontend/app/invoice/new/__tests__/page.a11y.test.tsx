@@ -19,7 +19,7 @@ jest.mock('@/lib/store', () => ({
   }),
 }));
 
-jest.mock('@/lib/contracts', () => ({
+jest.mock('@/lib/sdk', () => ({
   getMaxInvoiceAmount: jest.fn().mockResolvedValue(1000000),
   buildCreateInvoiceTx: jest.fn(),
   submitTx: jest.fn(),
