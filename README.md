@@ -13,13 +13,42 @@ Every paid invoice builds an on-chain credit history.
 
 ## Architecture
 
+Astera is organized into on-chain Soroban contracts, a Next.js application,
+off-chain services, and a reusable TypeScript SDK.
+
+```mermaid
+flowchart TB
+  User[SMEs / Investors / Admins] --> Frontend[Next.js frontend]
+  Frontend --> SDK[packages/sdk]
+  SDK --> Contracts[Soroban contracts]
+  Contracts --> Invoice[invoice]
+  Contracts --> Pool[pool]
+  Contracts --> Risk[auction / insurance]
+  Services[indexer / oracle-service / compliance-service] <--> Contracts
+  Frontend --> Services
 ```
-contracts/
-  invoice/         — RWA invoice token contract (Soroban/Rust)
-  pool/            — Liquidity pool + yield distribution (Soroban/Rust)
-  oracle_registry/ — N-of-M staked oracle consensus network (Soroban/Rust)
-frontend/          — Next.js 14 app (Freighter wallet, Stellar SDK)
-```
+
+| Component | Purpose |
+| --- | --- |
+| `contracts/invoice` | Issues invoice records and manages verification, funding, repayment, and default states |
+| `contracts/pool` | Manages liquidity, deposits, invoice funding, repayment, collateral, and yield accounting |
+| `contracts/oracle_registry` | Coordinates stake-weighted oracle verification and consensus |
+| `contracts/credit_score` | Stores borrower credit data and computes on-chain credit scores |
+| `contracts/share` | Represents investor pool ownership and share balances |
+| `contracts/governance` | Coordinates governance proposals, voting, and execution |
+| `contracts/access_control` | Provides role-based and multisignature authorization |
+| `contracts/compliance` | Stores compliance decisions used to gate protocol actions |
+| `contracts/insurance` | Manages the default-insurance reserve, coverage, and claims |
+| `contracts/referral` | Tracks referrals and referral rewards |
+| `contracts/secondary_market` | Supports secondary-market listings and settlement of pool positions |
+| `contracts/auction` | Runs invoice-auction clearing and Dutch auctions for collateral sales |
+| `contracts/tranche` | Manages tranche-based funding, deposits, and withdrawals |
+| `contracts/arbitration` | Handles structured dispute resolution and arbitration outcomes |
+| `frontend` | Next.js web application for SMEs, investors, and protocol operators |
+| `indexer` | Ingests and exposes indexed Stellar contract events and protocol activity |
+| `oracle-service` | Supplies off-chain oracle data to the on-chain oracle workflows |
+| `compliance-service` | Performs off-chain screening and compliance checks |
+| `packages/sdk` | Typed TypeScript clients, generated contract bindings, and shared helpers for integrations |
 
 ## Contracts
 
@@ -66,6 +95,7 @@ Start with the guide that matches how you want to work:
 - [Windows/WSL2 Setup Guide](docs/windows-wsl-setup.md)
 - [Testnet Deployment Guide](docs/deployment.md)
 - [Smart Contract Interaction Guide](docs/interacting-with-contracts.md)
+- [Co-funding Lifecycle and Refund Semantics](docs/co-funding.md)
 
 ### Rapid Local Development (Docker Compose)
 
@@ -295,6 +325,7 @@ We welcome contributions from developers of all experience levels! Whether you'r
 - Read our [CONTRIBUTING.md](CONTRIBUTING.md) for a complete guide on how to set up your environment, run tests, and submit pull requests
 - Check out [good first issue](https://github.com/astera-hq/Astera/labels/good%20first%20issue) labels for beginner-friendly tasks
 - See the [security checklist](CONTRIBUTING.md#-security-checklist) before submitting smart contract changes
+- Report vulnerabilities privately using the [security policy](SECURITY.md)
 
 For more details on issue labels, workflow, and coding standards, please refer to [CONTRIBUTING.md](CONTRIBUTING.md).
 
