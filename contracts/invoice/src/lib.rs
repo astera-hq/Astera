@@ -2249,7 +2249,13 @@ impl InvoiceContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         let oracle: Option<Address> = env.storage().instance().get(&DataKey::Oracle);
-        let is_authorized = approver == admin || oracle.as_ref() == Some(&approver);
+        let require_consensus: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequireConsensusVerification)
+            .unwrap_or(false);
+        let is_legacy_oracle = !require_consensus && oracle.as_ref() == Some(&approver);
+        let is_authorized = approver == admin || is_legacy_oracle;
         if !is_authorized {
             return Err(InvoiceError::Unauthorized);
         }
@@ -6592,6 +6598,29 @@ mod test {
     }
 
     // ── #624: request_extension / approve_extension unit tests ──────────────────
+
+    #[test]
+    fn test_legacy_oracle_cannot_approve_extension_when_consensus_required() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let (client, admin, pool, sme, oracle) = setup_with_oracle(&env);
+        let id = make_invoice(&env, &client, &sme, 1_000);
+        client.mark_funded(&id, &pool);
+
+        let current_due = client.get_invoice(&id).due_date;
+        let new_due = current_due + 5 * 86_400;
+        client.request_extension(&id, &sme, &new_due);
+        client.set_consensus_required(&admin, &true);
+
+        let oracle_result = client.try_approve_extension(&id, &oracle);
+        assert!(oracle_result.is_err());
+        assert_eq!(client.get_invoice(&id).pending_due_date, Some(new_due));
+
+        // The admin remains an explicit emergency/governance approver.
+        client.approve_extension(&id, &admin);
+        assert_eq!(client.get_invoice(&id).due_date, new_due);
+    }
 
     #[test]
     fn test_extension_happy_path() {
