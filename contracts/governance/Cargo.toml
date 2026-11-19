@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 soroban-sdk = { workspace = true }
 
 [dev-dependencies]
-soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+soroban-sdk = { version = "29.0.1", features = ["testutils"] }
 share = { path = "../share" }
 access_control = { path = "../access_control" }
 proptest = "1.4"
