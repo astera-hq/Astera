@@ -8,3 +8,14 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+governance   = { path = "../governance" }
+pool         = { path = "../pool" }
+invoice      = { path = "../invoice" }
+oracle_registry = { path = "../oracle_registry" }
+compliance   = { path = "../compliance" }
+share        = { path = "../share" }
+astera-types = { workspace = true }
+
+[[test]]
+name = "governance_action_variants"
+path = "tests/governance_action_variants.rs"
