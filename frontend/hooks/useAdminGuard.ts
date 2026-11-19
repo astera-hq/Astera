@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/lib/store';
-import { getPoolConfig } from '@/lib/contracts';
+import { getPoolConfig } from '@/lib/sdk';
 import { isAccessControlSigner } from '@/lib/stellar';
 
 /**

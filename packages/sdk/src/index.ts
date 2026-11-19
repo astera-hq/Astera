@@ -21,7 +21,8 @@ export { Errors as InvoiceErrors } from './generated/invoice';
 export { Errors as PoolErrors } from './generated/pool';
 export { Errors as SecondaryMarketErrors } from './generated/secondary_market';
 export { Errors as CreditScoreErrors } from './generated/credit_score';
-export { GovernanceError, ProposalStatus, ProposalCategory, GovernanceAction, Proposal, GovernanceConfig } from './generated/governance';
+export { GovernanceError, ProposalStatus, ProposalCategory } from './generated/governance';
+export type { GovernanceAction, Proposal, GovernanceConfig } from './generated/governance';
 export { Errors as OracleRegistryErrors } from './generated/oracle_registry';
 export { Errors as ComplianceErrors } from './generated/compliance';
 export { Errors as ArbitrationErrors } from './generated/arbitration';
@@ -47,8 +48,8 @@ export { Errors as ReferralErrors } from './generated/referral';
 export type { ReferralStats, LeaderboardEntry } from './generated/referral';
 export { Errors as ShareErrors } from './generated/share';
 export type { ShareTokenMetadata } from './generated/share';
-export {
-  parseContractEvent,
+export { parseContractEvent } from './events';
+export type {
   ContractEvent,
   PoolWithdrawalEvent,
   PoolYieldClaimedEvent,

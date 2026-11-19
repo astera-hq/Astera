@@ -74,7 +74,7 @@ jest.mock('@/components/NetworkMismatchBanner', () => ({
 }));
 
 // Don't pull in Freighter/contracts via the store consumers above.
-jest.mock('@/lib/contracts', () => ({}));
+jest.mock('@/lib/sdk', () => ({}));
 
 import Navbar from '@/components/Navbar';
 

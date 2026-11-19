@@ -661,13 +661,10 @@ export class AsteraClient {
 
   /** #1055: default-insurance reserve — coverage purchase, claims, reserve health. */
   public readonly insurance = {
-    estimatePremium: (
-      principal: bigint,
-      sme: string,
-      tenorDays: number,
-      token: string,
-    ): Promise<bigint> =>
-      this.insuranceClient.estimatePremium(principal, sme, tenorDays, token),
+    // The on-chain `estimate_premium` takes (principal, sme, tenor_days) only —
+    // the token is intentionally not an argument (see InsuranceClient).
+    estimatePremium: (principal: bigint, sme: string, tenorDays: number): Promise<bigint> =>
+      this.insuranceClient.estimatePremium(principal, sme, tenorDays),
 
     purchaseCoverage: (params: {
       signer: (txXdr: string) => Promise<string>;

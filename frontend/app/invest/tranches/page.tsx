@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { TrancheClass, TranchePool } from '@/../packages/sdk/src/generated/tranche';
-import { getTranchePool, buildTrancheDepositTx } from '@/lib/contracts';
+import { getTranchePool, getTrancheClient, sdkSigner } from '@/lib/sdk';
 import { NETWORK, submitTx, toStroops } from '@/lib/stellar';
 import { useStore } from '@/lib/store';
 import toast from 'react-hot-toast';
@@ -204,14 +204,13 @@ export default function TranchesPage() {
     setDepositing(true);
     try {
       const amount = toStroops(depositAmount);
-      const xdr = await buildTrancheDepositTx(wallet.address, selectedToken, selectedTranche, amount);
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
+      await getTrancheClient().deposit({
+        signer: await sdkSigner(wallet.address),
+        investor: wallet.address,
+        token: selectedToken,
+        trancheClass: selectedTranche,
+        amount,
       });
-      if (signError) throw new Error(signError.message);
-      await submitTx(signedTxXdr);
       const trancheName = selectedTranche === TrancheClass.Senior ? t('senior') : t('junior');
       toast.success(t('toastDepositSuccess', { amount: depositAmount, token: selectedToken, tranche: trancheName }));
       setShowDepositModal(false);

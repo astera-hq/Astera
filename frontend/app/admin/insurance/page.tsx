@@ -11,12 +11,10 @@ import {
   checkReserveHealth,
   getMinReserveAmount,
   getInsuranceContractLink,
-  buildSetPremiumConfigTx,
-  buildSetMinCoverageRatioTx,
-  buildSetMinReserveAmountTx,
-  buildFundReserveFromTreasuryTx,
   buildSetInsuranceContractTx,
-} from '@/lib/contracts';
+  getInsuranceClient,
+  sdkSigner,
+} from '@/lib/sdk';
 import {
   NETWORK,
   submitTx,
@@ -75,6 +73,11 @@ export default function InsuranceAdminPage() {
 
   const activeConfig = editingConfig ?? premiumConfig ?? DEFAULT_PREMIUM_CONFIG;
 
+  async function withSigner() {
+    if (!wallet.address) throw new Error('Connect your admin wallet first.');
+    return sdkSigner(wallet.address);
+  }
+
   async function sign(txXdr: string): Promise<void> {
     if (!wallet.address) throw new Error('Connect your admin wallet first.');
     const freighter = await import('@stellar/freighter-api');
@@ -93,8 +96,11 @@ export default function InsuranceAdminPage() {
     }
     setSaving(true);
     try {
-      const txXdr = await buildSetPremiumConfigTx(wallet.address, activeConfig);
-      await sign(txXdr);
+      await getInsuranceClient().setPremiumConfig({
+        signer: await withSigner(),
+        admin: wallet.address,
+        config: activeConfig,
+      });
       toast.success('Premium configuration saved on-chain.');
       setEditingConfig(null);
       await mutatePremiumConfig();
@@ -109,8 +115,12 @@ export default function InsuranceAdminPage() {
     if (!wallet.address || !token || !minRatioBps) return;
     setSaving(true);
     try {
-      const txXdr = await buildSetMinCoverageRatioTx(wallet.address, token, Number(minRatioBps));
-      await sign(txXdr);
+      await getInsuranceClient().setMinCoverageRatio({
+        signer: await withSigner(),
+        admin: wallet.address,
+        token,
+        minRatioBps: Number(minRatioBps),
+      });
       toast.success('Minimum coverage ratio updated.');
       setMinRatioBps('');
       await mutateTokenData();
@@ -125,12 +135,12 @@ export default function InsuranceAdminPage() {
     if (!wallet.address || !token || !minReserveInput) return;
     setSaving(true);
     try {
-      const txXdr = await buildSetMinReserveAmountTx(
-        wallet.address,
+      await getInsuranceClient().setMinReserveAmount({
+        signer: await withSigner(),
+        admin: wallet.address,
         token,
-        BigInt(minReserveInput),
-      );
-      await sign(txXdr);
+        minAmount: BigInt(minReserveInput),
+      });
       toast.success('Minimum reserve amount updated.');
       setMinReserveInput('');
       await mutateTokenData();
@@ -145,8 +155,12 @@ export default function InsuranceAdminPage() {
     if (!wallet.address || !token || !fundAmount) return;
     setSaving(true);
     try {
-      const txXdr = await buildFundReserveFromTreasuryTx(wallet.address, token, BigInt(fundAmount));
-      await sign(txXdr);
+      await getInsuranceClient().fundReserveFromTreasury({
+        signer: await withSigner(),
+        admin: wallet.address,
+        token,
+        amount: BigInt(fundAmount),
+      });
       toast.success('Reserve funded from treasury.');
       setFundAmount('');
       await mutateTokenData();

@@ -2,18 +2,18 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
+import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
-import { NETWORK, GOVERNANCE_CONTRACT_ID, formatDate, truncateAddress } from '@/lib/stellar';
+import { GOVERNANCE_CONTRACT_ID, formatDate, truncateAddress } from '@/lib/stellar';
 import {
   getGovernanceConfig,
   getShareBalance,
   listGovernanceProposals,
-  buildCreateProposalTx,
-  buildVoteProposalTx,
-  buildExecuteProposalTx,
-  submitTx,
-} from '@/lib/contracts';
+  getGovernanceClient,
+  sdkSigner,
+} from '@/lib/sdk';
+import { GovernanceAction, ProposalCategory, type Signer } from '@astera/sdk';
 import type { GovernanceConfig, GovernanceProposal, ProposalStatus } from '@/lib/types';
 
 const PROPOSALS_PAGE_SIZE = 10;
@@ -30,6 +30,7 @@ const STATUS_FILTERS: StatusFilter[] = [
 ];
 
 export default function GovernancePage() {
+  const t = useTranslations('Governance');
   const { wallet } = useStore();
   const [proposals, setProposals] = useState<GovernanceProposal[]>([]);
   const [loading, setLoading] = useState(false);
@@ -77,11 +78,11 @@ export default function GovernancePage() {
       }
     } catch (error) {
       console.error('[Governance] Failed to load proposals:', error);
-      toast.error('Unable to load governance proposals.');
+      toast.error(t('toast.loadFailed'));
     } finally {
       setRefreshing(false);
     }
-  }, [selectedId]);
+  }, [selectedId, t]);
 
   const loadVotingPower = useCallback(async () => {
     if (!wallet.address || !GOVERNANCE_CONTRACT_ID) return;
@@ -113,26 +114,23 @@ export default function GovernancePage() {
     setVisibleCount(PROPOSALS_PAGE_SIZE);
   }, [statusFilter]);
 
-  async function submitGovernanceTx(buildTx: () => Promise<string>) {
+  async function submitGovernanceTx(
+    run: (signer: Signer, caller: string) => Promise<unknown>,
+  ) {
     if (!wallet.connected || !wallet.address) {
-      toast.error('Connect a wallet first.');
+      toast.error(t('toast.connectFirst'));
       return;
     }
 
     setSubmitting(true);
     try {
-      const xdr = await buildTx();
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error } = await freighter.signTransaction(xdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
-      });
-      if (error) throw new Error(error.message);
-      await submitTx(signedTxXdr);
-      toast.success('Governance transaction submitted.');
+      // SDK clients build, sign and submit themselves; adapt Freighter to the
+      // SDK Signer contract via sdkSigner.
+      await run(await sdkSigner(wallet.address), wallet.address);
+      toast.success(t('toast.submitted'));
       await loadProposals();
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Transaction failed.';
+      const message = error instanceof Error ? error.message : t('toast.failed');
       toast.error(message);
     } finally {
       setSubmitting(false);
@@ -142,14 +140,19 @@ export default function GovernancePage() {
   async function handleCreateProposal(e: FormEvent) {
     e.preventDefault();
     if (!wallet.address) return;
-    await submitGovernanceTx(() =>
-      buildCreateProposalTx({
-        proposer: wallet.address!,
-        description,
-        targetContract,
-        functionName,
-        calldata,
-      }),
+    await submitGovernanceTx((signer, caller) =>
+      getGovernanceClient().createProposal(
+        {
+          description,
+          targetContract,
+          // The form's function name / calldata map onto the SDK's typed
+          // GovernanceAction union; raw calldata is carried in `value`.
+          action: { type: functionName, value: calldata } as unknown as GovernanceAction,
+          category: ProposalCategory.ParameterChange,
+        },
+        caller,
+        signer,
+      ),
     );
     setDescription('');
     setTargetContract('');
@@ -167,21 +170,18 @@ export default function GovernancePage() {
       <div className="max-w-7xl mx-auto space-y-8">
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
           <div className="space-y-2">
-            <p className="text-xs uppercase tracking-[0.3em] text-brand-gold">Governance</p>
-            <h1 className="text-4xl font-bold text-white">Proposal voting and history</h1>
-            <p className="text-brand-muted max-w-2xl">
-              Share holders can create proposals, vote by balance weight, and review the full
-              execution history from the same interface.
-            </p>
+            <p className="text-xs uppercase tracking-[0.3em] text-brand-gold">{t('eyebrow')}</p>
+            <h1 className="text-4xl font-bold text-white">{t('title')}</h1>
+            <p className="text-brand-muted max-w-2xl">{t('intro')}</p>
           </div>
           <div className="flex items-center gap-3">
             {wallet.connected && votingPower !== null && (
               <div className="px-3 py-1.5 rounded-lg border border-brand-border bg-brand-dark/50 text-xs text-brand-muted">
-                Voting Power:{' '}
+                {t('votingPower')}{' '}
                 <span className="text-white font-semibold">{votingPower.toString()}</span>
                 {governanceConfig && votingPower < governanceConfig.minShareBalance && (
                   <span className="text-yellow-400 ml-1">
-                    (min {governanceConfig.minShareBalance.toString()} required)
+                    {t('minRequired', { min: governanceConfig.minShareBalance.toString() })}
                   </span>
                 )}
               </div>
@@ -190,21 +190,20 @@ export default function GovernancePage() {
               onClick={() => void loadProposals()}
               className="px-4 py-2 rounded-xl border border-brand-border text-sm text-brand-muted hover:text-white hover:border-brand-gold/40"
             >
-              {refreshing ? 'Refreshing...' : 'Refresh'}
+              {refreshing ? t('refreshing') : t('refresh')}
             </button>
             <button
               onClick={() => setFormOpen((value) => !value)}
               className="px-4 py-2 rounded-xl bg-brand-gold text-brand-dark text-sm font-semibold"
             >
-              {formOpen ? 'Hide Form' : 'New Proposal'}
+              {formOpen ? t('hideForm') : t('newProposal')}
             </button>
           </div>
         </div>
 
         {!GOVERNANCE_CONTRACT_ID && (
           <div className="rounded-2xl border border-yellow-700/40 bg-yellow-950/20 p-4 text-sm text-yellow-200">
-            Governance contract ID is not configured yet. The page is ready, but voting and proposal
-            creation stay disabled until the contract is deployed.
+            {t('notConfigured')}
           </div>
         )}
 
@@ -215,20 +214,18 @@ export default function GovernancePage() {
           >
             <div className="flex items-center justify-between gap-4">
               <div>
-                <h2 className="text-xl font-bold text-white">Create Proposal</h2>
-                <p className="text-sm text-brand-muted">
-                  Add a protocol change, governance action, or parameter update.
-                </p>
+                <h2 className="text-xl font-bold text-white">{t('form.title')}</h2>
+                <p className="text-sm text-brand-muted">{t('form.intro')}</p>
               </div>
               <span className="text-[10px] uppercase tracking-widest text-brand-muted">
-                Share-weighted
+                {t('form.shareWeighted')}
               </span>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <label className="space-y-2">
                 <span className="text-xs uppercase tracking-widest text-brand-muted">
-                  Target contract
+                  {t('form.targetContract')}
                 </span>
                 <input
                   value={targetContract}
@@ -240,7 +237,7 @@ export default function GovernancePage() {
               </label>
               <label className="space-y-2">
                 <span className="text-xs uppercase tracking-widest text-brand-muted">
-                  Function name
+                  {t('form.functionName')}
                 </span>
                 <input
                   value={functionName}
@@ -254,23 +251,25 @@ export default function GovernancePage() {
 
             <label className="space-y-2 block">
               <span className="text-xs uppercase tracking-widest text-brand-muted">
-                Description
+                {t('form.description')}
               </span>
               <input
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Raise the pool yield by 50 bps"
+                placeholder={t('form.descriptionPlaceholder')}
                 className="w-full rounded-xl border border-brand-border bg-brand-dark px-4 py-3 text-white focus:border-brand-gold focus:outline-none"
                 disabled={!wallet.connected || !GOVERNANCE_CONTRACT_ID || submitting}
               />
             </label>
 
             <label className="space-y-2 block">
-              <span className="text-xs uppercase tracking-widest text-brand-muted">Calldata</span>
+              <span className="text-xs uppercase tracking-widest text-brand-muted">
+                {t('form.calldata')}
+              </span>
               <textarea
                 value={calldata}
                 onChange={(e) => setCalldata(e.target.value)}
-                placeholder='{"yield_bps":850}'
+                placeholder={'{"yield_bps":850}'}
                 className="w-full min-h-[110px] rounded-xl border border-brand-border bg-brand-dark px-4 py-3 text-white focus:border-brand-gold focus:outline-none"
                 disabled={!wallet.connected || !GOVERNANCE_CONTRACT_ID || submitting}
               />
@@ -291,17 +290,17 @@ export default function GovernancePage() {
                 governanceConfig !== null &&
                 votingPower !== null &&
                 votingPower < governanceConfig.minShareBalance
-                  ? `Insufficient voting power. You need at least ${governanceConfig.minShareBalance.toString()} shares to create a proposal.`
+                  ? t('form.insufficientTitle', { min: governanceConfig.minShareBalance.toString() })
                   : undefined
               }
             >
               {submitting
-                ? 'Submitting...'
+                ? t('form.submitting')
                 : governanceConfig !== null &&
                     votingPower !== null &&
                     votingPower < governanceConfig.minShareBalance
-                  ? 'Insufficient Balance'
-                  : 'Create Proposal'}
+                  ? t('form.insufficient')
+                  : t('form.create')}
             </button>
           </form>
         )}
@@ -311,18 +310,25 @@ export default function GovernancePage() {
             <div className="flex flex-col gap-4 mb-4">
               <div className="flex items-center justify-between gap-4">
                 <div>
-                  <h2 className="text-xl font-bold text-white">Proposal History</h2>
+                  <h2 className="text-xl font-bold text-white">{t('history.title')}</h2>
                   <p className="text-sm text-brand-muted">
                     {loading
-                      ? 'Loading proposals...'
+                      ? t('history.loading')
                       : statusFilter === 'All'
-                        ? `${proposals.length} proposals total · showing ${visibleProposals.length}`
-                        : `${filteredProposals.length} ${statusFilter.toLowerCase()} · showing ${visibleProposals.length}`}
+                        ? t('history.total', {
+                            count: proposals.length,
+                            visible: visibleProposals.length,
+                          })
+                        : t('history.filtered', {
+                            count: filteredProposals.length,
+                            status: statusFilter.toLowerCase(),
+                            visible: visibleProposals.length,
+                          })}
                   </p>
                 </div>
                 {selectedProposal && (
                   <span className="text-xs uppercase tracking-widest text-brand-gold">
-                    Selected #{selectedProposal.id}
+                    {t('history.selected', { id: selectedProposal.id })}
                   </span>
                 )}
               </div>
@@ -339,7 +345,7 @@ export default function GovernancePage() {
                         : 'border-brand-border text-brand-muted hover:text-white hover:border-brand-gold/30'
                     }`}
                   >
-                    {filter}
+                    {t(`filters.${filter.toLowerCase()}`)}
                   </button>
                 ))}
               </div>
@@ -347,11 +353,11 @@ export default function GovernancePage() {
 
             {proposals.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-brand-border p-8 text-center text-sm text-brand-muted">
-                No proposals have been submitted yet.
+                {t('empty.none')}
               </div>
             ) : filteredProposals.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-brand-border p-8 text-center text-sm text-brand-muted">
-                No {statusFilter.toLowerCase()} proposals match this filter.
+                {t('empty.filtered', { status: statusFilter.toLowerCase() })}
               </div>
             ) : (
               <div className="space-y-3">
@@ -374,10 +380,10 @@ export default function GovernancePage() {
                       </span>
                     </div>
                     <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-brand-muted">
-                      <span>Proposer {truncateAddress(proposal.proposer)}</span>
-                      <span>Ends {formatDate(proposal.votingEndsAt)}</span>
-                      <span>For {proposal.votesFor.toString()}</span>
-                      <span>Against {proposal.votesAgainst.toString()}</span>
+                      <span>{t('proposal.proposer', { address: truncateAddress(proposal.proposer) })}</span>
+                      <span>{t('proposal.ends', { date: formatDate(proposal.votingEndsAt) })}</span>
+                      <span>{t('proposal.for', { count: proposal.votesFor.toString() })}</span>
+                      <span>{t('proposal.against', { count: proposal.votesAgainst.toString() })}</span>
                     </div>
                   </button>
                 ))}
@@ -388,7 +394,7 @@ export default function GovernancePage() {
                     onClick={() => setVisibleCount((count) => count + PROPOSALS_PAGE_SIZE)}
                     className="w-full rounded-2xl border border-brand-border px-4 py-3 text-sm font-medium text-brand-muted hover:text-white hover:border-brand-gold/40 transition-colors"
                   >
-                    Load more ({filteredProposals.length - visibleCount} remaining)
+                    {t('loadMore', { remaining: filteredProposals.length - visibleCount })}
                   </button>
                 )}
               </div>
@@ -397,29 +403,33 @@ export default function GovernancePage() {
 
           <aside className="space-y-6">
             <div className="rounded-3xl border border-brand-border bg-brand-card p-6">
-              <h2 className="text-xl font-bold text-white mb-2">Vote</h2>
+              <h2 className="text-xl font-bold text-white mb-2">{t('vote.title')}</h2>
               {selectedProposal ? (
                 <div className="space-y-4">
                   <p className="text-sm text-brand-muted">
-                    Voting power:{' '}
+                    {t('vote.power')}{' '}
                     <strong className="text-white">
                       {votingPower !== null ? votingPower.toString() : '—'}
                     </strong>
                   </p>
                   <div className="rounded-2xl border border-brand-border bg-brand-dark/50 p-4 text-sm text-brand-muted">
-                    <p>Target: {truncateAddress(selectedProposal.targetContract)}</p>
-                    <p>Function: {selectedProposal.functionName}</p>
+                    <p>{t('vote.target', { address: truncateAddress(selectedProposal.targetContract) })}</p>
+                    <p>{t('vote.function', { name: selectedProposal.functionName })}</p>
                     <p className="mt-1 break-words">{selectedProposal.calldata}</p>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <button
                       onClick={() =>
-                        void submitGovernanceTx(() =>
-                          buildVoteProposalTx({
-                            voter: wallet.address ?? '',
-                            proposalId: selectedProposal.id,
-                            inFavor: true,
-                          }),
+                        void submitGovernanceTx((signer) =>
+                          getGovernanceClient().vote(
+                            {
+                              proposalId: BigInt(selectedProposal.id),
+                              voteFor: true,
+                              shares: 0n,
+                            },
+                            wallet.address ?? '',
+                            signer,
+                          ),
                         )
                       }
                       disabled={
@@ -430,16 +440,20 @@ export default function GovernancePage() {
                       }
                       className="rounded-xl bg-green-600 px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
                     >
-                      Vote For
+                      {t('vote.for')}
                     </button>
                     <button
                       onClick={() =>
-                        void submitGovernanceTx(() =>
-                          buildVoteProposalTx({
-                            voter: wallet.address ?? '',
-                            proposalId: selectedProposal.id,
-                            inFavor: false,
-                          }),
+                        void submitGovernanceTx((signer) =>
+                          getGovernanceClient().vote(
+                            {
+                              proposalId: BigInt(selectedProposal.id),
+                              voteFor: false,
+                              shares: 0n,
+                            },
+                            wallet.address ?? '',
+                            signer,
+                          ),
                         )
                       }
                       disabled={
@@ -450,26 +464,27 @@ export default function GovernancePage() {
                       }
                       className="rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
                     >
-                      Vote Against
+                      {t('vote.against')}
                     </button>
                   </div>
                 </div>
               ) : (
-                <p className="text-sm text-brand-muted">Select a proposal to vote.</p>
+                <p className="text-sm text-brand-muted">{t('vote.select')}</p>
               )}
             </div>
 
             <div className="rounded-3xl border border-brand-border bg-brand-card p-6">
-              <h2 className="text-xl font-bold text-white mb-2">Execute</h2>
-              <p className="text-sm text-brand-muted mb-4">
-                Once a proposal is passed and the execution delay has elapsed, any wallet can
-                trigger execution.
-              </p>
+              <h2 className="text-xl font-bold text-white mb-2">{t('execute.title')}</h2>
+              <p className="text-sm text-brand-muted mb-4">{t('execute.intro')}</p>
               <button
                 onClick={() =>
                   selectedProposal &&
-                  void submitGovernanceTx(() =>
-                    buildExecuteProposalTx(wallet.address ?? '', selectedProposal.id),
+                  void submitGovernanceTx((signer) =>
+                    getGovernanceClient().executeProposal(
+                      { proposalId: BigInt(selectedProposal.id) },
+                      wallet.address ?? '',
+                      signer,
+                    ),
                   )
                 }
                 disabled={
@@ -481,7 +496,7 @@ export default function GovernancePage() {
                 }
                 className="w-full rounded-xl border border-brand-border px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
               >
-                Execute Selected
+                {t('execute.button')}
               </button>
             </div>
           </aside>

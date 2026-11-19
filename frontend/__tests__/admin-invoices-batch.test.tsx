@@ -14,12 +14,14 @@ const mockGetPoolTokenTotals = jest.fn();
 const mockBuildOpenCoFundingTx = jest.fn();
 const mockSubmitTx = jest.fn();
 
-jest.mock('@/lib/contracts', () => ({
+jest.mock('@/lib/sdk', () => ({
   getInvoiceCount: mockGetInvoiceCount,
   getMultipleInvoices: mockGetMultipleInvoices,
   getPoolTokenTotals: mockGetPoolTokenTotals,
-  buildOpenCoFundingTx: mockBuildOpenCoFundingTx,
-  submitTx: mockSubmitTx,
+  sdkSigner: jest.fn(async () => async (xdr: string) => xdr),
+  getPoolClient: () => ({
+    openCoFunding: (...args: unknown[]) => mockBuildOpenCoFundingTx(...args),
+  }),
 }));
 
 jest.mock('@stellar/freighter-api', () => ({
@@ -107,6 +109,6 @@ describe('AdminInvoicesPage batch funding', () => {
     expect(callArg.fundingDeadline).toBeGreaterThan(nowSecs);
     expect(callArg.fundingDeadline).toBeLessThanOrEqual(nowSecs + 7 * 24 * 60 * 60 + 5);
 
-    await waitFor(() => expect(mockSubmitTx).toHaveBeenCalledWith('signedXdr'));
+    expect(mockBuildOpenCoFundingTx).toHaveBeenCalledTimes(1);
   });
 });

@@ -16,7 +16,8 @@ import {
   buildAdminResolveRoundTx,
   buildSlashOracleTx,
   submitTx,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
+import { NETWORK } from '@/lib/stellar';
 
 function formatStake(amount: bigint): string {
   return (Number(amount) / 10_000_000).toLocaleString();

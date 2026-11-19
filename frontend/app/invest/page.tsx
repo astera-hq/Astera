@@ -16,17 +16,15 @@ import {
   getAcceptedTokens,
   getPoolTokenTotals,
   getTokenDepositCap,
-  buildDepositTx,
-  buildWithdrawTx,
-  submitTx,
   getKycRequired,
   getInvestorKyc,
   getRateModelConfig,
   getCurrentRate,
-} from '@/lib/contracts';
+  getPoolClient,
+  sdkSigner,
+} from '@/lib/sdk';
 import { parseStellarAddress } from '@/lib/types';
 import {
-  NETWORK,
   toStroops,
   formatUSDC,
   stablecoinLabel,
@@ -34,7 +32,6 @@ import {
   POOL_CONTRACT_ID,
   nativeToScVal,
   Address,
-  xdr,
 } from '@/lib/stellar';
 import type { PoolTokenTotals, RateModelConfig } from '@/lib/types';
 import { simulateContractCall } from '@/lib/simulateFee';
@@ -229,24 +226,34 @@ export default function InvestPage() {
 
     try {
       const stroops = toStroops(parseFloat(amount));
-
-      const xdr =
-        mode === 'deposit'
-          ? await buildDepositTx(wallet.address, selectedToken, stroops)
-          : await buildWithdrawTx(wallet.address, selectedToken, stroops);
-
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
-      });
-      if (signError) throw new Error(signError.message);
-
-      await submitTx(signedTxXdr, (progress) => {
+      const signer = await sdkSigner(wallet.address);
+      const onProgress = (progress: { status: 'pending' | 'confirmed' | 'failed'; hash: string; error?: string }) => {
         setTxStatus(progress.status);
         setTxHash(progress.hash);
         setTxError(progress.error ?? null);
-      });
+      };
+
+      if (mode === 'deposit') {
+        // SDK PoolClient.deposit supports min_rate (#992): pass the live curve
+        // rate as the floor so a rate drop between simulation and signing reverts.
+        await getPoolClient().deposit({
+          signer,
+          investor: wallet.address,
+          token: selectedToken,
+          amount: stroops,
+          minRate: liveRateBps ?? undefined,
+          onProgress,
+        });
+      } else {
+        // Withdrawals are queue-based on-chain; request_withdrawal is the SDK path.
+        await getPoolClient().requestWithdrawal({
+          signer,
+          investor: wallet.address,
+          token: selectedToken,
+          shares: stroops,
+          onProgress,
+        });
+      }
       const sym = stablecoinLabel(selectedToken);
       toast.success(
         `${mode === 'deposit' ? 'Deposited' : 'Withdrew'} ${formatUSDC(stroops)} ${sym} successfully.`,

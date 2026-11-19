@@ -33,12 +33,20 @@ jest.mock('@/components/APYCalculator', () => ({ APYCalculator: () => null }));
 jest.mock('@/components/ScenarioModeler', () => ({ ScenarioModeler: () => null }));
 jest.mock('@/components/analytics', () => ({ RateCurveChart: () => null }));
 
-const mockBuildWithdrawTx = jest.fn();
-const mockBuildDepositTx = jest.fn();
-const mockSubmitTx = jest.fn();
+const mockRequestWithdrawal = jest.fn();
+const mockDeposit = jest.fn();
 const mockGetAcceptedTokens = jest.fn();
 
-jest.mock('@/lib/contracts', () => ({
+jest.mock('@/lib/sdk', () => ({
+  getPoolClient: () => ({
+    deposit: (...args: unknown[]) => mockDeposit(...args),
+    requestWithdrawal: (...args: unknown[]) => mockRequestWithdrawal(...args),
+  }),
+  sdkSigner: jest.fn(async () => async (txXdr: string) => {
+    const { signedTxXdr, error } = await mockSignTransaction(txXdr, {});
+    if (error) throw new Error(error.message);
+    return signedTxXdr;
+  }),
   getPoolConfig: jest.fn().mockResolvedValue({ yieldBps: 800 }),
   getInvestorPosition: jest.fn().mockResolvedValue({
     deposited: 1_000_0000000n,
@@ -55,9 +63,6 @@ jest.mock('@/lib/contracts', () => ({
     totalFeeRevenue: 0n,
   }),
   getTokenDepositCap: jest.fn().mockResolvedValue(0n),
-  buildDepositTx: (...args: unknown[]) => mockBuildDepositTx(...args),
-  buildWithdrawTx: (...args: unknown[]) => mockBuildWithdrawTx(...args),
-  submitTx: (...args: unknown[]) => mockSubmitTx(...args),
   getKycRequired: jest.fn().mockResolvedValue(false),
   getInvestorKyc: jest.fn().mockResolvedValue(true),
   getRateModelConfig: jest.fn().mockResolvedValue(null),
@@ -75,8 +80,8 @@ describe('InvestPage withdraw confirmation (#780)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetAcceptedTokens.mockResolvedValue(['TOKEN_A']);
-    mockBuildWithdrawTx.mockResolvedValue('withdraw-xdr');
-    mockSubmitTx.mockResolvedValue(undefined);
+    mockRequestWithdrawal.mockResolvedValue('withdraw-hash');
+    mockDeposit.mockResolvedValue('deposit-hash');
     mockSignTransaction.mockResolvedValue({ signedTxXdr: 'signed-xdr', error: null });
     mockUseStore.mockReturnValue({
       wallet: { address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', connected: true },
@@ -116,7 +121,7 @@ describe('InvestPage withdraw confirmation (#780)', () => {
     fireEvent.click(submitButton);
 
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
-    expect(mockBuildWithdrawTx).not.toHaveBeenCalled();
+    expect(mockRequestWithdrawal).not.toHaveBeenCalled();
     expect(mockSignTransaction).not.toHaveBeenCalled();
   });
 
@@ -128,8 +133,7 @@ describe('InvestPage withdraw confirmation (#780)', () => {
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
 
     await waitFor(() => expect(dialog).not.toBeInTheDocument());
-    expect(mockBuildWithdrawTx).not.toHaveBeenCalled();
-    expect(mockSubmitTx).not.toHaveBeenCalled();
+    expect(mockRequestWithdrawal).not.toHaveBeenCalled();
   });
 
   it('builds and submits the withdrawal once confirmed', async () => {
@@ -139,7 +143,9 @@ describe('InvestPage withdraw confirmation (#780)', () => {
     await screen.findByRole('dialog');
     fireEvent.click(screen.getByRole('button', { name: /^Withdraw$/i }));
 
-    await waitFor(() => expect(mockBuildWithdrawTx).toHaveBeenCalledTimes(1));
-    expect(mockSubmitTx).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mockRequestWithdrawal).toHaveBeenCalledTimes(1));
+    expect(mockRequestWithdrawal.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ shares: expect.any(BigInt) }),
+    );
   });
 });

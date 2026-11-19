@@ -18,9 +18,9 @@ import {
   getProtocolRevenue,
   getTokenBalanceOf,
   getTreasuryAddress,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
 
-jest.mock('@/lib/contracts', () => ({
+jest.mock('@/lib/sdk', () => ({
   getAcceptedTokens: jest.fn().mockResolvedValue(['USDC_TOKEN']),
   getInvoiceCount: jest.fn().mockResolvedValue(0),
   getMultipleInvoices: jest.fn().mockResolvedValue([]),

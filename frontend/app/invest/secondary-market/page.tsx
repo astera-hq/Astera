@@ -7,15 +7,8 @@ import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import { parseStellarAddress } from '@/lib/types';
 import type { Listing, ListingKind, Order, OrderSide } from '@/lib/types';
-import { NETWORK, toStroops, formatUSDC } from '@/lib/stellar';
-import {
-  buildListPositionTx,
-  buildCancelListingTx,
-  buildBuyListingTx,
-  buildPlaceOrderTx,
-  buildCancelOrderTx,
-  buildExpireOrderTx,
-} from '@/lib/contracts';
+import { toStroops, formatUSDC } from '@/lib/stellar';
+import { getSecondaryMarketClient, sdkSigner } from '@/lib/sdk';
 import { useOpenListings, useMyListings, useOrderBook, useMyOrders } from '@/lib/cache';
 import { UseTrackTransaction } from '@/hooks/useTrackTransaction';
 import { useTranslations } from 'next-intl';
@@ -67,15 +60,9 @@ export default function SecondaryMarketPage() {
   );
   const { data: myOrders = [], isLoading: myOrdersLoading } = useMyOrders(wallet.address ?? null);
 
-  async function signAndSubmit(xdr: string, label?: string) {
-    const freighter = await import('@stellar/freighter-api');
-    const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-      networkPassphrase: NETWORK,
-      address: wallet.address!,
-    });
-    if (signError) throw new Error(signError.message || 'Signing rejected.');
-    const submitter = label ? UseTrackTransaction(label) : trackedSubmit;
-    await submitter(signedTxXdr);
+  async function withSigner() {
+    if (!wallet.address) throw new Error('Connect a wallet first.');
+    return sdkSigner(wallet.address);
   }
 
   function refreshListings() {
@@ -115,8 +102,14 @@ export default function SecondaryMarketPage() {
     setTxLoading(true);
     try {
       const seller = parseStellarAddress(wallet.address);
-      const xdr = await buildListPositionTx({ seller, invoiceId: invoiceIdNum, kind, amountOrBps: amountOrBpsValue, price: toStroops(priceNum) });
-      await signAndSubmit(xdr, `List invoice #${invoiceIdNum}`);
+      await getSecondaryMarketClient().listPosition({
+        signer: await withSigner(),
+        seller,
+        invoiceId: invoiceIdNum,
+        kind,
+        amountOrBps: amountOrBpsValue,
+        price: toStroops(priceNum),
+      });
       toast.success(t('toastListSuccess', { id: invoiceIdNum }));
       setInvoiceId('');
       setAmountOrBps('');
@@ -134,8 +127,11 @@ export default function SecondaryMarketPage() {
     setTxLoading(true);
     try {
       const seller = parseStellarAddress(wallet.address);
-      const xdr = await buildCancelListingTx(seller, listing.listingId);
-      await signAndSubmit(xdr, `Cancel listing #${listing.listingId}`);
+      await getSecondaryMarketClient().cancelListing({
+        signer: await withSigner(),
+        seller,
+        listingId: listing.listingId,
+      });
       toast.success(t('toastCancelSuccess', { id: listing.listingId }));
       refreshListings();
     } catch (e: unknown) {
@@ -150,8 +146,11 @@ export default function SecondaryMarketPage() {
     setTxLoading(true);
     try {
       const buyer = parseStellarAddress(wallet.address);
-      const xdr = await buildBuyListingTx(buyer, listing.listingId);
-      await signAndSubmit(xdr, `Buy listing #${listing.listingId}`);
+      await getSecondaryMarketClient().buyListing({
+        signer: await withSigner(),
+        buyer,
+        listingId: listing.listingId,
+      });
       toast.success(t('toastBuySuccess', { id: listing.listingId }));
       refreshListings();
     } catch (e: unknown) {
@@ -204,8 +203,16 @@ export default function SecondaryMarketPage() {
     setTxLoading(true);
     try {
       const owner = parseStellarAddress(wallet.address);
-      const xdr = await buildPlaceOrderTx({ owner, invoiceId: bookInvoiceIdNum, kind: bookKind, side: orderSide, amountOrBps: amountOrBpsValue, price: toStroops(priceNum), expiresAt });
-      await signAndSubmit(xdr, `Place ${orderSide.toLowerCase()} on invoice #${bookInvoiceIdNum}`);
+      await getSecondaryMarketClient().placeOrder({
+        signer: await withSigner(),
+        owner,
+        invoiceId: bookInvoiceIdNum,
+        kind: bookKind,
+        side: orderSide,
+        amountOrBps: amountOrBpsValue,
+        price: toStroops(priceNum),
+        expiresAt,
+      });
       toast.success(t('toastOrderSuccess', { id: bookInvoiceIdNum }));
       setOrderAmountOrBps('');
       setOrderPrice('');
@@ -223,8 +230,11 @@ export default function SecondaryMarketPage() {
     setTxLoading(true);
     try {
       const owner = parseStellarAddress(wallet.address);
-      const xdr = await buildCancelOrderTx(owner, order.orderId);
-      await signAndSubmit(xdr, `Cancel order #${order.orderId}`);
+      await getSecondaryMarketClient().cancelOrder({
+        signer: await withSigner(),
+        owner,
+        orderId: order.orderId,
+      });
       toast.success(t('toastCancelOrderSuccess', { id: order.orderId }));
       refreshOrderBook();
     } catch (e: unknown) {
@@ -239,8 +249,11 @@ export default function SecondaryMarketPage() {
     setTxLoading(true);
     try {
       const caller = parseStellarAddress(wallet.address);
-      const xdr = await buildExpireOrderTx(caller, order.orderId);
-      await signAndSubmit(xdr, `Expire order #${order.orderId}`);
+      await getSecondaryMarketClient().expireOrder({
+        signer: await withSigner(),
+        caller,
+        orderId: order.orderId,
+      });
       toast.success(t('toastExpireOrderSuccess', { id: order.orderId }));
       refreshOrderBook();
     } catch (e: unknown) {
