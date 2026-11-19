@@ -1,0 +1,15 @@
+# Default review owner for repository-wide changes.
+* @sanmipaul
+
+# Security-sensitive smart contracts and automation.
+/contracts/** @sanmipaul
+/.github/** @sanmipaul
+
+# Application and indexing surfaces.
+/frontend/** @sanmipaul
+/indexer/** @sanmipaul
+
+# Backend services.
+/compliance-service/** @sanmipaul
+/mock-service/** @sanmipaul
+/oracle-service/** @sanmipaul
