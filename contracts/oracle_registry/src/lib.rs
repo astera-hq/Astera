@@ -90,6 +90,8 @@ pub enum OracleRegistryError {
     // once one is, slash_oracle forwards slashed funds there automatically.
     TreasuryAlreadyConfigured = 27,
     InvalidPagination = 28,
+    // #1675: oracle tried to vote on a round that opened before it was registered.
+    OracleNotEligible = 29,
 }
 
 #[contracttype]
@@ -135,6 +137,10 @@ pub struct VerificationRound {
     pub opened_at: u64,
     pub deadline: u64,
     pub oracle_hash: String,
+    /// #1675: snapshot of oracles eligible to vote, taken at round-open time.
+    /// Only oracles in this set may submit votes, preventing oracles registered
+    /// after the round opened from adding weight not in total_stake_snapshot.
+    pub eligible_oracles: Vec<Address>,
 }
 
 #[contracttype]
@@ -656,6 +662,9 @@ impl OracleRegistryContract {
             .unwrap_or_else(|| Vec::new(&env));
         let mut total_stake: i128 = 0;
         let mut active_count: u32 = 0;
+        // #1675: snapshot eligible oracle addresses at round-open time so that
+        // oracles registered mid-round cannot add weight outside the denominator.
+        let mut eligible_oracles: Vec<Address> = Vec::new(&env);
         for id in ids.iter() {
             if let Some(info) = env
                 .storage()
@@ -665,6 +674,7 @@ impl OracleRegistryContract {
                 if info.is_active {
                     total_stake += info.stake_amount;
                     active_count += 1;
+                    eligible_oracles.push_back(id);
                 }
             }
         }
@@ -688,6 +698,7 @@ impl OracleRegistryContract {
             opened_at: now,
             deadline: now.saturating_add(config.round_duration_secs),
             oracle_hash,
+            eligible_oracles,
         };
         env.storage().persistent().set(&round_key, &round);
         env.storage()
@@ -772,6 +783,13 @@ impl OracleRegistryContract {
 
         if round.votes.contains_key(oracle.clone()) {
             return Err(OracleRegistryError::AlreadyVoted);
+        }
+
+        // #1675: reject oracles that registered after this round opened — their
+        // stake was not included in total_stake_snapshot, so allowing them to
+        // vote would make quorum easier to reach than quorum_bps intends.
+        if !round.eligible_oracles.contains(&oracle) {
+            return Err(OracleRegistryError::OracleNotEligible);
         }
 
         round.votes.set(oracle.clone(), approved);
