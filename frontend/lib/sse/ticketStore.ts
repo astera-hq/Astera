@@ -1,46 +1,55 @@
-const ticketStore = new Map<string, { account: string; expiresAt: number }>();
+import { SignJWT, jwtVerify } from 'jose';
 
 const TICKET_TTL_SECONDS = 300;
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [ticket, data] of ticketStore.entries()) {
-    if (data.expiresAt <= now) {
-      ticketStore.delete(ticket);
-    }
-  }
-}, 60_000);
-
-export function generateTicket(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+function getTicketSecret(): Uint8Array | null {
+  const secret = process.env.SEP10_JWT_SECRET;
+  if (!secret) return null;
+  return new TextEncoder().encode(secret);
 }
 
-export function createTicket(account: string): { ticket: string; expiresIn: number } {
-  const ticket = generateTicket();
-  const expiresAt = Date.now() + TICKET_TTL_SECONDS * 1000;
-  ticketStore.set(ticket, { account, expiresAt });
+export async function createTicket(account: string): Promise<{ ticket: string; expiresIn: number } | null> {
+  const secret = getTicketSecret();
+  if (!secret) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + TICKET_TTL_SECONDS;
+
+  const ticket = await new SignJWT({ sub: account })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setAudience('sse')
+    .setJti(crypto.randomUUID())
+    .setIssuedAt(now)
+    .setExpirationTime(exp)
+    .sign(secret);
+
   return { ticket, expiresIn: TICKET_TTL_SECONDS };
 }
 
-export function consumeTicket(ticket: string): string | null {
-  const data = ticketStore.get(ticket);
-  if (!data) return null;
-  if (data.expiresAt <= Date.now()) {
-    ticketStore.delete(ticket);
+export async function consumeTicket(ticket: string): Promise<string | null> {
+  const secret = getTicketSecret();
+  if (!secret) return null;
+
+  try {
+    const { payload } = await jwtVerify(ticket, secret, {
+      audience: 'sse',
+    });
+    return payload.sub || null;
+  } catch {
     return null;
   }
-  ticketStore.delete(ticket);
-  return data.account;
 }
 
-export function validateTicket(ticket: string): string | null {
-  const data = ticketStore.get(ticket);
-  if (!data) return null;
-  if (data.expiresAt <= Date.now()) {
-    ticketStore.delete(ticket);
+export async function validateTicket(ticket: string): Promise<string | null> {
+  const secret = getTicketSecret();
+  if (!secret) return null;
+
+  try {
+    const { payload } = await jwtVerify(ticket, secret, {
+      audience: 'sse',
+    });
+    return payload.sub || null;
+  } catch {
     return null;
   }
-  return data.account;
 }
