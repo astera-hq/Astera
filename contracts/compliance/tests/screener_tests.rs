@@ -5,7 +5,7 @@ use compliance::{
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, Env, String,
+    Address, Env, String, Vec,
 };
 
 fn setup(env: &Env) -> (ComplianceContractClient<'_>, Address) {
@@ -15,6 +15,49 @@ fn setup(env: &Env) -> (ComplianceContractClient<'_>, Address) {
     let admin = Address::generate(env);
     client.initialize(&admin);
     (client, admin)
+}
+
+#[test]
+fn batch_status_pending_screener_ac_confirmation_and_governance_setters() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let ac = Address::generate(&env);
+    let gov = Address::generate(&env);
+    client.set_access_control(&admin, &ac);
+    client.set_governance_address(&admin, &gov);
+    assert_eq!(client.get_governance_address(), Some(gov.clone()));
+    assert_eq!(client.get_admin(), admin);
+    client.set_rescreening_interval_gov(&gov, &172_800);
+    client.set_screener_timelock_gov(&gov, &7_200);
+
+    let screener = Address::generate(&env);
+    client.register_screener_via_ac(&ac, &screener);
+    let pending = client.list_pending_screeners();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.get(0).unwrap().address, screener);
+    env.ledger().with_mut(|l| l.timestamp += 7_200);
+    client.confirm_screener_via_ac(&ac, &screener);
+    assert!(client.is_screener(&screener));
+
+    let cleared = Address::generate(&env);
+    let unknown = Address::generate(&env);
+    client.submit_screening_result(
+        &screener,
+        &cleared,
+        &ComplianceStatus::Cleared,
+        &0,
+        &RiskTier::Low,
+        &(env.ledger().timestamp() + 100_000),
+        &String::from_str(&env, "clear"),
+    );
+    let mut addresses = Vec::new(&env);
+    addresses.push_back(cleared);
+    addresses.push_back(unknown);
+    let statuses = client.get_effective_status_batch(&addresses);
+    assert_eq!(statuses.len(), 2);
+    assert_eq!(statuses.get(0).unwrap(), ComplianceStatus::Cleared);
+    assert_eq!(statuses.get(1).unwrap(), ComplianceStatus::Unscreened);
 }
 
 #[test]
@@ -514,7 +557,8 @@ fn test_append_history_fifo_trim_at_max_entries() {
     assert_eq!(history1.get(0).unwrap().reason_code, 0u32); // First entry is entry 0
 
     // Add the 65th entry — oldest (entry 0) should be dropped
-    env.ledger().with_mut(|l| l.timestamp = 1_000_000u64 + (64u64 * 100));
+    env.ledger()
+        .with_mut(|l| l.timestamp = 1_000_000u64 + (64u64 * 100));
     client.submit_screening_result(
         &screener,
         &subject,
@@ -568,7 +612,8 @@ fn test_append_screener_submission_fifo_trim_at_max_entries() {
 
     // Submit the 65th result — oldest (entry 0) should be dropped
     let subject_65 = Address::generate(&env);
-    env.ledger().with_mut(|l| l.timestamp = 1_000_000u64 + (64u64 * 100));
+    env.ledger()
+        .with_mut(|l| l.timestamp = 1_000_000u64 + (64u64 * 100));
     client.submit_screening_result(
         &screener,
         &subject_65,

@@ -510,7 +510,7 @@ proptest! {
         // The bid must be PartiallyFilled (some qty remains after cap hit).
         let bid = market.get_order(&bid_id).unwrap();
         prop_assert_eq!(
-            bid.status,
+            bid.status.clone(),
             OrderStatus::PartiallyFilled,
             "bid should be PartiallyFilled after hitting cap; got {:?}",
             bid.status
@@ -579,7 +579,7 @@ proptest! {
 
         // Bid must be PartiallyFilled, not Filled.
         prop_assert_eq!(
-            bid.status,
+            bid.status.clone(),
             OrderStatus::PartiallyFilled,
             "bid should be PartiallyFilled after cap; got {:?}",
             bid.status
@@ -760,13 +760,13 @@ proptest! {
         let bid = market.get_order(&bid_id).unwrap();
 
         prop_assert_eq!(
-            ask.status,
+            ask.status.clone(),
             OrderStatus::Open,
             "ask should remain Open after self-match attempt; got {:?}",
             ask.status
         );
         prop_assert_eq!(
-            bid.status,
+            bid.status.clone(),
             OrderStatus::Open,
             "bid should remain Open after self-match attempt; got {:?}",
             bid.status
@@ -816,14 +816,14 @@ proptest! {
         let ask2 = market.get_order(&ask2_id).unwrap();
 
         prop_assert_eq!(
-            ask1.status,
+            ask1.status.clone(),
             OrderStatus::Filled,
             "older ask1 (id={}) should fill first; got {:?}",
             ask1_id,
             ask1.status
         );
         prop_assert_eq!(
-            ask2.status,
+            ask2.status.clone(),
             OrderStatus::Open,
             "newer ask2 (id={}) should still be Open; got {:?}",
             ask2_id,
@@ -863,13 +863,13 @@ proptest! {
         let bid = market.get_order(&bid_id).unwrap();
 
         prop_assert_eq!(
-            ask.status,
+            ask.status.clone(),
             OrderStatus::Open,
             "ask should rest Open (no cross); got {:?}",
             ask.status
         );
         prop_assert_eq!(
-            bid.status,
+            bid.status.clone(),
             OrderStatus::Open,
             "bid should rest Open (no cross); got {:?}",
             bid.status
@@ -934,7 +934,7 @@ proptest! {
 
         let ask = market.get_order(&ask_id).unwrap();
         prop_assert_eq!(
-            ask.status,
+            ask.status.clone(),
             OrderStatus::Expired,
             "ask should be Expired after clock passed expiry; got {:?}",
             ask.status
@@ -942,7 +942,7 @@ proptest! {
 
         let bid = market.get_order(&bid_id).unwrap();
         prop_assert_eq!(
-            bid.status,
+            bid.status.clone(),
             OrderStatus::Open,
             "bid should rest Open (no valid ask to cross); got {:?}",
             bid.status
@@ -988,13 +988,13 @@ proptest! {
         let ask_expensive = market.get_order(&ask_expensive_id).unwrap();
 
         prop_assert_eq!(
-            ask_cheap.status,
+            ask_cheap.status.clone(),
             OrderStatus::Filled,
             "cheaper SingleFunded ask should fill first; got {:?}",
             ask_cheap.status
         );
         prop_assert_eq!(
-            ask_expensive.status,
+            ask_expensive.status.clone(),
             OrderStatus::Open,
             "more expensive SingleFunded ask should still be Open; got {:?}",
             ask_expensive.status
@@ -1024,8 +1024,8 @@ proptest! {
         let ask = market.get_order(&ask_id).unwrap();
         let bid = market.get_order(&bid_id).unwrap();
 
-        prop_assert_eq!(ask.status, OrderStatus::Open, "ask should remain Open after self-match attempt; got {:?}", ask.status);
-        prop_assert_eq!(bid.status, OrderStatus::Open, "bid should remain Open after self-match attempt; got {:?}", bid.status);
+        prop_assert_eq!(ask.status.clone(), OrderStatus::Open, "ask should remain Open after self-match attempt; got {:?}", ask.status);
+        prop_assert_eq!(bid.status.clone(), OrderStatus::Open, "bid should remain Open after self-match attempt; got {:?}", bid.status);
 
         let (_, deployed) = pool.get_investor_position(&actor, &usdc);
         prop_assert_eq!(deployed, amount, "actor's deployed position changed despite self-match block");
@@ -1064,8 +1064,8 @@ proptest! {
         let ask = market.get_order(&ask_id).unwrap();
         let bid = market.get_order(&bid_id).unwrap();
 
-        prop_assert_eq!(ask.status, OrderStatus::Open, "overflowing fill must not mark the ask Filled/PartiallyFilled; got {:?}", ask.status);
-        prop_assert_eq!(bid.status, OrderStatus::Open, "overflowing fill must not mark the bid Filled/PartiallyFilled; got {:?}", bid.status);
+        prop_assert_eq!(ask.status.clone(), OrderStatus::Open, "overflowing fill must not mark the ask Filled/PartiallyFilled; got {:?}", ask.status);
+        prop_assert_eq!(bid.status.clone(), OrderStatus::Open, "overflowing fill must not mark the bid Filled/PartiallyFilled; got {:?}", bid.status);
 
         let (_, deployed_after) = pool.get_investor_position(&seller, &usdc);
         prop_assert_eq!(deployed_after, amount, "seller's deployed position must be unchanged when matching breaks on overflow");
