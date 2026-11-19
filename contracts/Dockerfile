@@ -1,4 +1,4 @@
-FROM rust:1.76-slim
+FROM rust:1.99-slim
 
 # Install necessary tools compilation dependencies
 RUN apt-get update && apt-get install -y curl make git pkg-config libssl-dev && \
