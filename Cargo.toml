@@ -23,7 +23,7 @@ resolver = "2"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-criterion = "0.5"
+criterion = "0.8"
 soroban-sdk = { version = "22.0.0" }
 
 [profile.release]
