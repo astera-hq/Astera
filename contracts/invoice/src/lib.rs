@@ -863,6 +863,11 @@ impl InvoiceContract {
         expiration_duration_secs: u64,
         grace_period_days: u32,
     ) {
+        // #1668: require admin authorization to prevent front-running between
+        // deploy and init — without this, anyone could call initialize first
+        // and install themselves as admin and pool.
+        admin.require_auth();
+
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, InvoiceError::AlreadyInitialized);
         }
