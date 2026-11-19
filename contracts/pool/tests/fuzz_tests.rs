@@ -254,7 +254,9 @@ proptest! {
 
         let tt = client.get_token_totals(&usdc_id);
         prop_assert_eq!(tt.total_deployed, 0i128, "total_deployed should be 0 after repayment");
-        prop_assert!(tt.pool_value > principal, "pool_value should have grown with interest");
+        // #1619: interest is distributed via reward_per_share only.
+        prop_assert_eq!(tt.pool_value, principal, "pool_value must not also absorb interest");
+        prop_assert!(tt.reward_per_share > 0, "reward_per_share should have grown with interest");
     }
 
     // ---- Exchange rate (multi-currency) ----
@@ -864,5 +866,111 @@ proptest! {
             total_bps(&client, &investors) <= 10_000,
             "final bps sum exceeds 10_000"
         );
+    }
+}
+
+fn pending_yield(client: &FundingPoolClient<'_>, lp: &Address, token: &Address) -> i128 {
+    let summary = client.get_investor_position_summary(lp);
+    for entry in summary.deposits.iter() {
+        if &entry.token == token {
+            return entry.pending_yield;
+        }
+    }
+    0
+}
+
+fn share_balance(env: &Env, share: &Address, who: &Address) -> i128 {
+    env.invoke_contract(
+        share,
+        &Symbol::new(env, "balance"),
+        soroban_sdk::vec![env, who.clone().into_val(env)],
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// #1619/#1620/#1621: once every invoice is repaid, everything LPs can
+    /// claim plus everything they can withdraw never exceeds the pool's token
+    /// balance, and every LP can actually claim and fully exit.
+    #[test]
+    fn prop_lp_claims_plus_withdrawals_never_exceed_pool_balance(
+        dep_a in 1_000_000i128..1_000_000_000i128,
+        dep_b in 1_000_000i128..1_000_000_000i128,
+        late_dep in 0i128..1_000_000_000i128,
+        fund_pct in 1i128..=100i128,
+        hold_days in 1u64..90u64,
+        withdraw_pct in 0i128..=100i128,
+        a_claims_first in any::<bool>(),
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, share) = setup(&env);
+        let a = Address::generate(&env);
+        let b = Address::generate(&env);
+        let c = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &a, dep_a);
+        mint(&env, &usdc_id, &b, dep_b);
+        mint(&env, &usdc_id, &sme, 4_000_000_000);
+        client.deposit(&a, &usdc_id, &dep_a, &None);
+        client.deposit(&b, &usdc_id, &dep_b, &None);
+
+        let principal = (dep_a + dep_b) * fund_pct / 100;
+        let due_date = env.ledger().timestamp() + hold_days * 86_400 + 1;
+        client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
+        env.ledger().with_mut(|l| l.timestamp += hold_days * 86_400);
+        let amount_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &amount_due);
+
+        if late_dep > 0 {
+            mint(&env, &usdc_id, &c, late_dep);
+            client.deposit(&c, &usdc_id, &late_dep, &None);
+        }
+        let a_partial = share_balance(&env, &share, &a) * withdraw_pct / 100;
+        if a_partial > 0 {
+            client.withdraw(&a, &usdc_id, &a_partial);
+        }
+        if a_claims_first {
+            client.claim_yield(&a, &usdc_id);
+        }
+
+        let usdc = soroban_sdk::token::Client::new(&env, &usdc_id);
+        let tt = client.get_token_totals(&usdc_id);
+        let total_shares: i128 = env.invoke_contract(
+            &share,
+            &Symbol::new(&env, "total_supply"),
+            soroban_sdk::vec![&env],
+        );
+        let lps = [a.clone(), b.clone(), c.clone()];
+        let mut liabilities = 0i128;
+        for lp in lps.iter() {
+            let shares = share_balance(&env, &share, lp);
+            let withdrawable = if total_shares > 0 {
+                shares * tt.pool_value / total_shares
+            } else {
+                0
+            };
+            liabilities += pending_yield(&client, lp, &usdc_id) + withdrawable;
+        }
+        let pool_balance = usdc.balance(&client.address);
+        prop_assert!(
+            liabilities <= pool_balance,
+            "LP liabilities {} exceed pool balance {}", liabilities, pool_balance
+        );
+
+        // A late depositor never receives yield realized before they joined.
+        prop_assert_eq!(pending_yield(&client, &c, &usdc_id), 0);
+
+        // Every LP can claim and fully exit.
+        for lp in lps.iter() {
+            prop_assert!(client.try_claim_yield(lp, &usdc_id).is_ok());
+            let shares = share_balance(&env, &share, lp);
+            if shares > 0 {
+                prop_assert!(client.try_withdraw(lp, &usdc_id, &shares).is_ok());
+            }
+        }
+        prop_assert!(usdc.balance(&client.address) >= 0);
     }
 }

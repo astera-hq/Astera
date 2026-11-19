@@ -11,7 +11,7 @@
  */
 
 import { Pool } from "pg";
-import { Horizon } from "stellar-sdk";
+import { Horizon } from "@stellar/stellar-sdk";
 import { parseEvents } from "./parser";
 import { storeEvents } from "./db";
 import { logger } from "./logger";
