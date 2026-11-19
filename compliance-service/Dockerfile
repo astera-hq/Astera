@@ -1,16 +1,18 @@
-FROM node:20-alpine
+FROM node:20-alpine AS runtime
 
-WORKDIR /app
+WORKDIR /workspace
 
-COPY package*.json ./
-RUN npm install
+COPY packages/sdk /workspace/packages/sdk
+WORKDIR /workspace/packages/sdk
+RUN npm install && npm run build
 
-COPY . .
-RUN npm run build
+COPY compliance-service/package.json /workspace/compliance-service/package.json
+COPY compliance-service/tsconfig.json /workspace/compliance-service/tsconfig.json
+COPY compliance-service/src /workspace/compliance-service/src
 
-# Mirrors the healthcheck already declared for this service in
-# docker-compose.yml, so the container reports a health status even when
-# run outside compose (e.g. `docker run`, other orchestrators).
+WORKDIR /workspace/compliance-service
+RUN npm install && npm run build
+
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch(\`http://127.0.0.1:${HEALTH_PORT:-8081}/health\`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"
 

@@ -308,6 +308,12 @@ jobs:
           cache: npm
           cache-dependency-path: packages/sdk/package-lock.json
       - run: npm ci
+      - name: Build SDK
+        run: npm run build
+      - name: Lint SDK
+        run: npm run lint
+      - name: Typecheck SDK
+        run: npm run typecheck
       - name: Test SDK
         run: npm test
 

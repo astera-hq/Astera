@@ -3,7 +3,7 @@
 import express from 'express';
 import Database from 'better-sqlite3';
 import { register, collectDefaultMetrics, Gauge } from 'prom-client';
-import { getEvents, getPoolHistory, getAnalyticsSummary } from './db';
+import { getEvents, getPoolHistory, getAnalyticsSummary, searchInvoices } from './db';
 
 export function startApiServer(db: Database.Database, port: number): void {
   const app = express();
@@ -96,6 +96,19 @@ export function startApiServer(db: Database.Database, port: number): void {
         activeInvoices: 0,
       };
       res.json({ latest, history, summary: latest });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/invoices/search', (req, res) => {
+    try {
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+      const limit = parseInt(typeof req.query.limit === 'string' ? req.query.limit : '50', 10);
+      const offset = parseInt(typeof req.query.offset === 'string' ? req.query.offset : '0', 10);
+      const invoices = searchInvoices(db, q, { status, limit, offset });
+      res.json({ invoices, count: invoices.length });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
