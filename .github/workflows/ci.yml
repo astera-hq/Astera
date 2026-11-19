@@ -461,3 +461,20 @@ jobs:
           name: deployed-contract-ids
           path: contract-ids.txt
           retention-days: 30
+
+  bindings:
+    name: Generated SDK Bindings
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+      - name: Regenerate bindings for all contracts
+        run: scripts/gen-bindings.sh
+      - name: Fail if generated bindings are stale
+        run: git diff --exit-code -- packages/sdk/src/generated

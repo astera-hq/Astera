@@ -153,10 +153,12 @@ export default function AdminOraclesPage() {
     return (
       <div className="max-w-4xl">
         <h1 className="text-3xl font-bold mb-2">{t('title')}</h1>
-        <div
-          className="p-6 bg-brand-card border border-brand-border rounded-2xl text-sm text-brand-muted"
-          dangerouslySetInnerHTML={{ __html: t('notConfigured') }}
-        />
+        <div className="p-6 bg-brand-card border border-brand-border rounded-2xl text-sm text-brand-muted">
+          {t.rich('notConfigured', {
+            strong: (chunks) => <strong>{chunks}</strong>,
+            code: (chunks) => <code>{chunks}</code>,
+          })}
+        </div>
       </div>
     );
   }
