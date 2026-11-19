@@ -137,8 +137,8 @@ services:
   # ── Oracle service ─────────────────────────────────────────────────────────
   oracle-service:
     build:
-      context: ./oracle-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: oracle-service/Dockerfile
     environment:
       - RPC_URL=http://stellar:8000/soroban/rpc
       - HORIZON_URL=http://stellar:8000
@@ -157,10 +157,10 @@ services:
       contracts:
         condition: service_started
     volumes:
-      - ./oracle-service:/app
-      - ./packages/sdk:/sdk
+      - ./oracle-service:/workspace/oracle-service
+      - /workspace/oracle-service/node_modules
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:${process.env.HEALTH_PORT || 8080}/health`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:8080/health`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -170,8 +170,8 @@ services:
   # ── Compliance service (#867) ──────────────────────────────────────────────
   compliance-service:
     build:
-      context: ./compliance-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: compliance-service/Dockerfile
     environment:
       - RPC_URL=http://stellar:8000/soroban/rpc
       - HORIZON_URL=http://stellar:8000
@@ -188,10 +188,10 @@ services:
       contracts:
         condition: service_started
     volumes:
-      - ./compliance-service:/app
-      - ./packages/sdk:/sdk
+      - ./compliance-service:/workspace/compliance-service
+      - /workspace/compliance-service/node_modules
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:${process.env.HEALTH_PORT || 8081}/health`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:$${process.env.HEALTH_PORT || 8081}/health`).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 3

@@ -66,12 +66,12 @@ export class BaseClient {
   protected async simulate(
     method: string,
     args: import('@stellar/stellar-sdk').xdr.ScVal[],
-  ): Promise<StellarRpc.Api.SimulateTransactionResponse> {
+  ): Promise<StellarRpc.Api.SimulateTransactionSuccessResponse> {
     const sim = await simulateTx(this.server, this.network, this.contractId, method, args, SIMULATION_SOURCE);
     if (StellarRpc.Api.isSimulationError(sim)) {
       throw parseContractError(sim.error, this.errors);
     }
-    return sim;
+    return sim as StellarRpc.Api.SimulateTransactionSuccessResponse;
   }
 
   private async resolveSigner(txXdr: string): Promise<string> {

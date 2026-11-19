@@ -667,7 +667,7 @@ export class AsteraClient {
       tenorDays: number,
       token: string,
     ): Promise<bigint> =>
-      this.insuranceClient.estimatePremium(principal, sme, tenorDays, token),
+      this.insuranceClient.estimatePremium(principal, sme, tenorDays),
 
     purchaseCoverage: (params: {
       signer: (txXdr: string) => Promise<string>;

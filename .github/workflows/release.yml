@@ -7,16 +7,50 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
-  changelog:
-    name: Generate Release Notes
+  release:
+    name: Build and Publish Release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32v1-none
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
+      - name: Build all contract WASM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --target wasm32-unknown-unknown --release \
+            -p access_control -p arbitration -p auction -p compliance \
+            -p credit_score -p governance -p insurance -p invoice \
+            -p oracle_registry -p pool -p referral -p secondary_market \
+            -p share -p tranche
+
+          mkdir -p release/wasm
+          for crate in \
+            access_control arbitration auction compliance credit_score governance \
+            insurance invoice oracle_registry pool referral secondary_market share tranche
+          do
+            src="target/wasm32-unknown-unknown/release/${crate}.wasm"
+            test -f "$src"
+            wasm-opt -Oz --strip-dwarf "$src" -o "release/wasm/${crate}.wasm"
+          done
+          cd release/wasm
+          sha256sum *.wasm | sort -k2 > SHA256SUMS.txt
 
       - name: Generate changelog
         uses: orhun/git-cliff-action@v4
@@ -33,3 +67,29 @@ jobs:
         with:
           body_path: CHANGES.md
           token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            release/wasm/*.wasm
+            release/wasm/SHA256SUMS.txt
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+          cache: npm
+          cache-dependency-path: packages/sdk/package-lock.json
+
+      - name: Build and test SDK
+        working-directory: packages/sdk
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm run build
+          npm test
+
+      - name: Publish SDK to npm
+        working-directory: packages/sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
