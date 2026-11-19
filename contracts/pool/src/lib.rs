@@ -3502,6 +3502,79 @@ impl FundingPool {
         Self::fund_multiple_invoices(env, admin, requests)
     }
 
+    /// #1663: settle an invoice auction and fund the invoice at the winning discount
+    pub fn settle_auction_and_fund_invoice(
+        env: Env,
+        admin: Address,
+        auction_id: u64,
+        invoice_id: u64,
+        principal: i128,
+        sme: Address,
+        due_date: u64,
+        token: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+
+        Self::non_reentrant_start(&env);
+
+        // Settle the auction
+        let risk_contract: Address = env
+            .storage()
+            .instance()
+            .get(&RISK_CONTRACT)
+            .ok_or(PoolError::NotInitialized)?;
+
+        let winning_investor_opt: Option<Address> = env.invoke_contract(
+            &risk_contract,
+            &Symbol::new(&env, "settle_invoice_auction"),
+            Vec::from_array(
+                &env,
+                [
+                    admin.clone().into_val(&env),
+                    auction_id.into_val(&env),
+                ],
+            ),
+        );
+
+        // If no winner, don't fund
+        if winning_investor_opt.is_none() {
+            Self::non_reentrant_end(&env);
+            return Ok(());
+        }
+
+        // Fund the invoice using fund_invoice logic
+        let config = get_config_cached(&env)?;
+        let accepted_tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AcceptedTokens)
+            .ok_or(PoolError::NotInitialized)?;
+
+        let request = FundingRequest {
+            invoice_id,
+            principal,
+            sme,
+            due_date,
+            token,
+        };
+
+        let mut stats: PoolStorageStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageStats)
+            .unwrap_or_default();
+
+        fund_invoice_request(&env, &config, &accepted_tokens, &mut stats, &request)?;
+
+        env.storage().instance().set(&DataKey::StorageStats, &stats);
+
+        Self::non_reentrant_end(&env);
+        Ok(())
+    }
+
     pub fn repay_invoices_batch(
         env: Env,
         payer: Address,
