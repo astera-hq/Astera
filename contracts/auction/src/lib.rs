@@ -849,7 +849,7 @@ impl AuctionContract {
         env: Env,
         caller: Address,
         auction_id: u64,
-    ) -> Result<Address, AuctionError> {
+    ) -> Result<Option<Address>, AuctionError> {
         let pool = Self::require_pool(&env)?;
         if caller != pool {
             return Err(AuctionError::UnauthorizedSettlement);
@@ -871,13 +871,16 @@ impl AuctionContract {
             match (auction.winning_bid.clone(), auction.winning_discount_bps) {
                 (Some(investor), Some(discount)) => (investor, discount),
                 _ => {
+                    // #1665: return Ok so Soroban does not roll back the
+                    // Cancelled state write — previously returning Err here
+                    // caused the storage write to be silently discarded.
                     auction.status = AuctionStatus::Cancelled;
                     env.storage()
                         .persistent()
                         .set(&DataKey::Auction(auction_id), &auction);
                     env.events()
                         .publish((EVT, symbol_short!("inv_cncl")), auction_id);
-                    return Err(AuctionError::NoBids);
+                    return Ok(None);
                 }
             };
 
@@ -890,7 +893,7 @@ impl AuctionContract {
             (EVT, symbol_short!("inv_stl")),
             (auction_id, winning_investor.clone(), winning_discount),
         );
-        Ok(winning_investor)
+        Ok(Some(winning_investor))
     }
 
     /// Permissionless expiry handler: if no bids after duration, mark as cancelled.
@@ -1568,7 +1571,7 @@ mod tests {
         client.place_bid(&best, &auction_id, &10i128, &200u32);
         client.place_bid(&third, &auction_id, &10i128, &400u32);
 
-        let winner = client.settle_invoice_auction(&pool, &auction_id);
+        let winner = client.settle_invoice_auction(&pool, &auction_id).unwrap();
         assert_eq!(winner, best);
         let auction = client.get_invoice_auction(&auction_id).unwrap();
         assert_eq!(auction.winning_discount_bps, Some(200));

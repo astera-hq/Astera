@@ -2047,6 +2047,11 @@ impl FundingPool {
         initial_share_token: Address,
         invoice_contract: Address,
     ) {
+        // #1668: require admin authorization to prevent front-running between
+        // deploy and init — without this, anyone could call initialize first
+        // and install themselves as admin.
+        admin.require_auth();
+
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, PoolError::AlreadyInitialized);
         }
