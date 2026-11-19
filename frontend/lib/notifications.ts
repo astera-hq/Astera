@@ -61,38 +61,26 @@ class NotificationService {
     }
   }
 
-  /** Mock External Webhook Dispatcher */
+  /** External Webhook Dispatcher */
   private async dispatchExternal(alert: NotificationAlert): Promise<void> {
-    const webhookUrl = process.env.NEXT_PUBLIC_SLACK_WEBHOOK_URL;
-    if (!webhookUrl) {
-      console.warn(
-        '[Astera] Skipping external webhook: No URL provided in env (NEXT_PUBLIC_SLACK_WEBHOOK_URL).',
-      );
-      return;
-    }
-
     try {
-      const payload = {
-        text: `*${alert.priority} ALERT: ${alert.type}*`,
-        attachments: [
-          {
-            color: alert.priority === 'CRITICAL' ? '#ff0000' : '#ffa500',
-            fields: [
-              { title: 'Message', value: alert.message, short: false },
-              { title: 'Time', value: new Date(alert.timestamp).toISOString(), short: true },
-              { title: 'Context', value: safeStringify(alert.data || {}), short: false },
-            ],
-          },
-        ],
-      };
-
-      await fetch(webhookUrl, {
+      const response = await fetch('/api/notifications/webhook/dispatch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: safeStringify(payload),
+        body: safeStringify({
+          type: alert.type,
+          priority: alert.priority,
+          message: alert.message,
+          timestamp: alert.timestamp,
+          data: alert.data,
+        }),
       });
 
-      console.log(`[Astera] Successfully dispatched ${alert.priority} alert to external webhook.`);
+      if (response.ok) {
+        console.log(`[Astera] Successfully dispatched ${alert.priority} alert to external webhook.`);
+      } else {
+        console.warn('[Astera] External webhook dispatch failed:', response.status);
+      }
     } catch (error) {
       console.error('[Astera] Failed to dispatch webhook:', error);
     }
