@@ -1,5 +1,8 @@
 # Contributing to Astera
 
+For vulnerabilities, follow the [security policy](SECURITY.md) and use private
+reporting rather than a public issue.
+
 Thank you for your interest in contributing to **Astera**! We welcome developers of all experience levels, especially those interested in Soroban smart contract development and tokenized real-world asset infrastructure.
 
 ---
