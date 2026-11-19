@@ -20,6 +20,8 @@ use soroban_sdk::{
     symbol_short, token, Address, Env, Map, String, Symbol, Vec,
 };
 
+pub use astera_types::QuorumTier;
+
 #[contractclient(name = "InvoiceContractClient")]
 pub trait InvoiceContract {
     fn consensus_verify(
@@ -154,13 +156,6 @@ pub struct RegistryConfig {
 /// the highest tier whose threshold the invoice amount clears wins.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct QuorumTier {
-    pub min_invoice_amount: i128,
-    pub quorum_bps: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
 pub struct OracleReputation {
     pub address: Address,
     pub is_active: bool,
@@ -273,7 +268,6 @@ impl OracleRegistryContract {
         env.storage().instance().set(&DataKey::Config, &config);
         env.events()
             .publish((EVT, symbol_short!("trsr_set")), admin);
-            .publish((EVT, symbol_short!("trs_set")), admin);
         Ok(())
     }
 
@@ -984,7 +978,7 @@ impl OracleRegistryContract {
     /// Paginated read of an oracle's round history. `offset` is the index into
     /// the (bounded) stored history and `limit` caps the number of entries
     /// returned. Rejects `limit == 0` or `limit > MAX_ORACLE_ROUND_HISTORY`.
-    pub fn get_oracle_round_history_paginated(
+    pub fn get_round_history_paginated(
         env: Env,
         oracle: Address,
         offset: u32,

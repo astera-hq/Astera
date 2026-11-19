@@ -16,6 +16,7 @@ members = [
     "contracts/secondary_market",
     "contracts/arbitration",
     "contracts/insurance",
+    "contracts/types",
 ]
 resolver = "2"
 
@@ -25,6 +26,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 criterion = "0.5"
 soroban-sdk = { version = "22.0.0" }
+astera-types = { path = "contracts/types" }
 
 [profile.release]
 opt-level = "z"

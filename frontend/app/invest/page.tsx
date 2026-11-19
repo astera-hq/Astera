@@ -200,6 +200,7 @@ export default function InvestPage() {
         new Address(wallet.address).toScVal(),
         new Address(selectedToken).toScVal(),
         nativeToScVal(stroops, { type: 'i128' }),
+        nativeToScVal(null, { type: 'u32' }),
       ],
       wallet.address,
     );

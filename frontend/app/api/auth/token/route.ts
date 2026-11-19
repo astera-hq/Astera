@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
 import { TransactionBuilder, Networks, Keypair, StrKey } from '@stellar/stellar-sdk';
-import { jwtVerify, SignJWT } from 'jose';
+import { SignJWT } from 'jose';
+import { getSep10Secret, SEP10_AUDIENCE, SEP10_ISSUER, SEP10_TTL_SECONDS, sep10Key } from '@/lib/sep10-jwt';
 
 export const dynamic = 'force-dynamic';
 
 const NETWORK_PASSPHRASE =
   process.env.NEXT_PUBLIC_STELLAR_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
-const JWT_SECRET = process.env.SEP10_JWT_SECRET || process.env.JWT_SECRET;
+const JWT_SECRET = getSep10Secret();
 const SERVER_SEED = process.env.SEP10_SERVER_SEED;
 
 function badRequest(msg = 'invalid') {
@@ -60,11 +61,14 @@ export async function POST(request: Request) {
 
     // Issue JWT
     const now = Math.floor(Date.now() / 1000);
-    const exp = now + 60 * 60 * 24; // 24h
+    const exp = now + SEP10_TTL_SECONDS;
 
-    const algSecret = new TextEncoder().encode(JWT_SECRET);
+    const algSecret = sep10Key(JWT_SECRET);
     const token = await new SignJWT({ sub: clientAccount })
       .setProtectedHeader({ alg: 'HS256' })
+      .setIssuer(SEP10_ISSUER)
+      .setAudience(SEP10_AUDIENCE)
+      .setJti(crypto.randomUUID())
       .setIssuedAt(now)
       .setExpirationTime(exp)
       .sign(algSecret);

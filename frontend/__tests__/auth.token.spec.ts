@@ -10,6 +10,18 @@ jest.mock('jose', () => ({
       return this;
     }
 
+    setIssuer(_issuer: unknown) {
+      return this;
+    }
+
+    setAudience(_audience: unknown) {
+      return this;
+    }
+
+    setJti(_jti: unknown) {
+      return this;
+    }
+
     setIssuedAt(_iat: unknown) {
       return this;
     }
@@ -24,7 +36,7 @@ jest.mock('jose', () => ({
   },
 }));
 
-process.env.JWT_SECRET = 'test-secret';
+process.env.SEP10_JWT_SECRET = 'test-secret';
 process.env.SEP10_SERVER_SEED = 'SB2AGJ6J2YV2LQ5RZJXTOCEJ3G2M7Q3I5Y5XK6GZ7YQO3H4C5N6O7P8Q';
 
 let tokenHandler: (request: Request) => Promise<Response>;

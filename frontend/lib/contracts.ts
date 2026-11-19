@@ -706,6 +706,40 @@ export async function getInvestorPosition(
   };
 }
 
+export async function buildDepositTx(
+  investor: string,
+  token: string,
+  amount: bigint,
+): Promise<string> {
+  const account = await getRpcAccount(investor);
+  ensureSufficientNativeBalance(account);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'deposit',
+        new Address(investor).toScVal(),
+        new Address(token).toScVal(),
+        nativeToScVal(amount, { type: 'i128' }),
+        nativeToScVal(null, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await simulateRpcTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
 /** Build a lender yield-claim transaction for a single pool token. */
 export async function buildClaimYieldTx(investor: string, token: string): Promise<string> {
   const account = await getRpcAccount(investor);
