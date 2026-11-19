@@ -1,7 +1,7 @@
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
-use tranche::{state::TrancheClass, TrancheContract};
+use tranche::{state::TrancheClass, TrancheContract, TrancheContractClient};
 
 /// Registers a real token contract: `deposit_tranche`/`withdraw_tranche`
 /// perform actual token transfers, so a plain generated address won't do.
@@ -279,4 +279,112 @@ fn test_get_advance_rate_headroom() {
         let headroom = TrancheContract::get_advance_rate_headroom(env.clone(), token.clone());
         assert_eq!(headroom, 0);
     });
+}
+
+#[test]
+fn investor_deposit_withdraw_views_and_token_balances() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token = create_token(&env);
+    let senior_shares = env.register(DummyShare, ());
+    let junior_shares = env.register(DummyShare, ());
+    let contract = env.register(TrancheContract, ());
+    let config = tranche::state::TrancheConfig {
+        senior_target_yield_bps: 700,
+        senior_advance_rate_bps: 8000,
+        junior_first_loss_bps: 10000,
+    };
+    env.as_contract(&contract, || {
+        TrancheContract::initialize(
+            env.clone(),
+            admin,
+            token.clone(),
+            senior_shares.clone(),
+            junior_shares.clone(),
+            config,
+        )
+    });
+    let client = TrancheContractClient::new(&env, &contract);
+    assert!(client
+        .try_deposit_tranche(&investor, &token, &TrancheClass::Junior, &0)
+        .is_err());
+    assert!(client
+        .try_withdraw_tranche(&investor, &token, &TrancheClass::Junior, &-1)
+        .is_err());
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    mint(&env, &token, &investor, 100_000);
+    env.as_contract(&contract, || {
+        TrancheContract::deposit_tranche(
+            env.clone(),
+            investor.clone(),
+            token.clone(),
+            TrancheClass::Junior,
+            2_000,
+        )
+    });
+    assert_eq!(token_client.balance(&investor), 98_000);
+    assert_eq!(token_client.balance(&contract), 2_000);
+    let headroom = env.as_contract(&contract, || {
+        TrancheContract::get_advance_rate_headroom(env.clone(), token.clone())
+    });
+    assert_eq!(headroom, 8_000);
+    assert!(client
+        .try_deposit_tranche(&investor, &token, &TrancheClass::Senior, &8_001)
+        .is_err());
+    env.as_contract(&contract, || {
+        TrancheContract::deposit_tranche(
+            env.clone(),
+            investor.clone(),
+            token.clone(),
+            TrancheClass::Senior,
+            4_000,
+        )
+    });
+    let config_view = env.as_contract(&contract, || {
+        TrancheContract::get_config(env.clone(), token.clone())
+    });
+    let totals = env.as_contract(&contract, || {
+        TrancheContract::get_totals(env.clone(), token.clone(), TrancheClass::Senior)
+    });
+    let position = env.as_contract(&contract, || {
+        TrancheContract::get_position(
+            env.clone(),
+            investor.clone(),
+            token.clone(),
+            TrancheClass::Senior,
+        )
+    });
+    assert_eq!(config_view.senior_target_yield_bps, 700);
+    assert_eq!(totals.deposited, 4_000);
+    assert_eq!(position.unwrap().deposited, 4_000);
+    env.as_contract(&contract, || {
+        TrancheContract::withdraw_tranche(
+            env.clone(),
+            investor.clone(),
+            token.clone(),
+            TrancheClass::Senior,
+            1_000,
+        )
+    });
+    env.as_contract(&contract, || {
+        TrancheContract::withdraw_tranche(
+            env.clone(),
+            investor.clone(),
+            token.clone(),
+            TrancheClass::Junior,
+            500,
+        )
+    });
+    assert_eq!(token_client.balance(&investor), 95_500);
+    assert_eq!(token_client.balance(&contract), 4_500);
+    let junior_position = env.as_contract(&contract, || {
+        TrancheContract::get_position(env.clone(), investor, token.clone(), TrancheClass::Junior)
+    });
+    let senior_totals = env.as_contract(&contract, || {
+        TrancheContract::get_totals(env.clone(), token, TrancheClass::Senior)
+    });
+    assert_eq!(junior_position.unwrap().deposited, 1_500);
+    assert_eq!(senior_totals.available, 3_000);
 }

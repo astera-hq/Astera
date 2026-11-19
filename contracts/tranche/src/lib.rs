@@ -1,4 +1,4 @@
-#`!no_std]
+#![no_std]
 
 pub mod deposit;
 pub mod errors;
@@ -10,7 +10,7 @@ pub mod state;
 pub mod withdraw;
 
 use errors::TrancheError;
-use events:{CONFIG, EVT, OPENED, PAUSED};
+use events::{CONFIG, EVT, OPENED};
 use state::{DataKey, TrancheAccounting, TrancheClass, TrancheConfig, TranchePool};
 
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env};
@@ -99,7 +99,7 @@ impl TrancheContract {
         Self::bump_instance(&env);
 
         if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error(&env, TrancheError::AlreadyInitialized);
+            panic_with_error!(&env, TrancheError::AlreadyInitialized);
         }
 
         Self::validate_share_tokens(&env, &senior_share_token, &junior_share_token);
@@ -111,8 +111,8 @@ impl TrancheContract {
 
         let pool = TranchePool {
             token: token.clone(),
-            senior_share_token: senior_share_token,
-            junior_share_token: junior_share_token,
+            senior_share_token,
+            junior_share_token,
             config,
             senior: TrancheAccounting::default(),
             junior: TrancheAccounting::default(),
@@ -242,7 +242,11 @@ impl TrancheContract {
     /// `withdraw` burns against one token for both classes, so senior and
     /// junior holders end up sharing a single fungible claim and the
     /// waterfall's seniority guarantee is gone. (#1303)
-    fn validate_share_tokens(env: &Env, senior_share_token: &Address, junior_share_token: &Address) {
+    fn validate_share_tokens(
+        env: &Env,
+        senior_share_token: &Address,
+        junior_share_token: &Address,
+    ) {
         if senior_share_token == junior_share_token {
             panic_with_error!(env, TrancheError::InvalidShareTokens);
         }
@@ -306,7 +310,7 @@ impl TrancheContract {
 
         let stored_admin = Self::get_admin(env.clone())?;
         if admin != stored_admin {
-            panic_with_error(&env, TrancheError::Unauthorized);
+            panic_with_error!(&env, TrancheError::Unauthorized);
         }
 
         Self::validate_config(&env, &config);
@@ -325,8 +329,8 @@ impl TrancheContract {
         } else {
             TranchePool {
                 token: token.clone(),
-                senior_share_token: senior_share_token,
-                junior_share_token: junior_share_token,
+                senior_share_token,
+                junior_share_token,
                 config,
                 senior: TrancheAccounting::default(),
                 junior: TrancheAccounting::default(),
@@ -368,5 +372,4 @@ impl TrancheContract {
         Self::non_reentrant_end(&env);
         (result.senior_amount, result.junior_amount)
     }
-
-    pub fn get
+}
