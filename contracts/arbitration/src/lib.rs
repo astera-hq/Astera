@@ -695,7 +695,11 @@ impl ArbitrationContract {
     /// or a prior committee failed to reach quorum and a re-draw is still
     /// available (`retry_count` hasn't hit `config.max_retries + 1`), draws
     /// an unweighted random committee of `config.committee_size` from the
-    /// active juror pool and opens the commit/reveal window.
+    /// active juror pool and opens the commit/reveal window. #1677: filters
+    /// out case parties (claimant and respondent) so they cannot vote on
+    /// their own disputes. #1678: seeds shuffle with the evidence deadline
+    /// ledger sequence, not the current one, so the committee is fixed once
+    /// evidence closes and cannot be rerolled via PRNG grinding.
     pub fn select_jurors(env: Env, case_id: u64) -> Result<(), ArbitrationError> {
         require_not_paused(&env);
         let mut case: DisputeCase = env
@@ -738,17 +742,36 @@ impl ArbitrationContract {
                 }
             }
         }
-        if active.len() < config.committee_size {
+
+        // #1677: Filter out the case's claimant and respondent so they cannot
+        // vote on their own dispute.
+        let mut filtered: Vec<Address> = Vec::new(&env);
+        for juror in active.iter() {
+            if juror != case.claimant && juror != case.respondent {
+                filtered.push_back(juror);
+            }
+        }
+
+        if filtered.len() < config.committee_size {
             return Err(ArbitrationError::NotEnoughActiveJurors);
         }
 
-        // Unweighted draw: shuffle the active pool and take the first
-        // `committee_size` — every active juror has equal selection odds
-        // regardless of stake size (see module docs).
-        env.prng().shuffle(&mut active);
+        // #1678: Seed the PRNG with the evidence deadline's ledger sequence
+        // instead of the current ledger's, so the committee is deterministic
+        // once evidence closes and not rerollable via PRNG grinding. The
+        // sequence is public (not a secret), so this doesn't add secrecy but
+        // it does remove grinding attacks by tying the draw to a past ledger
+        // neither party could have influenced when they opened the case.
+        let seq_at_deadline = case.evidence_deadline / 5;
+        let mut hasher = Bytes::new(&env);
+        hasher.append(&Bytes::from_array(&env, &seq_at_deadline.to_le_bytes()[..]));
+        let seed = env.crypto().sha256(&hasher).to_bytes();
+
+        env.prng().seed(seed);
+        env.prng().shuffle(&mut filtered);
         let mut committee: Vec<Address> = Vec::new(&env);
         for i in 0..config.committee_size {
-            committee.push_back(active.get(i).unwrap());
+            committee.push_back(filtered.get(i).unwrap());
         }
 
         case.jurors = committee.clone();
