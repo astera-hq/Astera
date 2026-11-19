@@ -11,6 +11,8 @@ use soroban_sdk::{
     Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
 
+pub use astera_types::{CollateralConfig, FeeTier, LoyaltyTier};
+
 use soroban_sdk::contractclient;
 
 #[contracttype]
@@ -360,15 +362,6 @@ pub struct PoolTokenTotals {
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
-pub struct FeeTier {
-    pub min_amount: i128,
-    pub max_amount: i128,
-    pub min_credit_score: u32,
-    pub fee_bps: u32,
-}
-
-#[contracttype]
-#[derive(Clone)]
 pub struct CreditScoreData {
     pub sme: Address,
     pub score: u32,
@@ -414,13 +407,6 @@ pub struct InvestorPosition {
     // to zero so a later re-deposit restarts the loyalty timer; used to
     // compute the tenure-based loyalty bonus tier in `get_deposit_info`.
     pub loyalty_start_at: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct LoyaltyTier {
-    pub min_days: u32,
-    pub bonus_bps: u32,
 }
 
 #[contracttype]
@@ -556,13 +542,6 @@ pub struct PoolStorageStats {
     pub total_funded_invoices: u64,
     pub active_funded_invoices: u64,
     pub cleaned_invoices: u64,
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct CollateralConfig {
-    pub threshold: i128,
-    pub collateral_bps: u32,
 }
 
 #[contracttype]

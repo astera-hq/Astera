@@ -34,7 +34,6 @@ browser code.
 | --- | --- | --- |
 | `SEP10_SERVER_SEED` | yes | Secret Stellar keypair seed used by the SEP-10 authentication server |
 | `SEP10_JWT_SECRET` | yes | High-entropy secret used to sign authentication JWTs |
-| `JWT_SECRET` | fallback | Compatibility fallback when `SEP10_JWT_SECRET` is not set |
 
 Generate a dedicated SEP-10 server keypair (do not reuse an administrator or
 personal wallet):
