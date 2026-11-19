@@ -173,6 +173,7 @@ pub struct ComplianceContract;
 #[contractimpl]
 impl ComplianceContract {
     pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, ComplianceError::AlreadyInitialized);
         }

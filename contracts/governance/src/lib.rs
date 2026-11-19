@@ -536,6 +536,7 @@ impl Governance {
         execution_delay_secs: u64,
         min_share_balance: i128,
     ) -> Result<(), GovernanceError> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(GovernanceError::AlreadyInitialized);
         }
