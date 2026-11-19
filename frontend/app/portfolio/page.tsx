@@ -14,13 +14,11 @@ import {
   getExchangeRate,
   estimateWithdrawalWait,
   getLiquidityForecast,
-  buildRequestWithdrawalTx,
-  buildCancelWithdrawalRequestTx,
-  buildDrainWithdrawalQueueTx,
-  submitTx,
   getTrancheInvestorPosition,
-} from '@/lib/contracts';
-import { NETWORK, formatUSDC, stablecoinLabel, toStroops } from '@/lib/stellar';
+  getPoolClient,
+  sdkSigner,
+} from '@/lib/sdk';
+import { formatUSDC, stablecoinLabel, toStroops } from '@/lib/stellar';
 import type { PoolTokenTotals, WaitEstimate, LiquidityForecastPoint } from '@/lib/types';
 import { useTranslations } from 'next-intl';
 
@@ -235,12 +233,9 @@ export default function PortfolioPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  async function signAndSubmit(xdrPromise: Promise<string>): Promise<void> {
-    const xdr = await xdrPromise;
-    const freighter = await import('@stellar/freighter-api');
-    const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, { networkPassphrase: NETWORK, address: wallet.address! });
-    if (signError) throw new Error(signError.message);
-    await submitTx(signedTxXdr);
+  async function withSigner() {
+    if (!wallet.address) throw new Error('Connect a wallet first.');
+    return sdkSigner(wallet.address);
   }
 
   async function handleRequestWithdrawal(token: string) {
@@ -250,7 +245,12 @@ export default function PortfolioPage() {
     setQueueActionLoading((p) => ({ ...p, [token]: true }));
     try {
       const shares = toStroops(parseFloat(raw));
-      await signAndSubmit(buildRequestWithdrawalTx(wallet.address, token, shares));
+      await getPoolClient().requestWithdrawal({
+        signer: await withSigner(),
+        investor: wallet.address,
+        token,
+        shares,
+      });
       toast.success(t('toastWithdrawalSubmitted', { amount: formatUSDC(shares) }));
       setRequestAmounts((p) => ({ ...p, [token]: '' }));
       await load();
@@ -265,7 +265,11 @@ export default function PortfolioPage() {
     if (!wallet.address) return;
     setQueueActionLoading((p) => ({ ...p, [token]: true }));
     try {
-      await signAndSubmit(buildCancelWithdrawalRequestTx(wallet.address, token));
+      await getPoolClient().cancelWithdrawalRequest({
+        signer: await withSigner(),
+        investor: wallet.address,
+        token,
+      });
       toast.success(t('toastWithdrawalCancelled'));
       await load();
     } catch (e: unknown) {
@@ -279,7 +283,11 @@ export default function PortfolioPage() {
     if (!wallet.address) return;
     setQueueActionLoading((p) => ({ ...p, [token]: true }));
     try {
-      await signAndSubmit(buildDrainWithdrawalQueueTx(wallet.address, token));
+      await getPoolClient().drainWithdrawalQueue({
+        signer: await withSigner(),
+        caller: wallet.address,
+        token,
+      });
       toast.success(t('toastDrainSubmitted'));
       await load();
     } catch (e: unknown) {

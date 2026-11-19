@@ -34,7 +34,7 @@ import {
   getProtocolRevenue,
   getTokenBalanceOf,
   getTreasuryAddress,
-} from './contracts';
+} from './sdk';
 import type { Invoice } from './types';
 
 // ---- Cache with 5-minute TTL ----

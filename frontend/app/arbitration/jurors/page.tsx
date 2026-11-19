@@ -12,20 +12,15 @@ import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import { parseStellarAddress } from '@/lib/types';
 import type { JurorInfo, DisputeCase, JurorVoteStatus } from '@/lib/types';
-import { NETWORK } from '@/lib/stellar';
 import {
   getJurorInfo,
   getJurorCases,
   getArbitrationCase,
   getJurorVoteStatus,
-  buildRegisterJurorTx,
-  buildDeregisterJurorTx,
-  buildCommitVoteTx,
-  buildRevealVoteTx,
-  computeArbitrationCommitHash,
-  generateArbitrationSalt,
-  submitTx,
-} from '@/lib/contracts';
+  getArbitrationClient,
+  sdkSigner,
+} from '@/lib/sdk';
+import { computeCommitHash, generateSalt } from '@astera/sdk';
 
 const STATUS_STYLES: Record<DisputeCase['status'], string> = {
   EvidenceWindow: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
@@ -104,14 +99,9 @@ export default function ArbitrationJurorsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet.address]);
 
-  async function signAndSubmit(xdr: string) {
-    const freighter = await import('@stellar/freighter-api');
-    const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-      networkPassphrase: NETWORK,
-      address: wallet.address!,
-    });
-    if (signError) throw new Error(signError.message || 'Signing rejected.');
-    await submitTx(signedTxXdr);
+  async function withSigner() {
+    if (!wallet.address) throw new Error('Connect a wallet first.');
+    return sdkSigner(wallet.address);
   }
 
   async function handleRegister() {
@@ -124,8 +114,11 @@ export default function ArbitrationJurorsPage() {
     setTxLoading(true);
     try {
       const operator = parseStellarAddress(wallet.address);
-      const xdr = await buildRegisterJurorTx({ operator, stakeAmount });
-      await signAndSubmit(xdr);
+      await getArbitrationClient().registerJuror({
+        signer: await withSigner(),
+        operator,
+        stakeAmount,
+      });
       toast.success(t('toasts.registered'));
       await load();
     } catch (e: unknown) {
@@ -140,8 +133,10 @@ export default function ArbitrationJurorsPage() {
     setTxLoading(true);
     try {
       const operator = parseStellarAddress(wallet.address);
-      const xdr = await buildDeregisterJurorTx({ operator });
-      await signAndSubmit(xdr);
+      await getArbitrationClient().deregisterJuror({
+        signer: await withSigner(),
+        operator,
+      });
       toast.success(
         info?.deregisterRequestedAt
           ? t('toasts.stakeWithdrawn')
@@ -165,12 +160,16 @@ export default function ArbitrationJurorsPage() {
     setTxLoading(true);
     try {
       const juror = parseStellarAddress(wallet.address);
-      const salt = generateArbitrationSalt();
+      const salt = generateSalt();
       // Persisted in localStorage + sessionStorage backup so this browser can reveal it later
       saveStoredSalt(caseId, juror, JSON.stringify({ vote: choice, salt: Array.from(salt) }));
-      const commitHash = await computeArbitrationCommitHash(choice, salt);
-      const xdr = await buildCommitVoteTx({ juror, caseId, commitHash });
-      await signAndSubmit(xdr);
+      const commitHash = await computeCommitHash(choice, salt);
+      await getArbitrationClient().commitVote({
+        signer: await withSigner(),
+        juror,
+        caseId,
+        commitHash,
+      });
       toast.success(t('toasts.voteCommitted'));
       await load();
     } catch (e: unknown) {
@@ -191,13 +190,13 @@ export default function ArbitrationJurorsPage() {
     setTxLoading(true);
     try {
       const { vote, salt } = JSON.parse(stored) as { vote: boolean; salt: number[] };
-      const xdr = await buildRevealVoteTx({
+      await getArbitrationClient().revealVote({
+        signer: await withSigner(),
         juror,
         caseId,
         voteChoice: vote,
         salt: new Uint8Array(salt),
       });
-      await signAndSubmit(xdr);
       toast.success(t('toasts.voteRevealed'));
       await load();
     } catch (e: unknown) {

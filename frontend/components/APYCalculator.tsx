@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { usePoolConfig } from '@/lib/cache';
 import { formatApyPercent, projectedInterestStroops } from '@/lib/apy';
 import { formatUSDC, toStroops, stablecoinLabel } from '@/lib/stellar';
-import { getCurrentRate } from '@/lib/contracts';
+import { getCurrentRate } from '@/lib/sdk';
 import { Skeleton } from '@/components/Skeleton';
 import { RetryIndicator } from '@/components/RetryIndicator';
 

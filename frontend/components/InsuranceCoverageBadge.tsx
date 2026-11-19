@@ -6,13 +6,11 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import {
   getCoverageRecord,
-  estimateInsurancePremium,
-  buildPurchaseCoverageTx,
-  buildFileClaimTx,
   getClaimHistory,
-  submitTx,
-} from '@/lib/contracts';
-import { NETWORK, formatUSDC } from '@/lib/stellar';
+  getInsuranceClient,
+  sdkSigner,
+} from '@/lib/sdk';
+import { formatUSDC } from '@/lib/stellar';
 import type { FundedInvoice } from '@/lib/types';
 
 function tenorDaysFromDueDate(dueDate: number): number {
@@ -37,11 +35,10 @@ export default function InsuranceCoverageBadge({
   const { data: premiumEstimate } = useSWR(
     !coverage ? ['insurance-premium-estimate', fundedInvoice.invoiceId, fundedInvoice.sme] : null,
     () =>
-      estimateInsurancePremium(
+      getInsuranceClient().estimatePremium(
         fundedInvoice.principal,
         fundedInvoice.sme,
         tenorDaysFromDueDate(fundedInvoice.dueDate),
-        fundedInvoice.token,
       ),
   );
   const { data: claimHistory } = useSWR(
@@ -56,21 +53,15 @@ export default function InsuranceCoverageBadge({
     }
     setPurchaseLoading(true);
     try {
-      const txXdr = await buildPurchaseCoverageTx(
-        wallet.address,
-        fundedInvoice.invoiceId,
-        fundedInvoice.principal,
-        fundedInvoice.sme,
-        fundedInvoice.dueDate,
-        fundedInvoice.token,
-      );
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error: signError } = await freighter.signTransaction(txXdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
+      await getInsuranceClient().purchaseCoverage({
+        signer: await sdkSigner(wallet.address),
+        payer: wallet.address,
+        invoiceId: fundedInvoice.invoiceId,
+        principal: fundedInvoice.principal,
+        sme: fundedInvoice.sme,
+        dueDate: fundedInvoice.dueDate,
+        token: fundedInvoice.token,
       });
-      if (signError) throw new Error(signError.message || 'Signing rejected.');
-      await submitTx(signedTxXdr);
       toast.success('Coverage purchased successfully!');
       await mutateCoverage();
     } catch (e) {
@@ -87,14 +78,11 @@ export default function InsuranceCoverageBadge({
     }
     setClaimLoading(true);
     try {
-      const txXdr = await buildFileClaimTx(wallet.address, fundedInvoice.invoiceId);
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error: signError } = await freighter.signTransaction(txXdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
+      await getInsuranceClient().fileClaim({
+        signer: await sdkSigner(wallet.address),
+        caller: wallet.address,
+        invoiceId: fundedInvoice.invoiceId,
       });
-      if (signError) throw new Error(signError.message || 'Signing rejected.');
-      await submitTx(signedTxXdr);
       toast.success('Claim filed successfully!');
       await mutateCoverage();
     } catch (e) {

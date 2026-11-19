@@ -6,7 +6,7 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { TableRowSkeleton } from '@/components/Skeleton';
 import ConfirmActionModal from '@/components/ConfirmActionModal';
-import { getInvoice, getInvoiceCount, buildMarkDefaultedTx, submitTx } from '@/lib/contracts';
+import { getInvoice, getInvoiceCount, buildMarkDefaultedTx, submitTx } from '@/lib/sdk';
 import { NETWORK, formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 

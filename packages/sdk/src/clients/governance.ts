@@ -83,6 +83,9 @@ export class GovernanceClient extends BaseClient {
     
     // Get the proposal ID from the result
     const sim = await this.simulate('get_last_proposal_id', []);
+    if (StellarRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
     const proposalId = scValToNative(sim.result!.retval) as bigint;
     
     return { proposalId, txHash };

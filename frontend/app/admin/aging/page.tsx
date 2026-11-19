@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import { Skeleton } from '@/components/Skeleton';
-import { getMultipleInvoices, getInvoiceCount } from '@/lib/contracts';
+import { getMultipleInvoices, getInvoiceCount } from '@/lib/sdk';
 import { formatUSDC, formatDate } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
 

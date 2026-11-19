@@ -2,11 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
- test/auction-governance-boundary-coverage
-import { useStore, getStoredWalletAddress } from '@/lib/store';
-
 import { useStore, getStoredWalletAddress, wasWalletConnected } from '@/lib/store';
- main
 import { getEnvConfig } from '@/lib/env';
 import { getFreighter } from '@/lib/freighter';
 import toast from 'react-hot-toast';
@@ -77,33 +73,22 @@ export default function WalletConnect() {
   // Auto-reconnect on mount if a wallet address was previously stored
   useEffect(() => {
     const stored = getStoredWalletAddress();
- test/auction-governance-boundary-coverage
-    if (!stored || wallet.connected) return;
-
     if (!wasWalletConnected() || !stored || wallet.connected) return;
- main
 
     void (async () => {
       try {
         const freighter = await getFreighter();
- test/auction-governance-boundary-coverage
         const { isConnected } = await freighter.isConnected();
         if (!isConnected) return;
-
-        const { isAllowed } = await freighter.isAllowed();
-        if (!isAllowed) return;
 
         const { isAllowed } = await freighter.isAllowed();
         if (!isAllowed) {
           disconnect();
           return;
-        
-          main
+        }
 
         const { address, error: addrError } = await freighter.getAddress();
         if (addrError || !address) return;
-
- test/auction-governance-boundary-coverage
 
         if (address !== stored) {
           disconnect();
@@ -111,7 +96,6 @@ export default function WalletConnect() {
           return;
         }
 
- main
         // Check for network mismatch on auto-reconnect
         const networkCheck = await checkNetworkMismatch();
         setNetworkMismatch(networkCheck);
@@ -121,12 +105,8 @@ export default function WalletConnect() {
         // Silent failure - user can reconnect manually
       }
     })();
- test/auction-governance-boundary-coverage
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   }, [disconnect, setNetworkMismatch, setWallet, wallet.connected]);
- main
 
   async function connect(attempt = 0) {
     setStep('detecting');

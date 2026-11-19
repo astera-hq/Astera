@@ -7,12 +7,8 @@ import { useStore } from '@/lib/store';
 import { Skeleton } from '@/components/Skeleton';
 import { parseStellarAddress } from '@/lib/types';
 import type { CoFundingRound } from '@/lib/types';
-import { NETWORK, toStroops, formatUSDC } from '@/lib/stellar';
-import {
-  buildCommitToInvoiceTx,
-  buildWithdrawCoFundingCommitmentTx,
-  buildTransferCoFundShareTx,
-} from '@/lib/contracts';
+import { toStroops, formatUSDC } from '@/lib/stellar';
+import { getPoolClient, sdkSigner } from '@/lib/sdk';
 import { useCoFundingRounds, useCoFundingPositions } from '@/lib/cache';
 import { UseTrackTransaction } from '@/hooks/useTrackTransaction';
 import { useTranslations } from 'next-intl';
@@ -41,15 +37,9 @@ export default function CoFundingPage() {
   const [transferTo, setTransferTo] = useState('');
   const [transferBps, setTransferBps] = useState('10000');
 
-  async function signAndSubmit(xdr: string, label?: string) {
-    const freighter = await import('@stellar/freighter-api');
-    const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-      networkPassphrase: NETWORK,
-      address: wallet.address!,
-    });
-    if (signError) throw new Error(signError.message || 'Signing rejected.');
-    const submitter = label ? UseTrackTransaction(label) : trackedSubmit;
-    await submitter(signedTxXdr);
+  async function withSigner() {
+    if (!wallet.address) throw new Error('Connect a wallet first.');
+    return sdkSigner(wallet.address);
   }
 
   async function handleCommit(round: CoFundingRound) {
@@ -63,12 +53,12 @@ export default function CoFundingPage() {
     setTxLoading(true);
     try {
       const investor = parseStellarAddress(wallet.address);
-      const xdr = await buildCommitToInvoiceTx({
+      await getPoolClient().commitToInvoice({
+        signer: await withSigner(),
         investor,
         invoiceId: round.invoiceId,
         amount: toStroops(amountNum),
       });
-      await signAndSubmit(xdr, `Commit to #${round.invoiceId}`);
       toast.success(t('toastCommitSuccess', { id: round.invoiceId }));
       setCommitAmounts((prev) => ({ ...prev, [round.invoiceId]: '' }));
       mutate('co-funding-rounds');
@@ -85,8 +75,11 @@ export default function CoFundingPage() {
     setTxLoading(true);
     try {
       const investor = parseStellarAddress(wallet.address);
-      const xdr = await buildWithdrawCoFundingCommitmentTx({ investor, invoiceId });
-      await signAndSubmit(xdr, `Withdraw from #${invoiceId}`);
+      await getPoolClient().withdrawCommitment({
+        signer: await withSigner(),
+        investor,
+        invoiceId,
+      });
       toast.success(t('toastWithdrawSuccess', { id: invoiceId }));
       mutate('co-funding-rounds');
       if (wallet.address) mutate(['co-funding-positions', wallet.address]);
@@ -111,14 +104,14 @@ export default function CoFundingPage() {
       const to = parseStellarAddress(transferTo.trim());
       const round = rounds.find((r) => r.invoiceId === transferTarget);
       if (!round) throw new Error('Round not found.');
-      const xdr = await buildTransferCoFundShareTx({
+      await getPoolClient().transferCoFundShare({
+        signer: await withSigner(),
         from,
         invoiceId: transferTarget,
         token: round.token,
         to,
         bps,
       });
-      await signAndSubmit(xdr, `Transfer #${transferTarget}`);
       toast.success(t('toastTransferSuccess', { pct: (bps / 100).toFixed(2), id: transferTarget }));
       setTransferTarget(null);
       setTransferTo('');

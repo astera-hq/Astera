@@ -227,6 +227,9 @@ export class AccessControlClient extends BaseClient {
     onProgress?: (progress: TransactionProgress) => void;
   }): Promise<string> {
     const source = params.superAdminSigners[0];
+    if (!source) {
+      throw new Error('At least one super-admin signer is required to initialize access control');
+    }
     return this.buildAndSendTx(
       source,
       'initialize',

@@ -9,7 +9,7 @@ import {
   getInvestorPosition,
   getPoolConfig,
   submitTx,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
 import { NETWORK, formatUSDC, stablecoinLabel } from '@/lib/stellar';
 
 type Row = { token: string; deposited: bigint; value: bigint; accrued: bigint };

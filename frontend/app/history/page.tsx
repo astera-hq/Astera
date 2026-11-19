@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useTranslations } from 'next-intl';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { HistoryEventSkeleton } from '@/components/Skeleton';
@@ -45,16 +46,19 @@ interface HistoryEvent {
   token?: string;
 }
 
-const KIND_LABELS: Record<EventKind, string> = {
-  invoice_created: 'Invoice Created',
-  invoice_funded: 'Invoice Funded',
-  invoice_paid: 'Invoice Repaid',
-  invoice_defaulted: 'Invoice Defaulted',
-  pool_deposit: 'Pool Deposit',
-  pool_funded: 'Pool Funded Invoice',
-  pool_repaid: 'Repayment Received',
-  pool_withdraw: 'Pool Withdrawal',
+/** Maps contract event kinds to i18n keys (identifiers, not UI copy). */
+const KIND_KEYS: Record<EventKind, string> = {
+  invoice_created: 'kinds.invoiceCreated',
+  invoice_funded: 'kinds.invoiceFunded',
+  invoice_paid: 'kinds.invoicePaid',
+  invoice_defaulted: 'kinds.invoiceDefaulted',
+  pool_deposit: 'kinds.poolDeposit',
+  pool_funded: 'kinds.poolFunded',
+  pool_repaid: 'kinds.poolRepaid',
+  pool_withdraw: 'kinds.poolWithdraw',
 };
+
+type Translator = (key: string, values?: Record<string, string | number>) => string;
 
 const KIND_COLORS: Record<EventKind, string> = {
   invoice_created: 'text-blue-400 bg-blue-400/10 border-blue-400/20',
@@ -193,20 +197,20 @@ function formatTs(ts: string): string {
   });
 }
 
-function exportCSV(events: HistoryEvent[]) {
-  const tokenSymbol = events.length > 0 ? stablecoinLabel(events[0].token || USDC_TOKEN_ID) : 'USD';
+function exportCSV(events: HistoryEvent[], t: Translator) {
+  const tokenSymbol = events.length > 0 ? stablecoinLabel(events[0]?.token || USDC_TOKEN_ID) : 'USD';
   const header = [
-    'Date',
-    'Type',
-    'Invoice ID',
-    `Amount (${tokenSymbol})`,
-    `Interest (${tokenSymbol})`,
-    'Address',
-    'Tx Hash',
+    t('csv.date'),
+    t('csv.type'),
+    t('csv.invoiceId'),
+    t('csv.amount', { symbol: tokenSymbol }),
+    t('csv.interest', { symbol: tokenSymbol }),
+    t('csv.address'),
+    t('csv.txHash'),
   ];
   const rows = events.map((e) => [
     e.timestamp ? new Date(e.timestamp).toISOString() : '',
-    KIND_LABELS[e.kind],
+    t(KIND_KEYS[e.kind]),
     e.invoiceId !== undefined ? e.invoiceId.toString() : '',
     e.amount !== undefined ? fromStroops(e.amount).toFixed(7) : '',
     e.interest !== undefined ? fromStroops(e.interest).toFixed(7) : '',
@@ -232,6 +236,7 @@ function exportPDF() {
 }
 
 export default function HistoryPage() {
+  const t = useTranslations('History');
   const { wallet } = useStore();
   const [events, setEvents] = useState<HistoryEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -255,9 +260,7 @@ export default function HistoryPage() {
       if (!wallet.connected || !wallet.address) return;
 
       if (!INVOICE_CONTRACT_ID || !POOL_CONTRACT_ID) {
-        toast.error(
-          'Contract IDs not configured. Set NEXT_PUBLIC_INVOICE_CONTRACT_ID and NEXT_PUBLIC_POOL_CONTRACT_ID.',
-        );
+        toast.error(t('error.notConfigured'));
         setLoading(false);
         return;
       }
@@ -334,14 +337,14 @@ export default function HistoryPage() {
         setHasMore(fetchedCount === EVENT_LIMIT && Boolean(responseCursor));
         setCursor(responseCursor);
       } catch (e) {
-        toast.error('Failed to load transaction history. Make sure contracts are deployed.');
+        toast.error(t('error.loadFailed'));
         console.error(e);
       } finally {
         setLoading(false);
         setLoadingMore(false);
       }
     },
-    [wallet.connected, wallet.address],
+    [wallet.connected, wallet.address, t],
   );
 
   useEffect(() => {
@@ -368,22 +371,22 @@ export default function HistoryPage() {
       <div className="max-w-3xl mx-auto">
         <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold mb-1">Transaction History</h1>
-            <p className="text-brand-muted">On-chain activity for your wallet</p>
+            <h1 className="text-3xl font-bold mb-1">{t('title')}</h1>
+            <p className="text-brand-muted">{t('subtitle')}</p>
           </div>
           {events.length > 0 && (
             <div className="flex gap-2 print:hidden">
               <button
-                onClick={() => exportCSV(filteredEvents)}
+                onClick={() => exportCSV(filteredEvents, t)}
                 className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium hover:border-brand-gold/50 hover:text-brand-gold transition-colors"
               >
-                Export CSV
+                {t('exportCsv')}
               </button>
               <button
                 onClick={exportPDF}
                 className="px-4 py-2 bg-brand-card border border-brand-border rounded-xl text-sm font-medium hover:border-brand-gold/50 hover:text-brand-gold transition-colors"
               >
-                Export PDF
+                {t('exportPdf')}
               </button>
             </div>
           )}
@@ -392,7 +395,7 @@ export default function HistoryPage() {
         {events.length > 0 && (
           <div className="mb-4 flex flex-wrap items-center gap-3">
             <div className="flex flex-wrap gap-1.5">
-              {(['all', ...(Object.keys(KIND_LABELS) as EventKind[])] as const).map((k) => (
+              {(['all', ...(Object.keys(KIND_KEYS) as EventKind[])] as const).map((k) => (
                 <button
                   key={k}
                   onClick={() => setKindFilter(k)}
@@ -402,7 +405,7 @@ export default function HistoryPage() {
                       : 'bg-brand-card border-brand-border text-brand-muted hover:text-white'
                   }`}
                 >
-                  {k === 'all' ? 'All' : KIND_LABELS[k]}
+                  {k === 'all' ? t('filterAll') : t(KIND_KEYS[k])}
                 </button>
               ))}
             </div>
@@ -410,7 +413,7 @@ export default function HistoryPage() {
               onClick={() => setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))}
               className="px-3 py-1.5 text-xs font-medium rounded-lg border border-brand-border bg-brand-card text-brand-muted hover:text-white transition-colors"
             >
-              {sortDir === 'desc' ? '↓ Newest' : '↑ Oldest'}
+              {sortDir === 'desc' ? t('sortNewest') : t('sortOldest')}
             </button>
           </div>
         )}
@@ -418,8 +421,8 @@ export default function HistoryPage() {
         {!wallet.connected ? (
           <div className="flex flex-col items-center justify-center py-32 text-center">
             <div className="text-4xl mb-4">◈</div>
-            <h2 className="text-xl font-semibold mb-2">Connect your wallet</h2>
-            <p className="text-brand-muted">Connect Freighter to view your transaction history.</p>
+            <h2 className="text-xl font-semibold mb-2">{t('connect.title')}</h2>
+            <p className="text-brand-muted">{t('connect.description')}</p>
           </div>
         ) : loading ? (
           <div className="space-y-3">
@@ -430,9 +433,7 @@ export default function HistoryPage() {
         ) : filteredEvents.length === 0 ? (
           <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
             <p className="text-brand-muted">
-              {kindFilter !== 'all'
-                ? 'No events match the selected filter.'
-                : 'No on-chain activity found for this wallet.'}
+              {kindFilter !== 'all' ? t('empty.filtered') : t('empty.none')}
             </p>
           </div>
         ) : (
@@ -446,14 +447,14 @@ export default function HistoryPage() {
                   <span
                     className={`mt-0.5 shrink-0 text-xs font-semibold px-2.5 py-1 rounded-lg border ${KIND_COLORS[evt.kind]}`}
                   >
-                    {KIND_LABELS[evt.kind]}
+                    {t(KIND_KEYS[evt.kind])}
                   </span>
 
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                       {evt.invoiceId !== undefined && (
                         <span className="text-sm font-medium">
-                          Invoice #{evt.invoiceId.toString()}
+                          {t('invoice', { id: evt.invoiceId.toString() })}
                         </span>
                       )}
                       {evt.amount !== undefined && (
@@ -463,7 +464,10 @@ export default function HistoryPage() {
                       )}
                       {evt.interest !== undefined && evt.interest > 0n && (
                         <span className="text-xs text-brand-muted">
-                          +{formatUSDC(evt.interest)} {stablecoinLabel(evt.token || USDC_TOKEN_ID)} interest
+                          {t('interest', {
+                            amount: formatUSDC(evt.interest),
+                            symbol: stablecoinLabel(evt.token || USDC_TOKEN_ID),
+                          })}
                         </span>
                       )}
                       {evt.address && evt.kind !== 'invoice_created' && (
@@ -481,7 +485,7 @@ export default function HistoryPage() {
                           rel="noopener noreferrer"
                           className="text-xs text-brand-gold hover:underline"
                         >
-                          View tx ↗
+                          {t('viewTx')}
                         </a>
                       )}
                     </div>
@@ -497,7 +501,7 @@ export default function HistoryPage() {
                   disabled={loadingMore}
                   className="px-6 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-medium hover:border-brand-gold/50 hover:text-brand-gold transition-colors disabled:opacity-50"
                 >
-                  {loadingMore ? 'Loading…' : 'Load more'}
+                  {loadingMore ? t('loading') : t('loadMore')}
                 </button>
               </div>
             )}

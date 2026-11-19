@@ -8,7 +8,7 @@ const mockBuildSetExchangeRateTx = jest.fn();
 const mockSubmitTx = jest.fn();
 const mockSignTransaction = jest.fn();
 
-jest.mock('@/lib/contracts', () => ({
+jest.mock('@/lib/sdk', () => ({
   getAcceptedTokens: (...args: unknown[]) => mockGetAcceptedTokens(...args),
   getExchangeRate: (...args: unknown[]) => mockGetExchangeRate(...args),
   buildSetExchangeRateTx: (...args: unknown[]) => mockBuildSetExchangeRateTx(...args),

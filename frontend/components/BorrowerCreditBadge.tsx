@@ -1,7 +1,7 @@
 'use client';
 
 import useSWR from 'swr';
-import { getFullCreditScore } from '@/lib/contracts';
+import { getFullCreditScore } from '@/lib/sdk';
 
 function band(score: number) {
   if (score >= 800) return ['Excellent', 'text-emerald-400'] as const;

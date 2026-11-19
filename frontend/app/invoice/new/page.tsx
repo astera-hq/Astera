@@ -5,15 +5,8 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
-import { buildCreateInvoiceTx, submitTx, getMaxInvoiceAmount } from '@/lib/contracts';
-import {
-  NETWORK,
-  toStroops,
-  nativeToScVal,
-  Address,
-  xdr,
-  INVOICE_CONTRACT_ID,
-} from '@/lib/stellar';
+import { getMaxInvoiceAmount, getInvoiceClient, sdkSigner } from '@/lib/sdk';
+import { toStroops, nativeToScVal, Address, xdr, INVOICE_CONTRACT_ID } from '@/lib/stellar';
 import { simulateContractCall } from '@/lib/simulateFee';
 import { useTransactionSimulation } from '@/hooks/useTransactionSimulation';
 import EstimatedFee from '@/components/EstimatedFee';
@@ -200,24 +193,15 @@ export default function NewInvoicePage() {
       const dueTimestamp = Math.floor(new Date(form.dueDate).getTime() / 1000);
       const amountStroops = toStroops(parseFloat(form.amount));
 
-      const xdr = await buildCreateInvoiceTx({
+      await getInvoiceClient().createInvoice({
+        signer: await sdkSigner(wallet.address),
         owner: wallet.address,
         debtor: form.debtor,
         amount: amountStroops,
         dueDate: dueTimestamp,
         description: form.description,
         verificationHash: 'frontend-placeholder-hash',
-        metadataUri: form.metadataUri.trim() || undefined,
       });
-
-      const freighter = await import('@stellar/freighter-api');
-      const { signedTxXdr, error: signError } = await freighter.signTransaction(xdr, {
-        networkPassphrase: NETWORK,
-        address: wallet.address,
-      });
-      if (signError) throw new Error(signError.message);
-
-      await submitTx(signedTxXdr);
       toast.success('Invoice tokenized successfully!');
       router.push('/dashboard');
     } catch (e: unknown) {

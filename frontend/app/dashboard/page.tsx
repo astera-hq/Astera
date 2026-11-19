@@ -20,7 +20,7 @@ import {
   getInvoiceMetadata,
   getFundedInvoice,
   getCreditScoreStatus,
-} from '@/lib/contracts';
+} from '@/lib/sdk';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice, InvoiceMetadata } from '@/lib/types';
 import { filterInvoicesByStatuses } from '@/lib/dashboardFilters';
