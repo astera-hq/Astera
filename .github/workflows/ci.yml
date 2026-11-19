@@ -57,7 +57,7 @@ jobs:
         timeout-minutes: 15
         run: cargo llvm-cov --workspace --lcov --output-path contracts-lcov.info
       - name: Upload contracts coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: contracts-lcov.info
           flags: contracts
@@ -157,7 +157,7 @@ jobs:
       - name: Frontend tests with coverage
         run: npm test -- --coverage --coverageReporters=lcov
       - name: Upload frontend coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: frontend/coverage/lcov.info
           flags: frontend
