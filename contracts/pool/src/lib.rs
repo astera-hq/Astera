@@ -2695,7 +2695,15 @@ impl FundingPool {
         // cover this withdrawal — otherwise the accounting step could
         // succeed while the token transfer later fails, burning the
         // investor's shares without paying them out.
-        let available_liquidity = tt.pool_value - tt.total_deployed;
+        // #1636: liquidity reserved for queued withdrawal requests is not available to a
+        // direct withdraw, so the FIFO queue keeps its claim on partially restored liquidity.
+        let reserved_for_queue =
+            Self::queued_withdrawal_reserve(&env, &token, tt.pool_value, total_shares)?;
+        let available_liquidity = tt
+            .pool_value
+            .checked_sub(tt.total_deployed)
+            .and_then(|value| value.checked_sub(reserved_for_queue))
+            .ok_or(PoolError::AmountOverflow)?;
         if available_liquidity < usdc_amount {
             return Err(PoolError::InsufficientLiquidity);
         }
@@ -3071,6 +3079,31 @@ impl FundingPool {
             .checked_mul(pool_value)
             .and_then(|value| value.checked_div(total_shares))
             .ok_or(PoolError::AmountOverflow)
+    }
+
+    /// #1636: USDC value reserved for every request still in the withdrawal queue for
+    /// `token`, valued the same way process_withdrawal_queue values them. A partially
+    /// served head keeps only its remaining shares in the queue, so it is counted at
+    /// that remainder.
+    fn queued_withdrawal_reserve(
+        env: &Env,
+        token: &Address,
+        pool_value: i128,
+        total_shares: i128,
+    ) -> PoolResult<i128> {
+        let queue: Vec<WithdrawalRequest> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WithdrawalQueue(token.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut reserved: i128 = 0;
+        for request in queue.iter() {
+            let amount = Self::withdrawal_amount(request.shares, pool_value, total_shares)?;
+            reserved = reserved
+                .checked_add(amount)
+                .ok_or(PoolError::AmountOverflow)?;
+        }
+        Ok(reserved)
     }
 
     fn burn_withdrawal_shares(env: &Env, share_token: &Address, investor: Address, shares: i128) {
@@ -12770,6 +12803,115 @@ mod test {
         assert_eq!(queue.len(), 2);
         assert_eq!(queue.get(0).unwrap().shares, 5_000);
         assert_eq!(queue.get(1).unwrap().shares, 5_000);
+    }
+
+    // ── #1636: queued withdrawals are reserved against direct withdraw ─────────
+
+    #[test]
+    fn test_queued_withdrawal_served_before_later_direct_withdraw() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, share_token) = setup(&env);
+        let alice = Address::generate(&env);
+        let carol = Address::generate(&env);
+        let dave = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &alice, 10_000);
+        mint(&env, &usdc_id, &carol, 5_000);
+        mint(&env, &usdc_id, &dave, 2_000);
+        client.deposit(&alice, &usdc_id, &10_000, &None);
+        client.deposit(&carol, &usdc_id, &5_000, &None);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &10_000,
+            &sme,
+            &(env.ledger().timestamp() + SECS_PER_DAY),
+            &usdc_id,
+        );
+        // pool 15_000, deployed 10_000 -> 5_000 liquid
+        assert_eq!(client.available_liquidity(&usdc_id), 5_000);
+
+        // alice's 10_000 shares exceed the 5_000 liquid, so her request is queued.
+        client.request_withdrawal(&alice, &usdc_id, &10_000);
+        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 1);
+
+        // carol's 3_000 fits in the 5_000 liquid, but alice's queued 10_000 is reserved.
+        let result = client.try_withdraw(&carol, &usdc_id, &3_000);
+        assert_eq!(result, Err(Ok(PoolError::InsufficientLiquidity)));
+
+        // dave's deposit partially restores liquidity to 7_000. The queue is served
+        // first: alice receives 7_000 and keeps 3_000 shares queued at the head.
+        client.deposit(&dave, &usdc_id, &2_000, &None);
+        let queue = client.get_withdrawal_queue(&usdc_id);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.get(0).unwrap().investor, alice);
+        assert_eq!(queue.get(0).unwrap().shares, 3_000);
+        assert_eq!(token::Client::new(&env, &usdc_id).balance(&alice), 7_000);
+
+        // Only the queued remainder is reserved now, and no liquidity is left over,
+        // so carol's direct withdraw is still rejected and her shares stay intact.
+        let result = client.try_withdraw(&carol, &usdc_id, &3_000);
+        assert_eq!(result, Err(Ok(PoolError::InsufficientLiquidity)));
+        assert_eq!(token::Client::new(&env, &share_token).balance(&carol), 5_000);
+    }
+
+    #[test]
+    fn test_direct_withdraw_proceeds_when_queue_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, share_token) = setup(&env);
+        let investor = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 0);
+
+        client.withdraw(&investor, &usdc_id, &4_000);
+
+        assert_eq!(token::Client::new(&env, &usdc_id).balance(&investor), 4_000);
+        assert_eq!(
+            token::Client::new(&env, &share_token).balance(&investor),
+            6_000
+        );
+    }
+
+    #[test]
+    fn test_direct_withdraw_proceeds_with_liquidity_beyond_queued_total() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let alice = Address::generate(&env);
+        let carol = Address::generate(&env);
+        let dave = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &alice, 10_000);
+        mint(&env, &usdc_id, &carol, 5_000);
+        mint(&env, &usdc_id, &dave, 20_000);
+        client.deposit(&alice, &usdc_id, &10_000, &None);
+        client.deposit(&carol, &usdc_id, &5_000, &None);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &10_000,
+            &sme,
+            &(env.ledger().timestamp() + SECS_PER_DAY),
+            &usdc_id,
+        );
+        client.request_withdrawal(&alice, &usdc_id, &10_000);
+        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 1);
+
+        // dave's 20_000 lifts liquidity to 25_000, well beyond alice's queued 10_000.
+        // The queue drains in full, and the remaining 15_000 liquidity is free for
+        // carol's direct withdraw.
+        client.deposit(&dave, &usdc_id, &20_000, &None);
+        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 0);
+        assert_eq!(token::Client::new(&env, &usdc_id).balance(&alice), 10_000);
+
+        client.withdraw(&carol, &usdc_id, &3_000);
+        assert_eq!(token::Client::new(&env, &usdc_id).balance(&carol), 3_000);
     }
 
     #[test]
