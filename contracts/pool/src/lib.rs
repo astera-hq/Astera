@@ -661,6 +661,7 @@ pub enum DataKey {
     // #865: per-token index of every invoice_id ever funded, so liquidity forecasting and
     // wait estimation can enumerate open invoices without assuming caller-supplied
     // invoice_ids are a dense sequential range (they are not — see fund_invoice_request).
+    // #1645: legacy single-entry form, read-only. New ids are written to InvoiceIndexKey pages.
     TokenInvoiceIds(Address),
     // #865: deposit-inflow ring buffer (token -> current length / start index), mirroring
     // the credit_score contract's PaymentHistory pattern. Instance storage: small, hot.
@@ -1580,15 +1581,62 @@ fn trailing_inflow_rate_per_sec(env: &Env, token: &Address) -> i128 {
     total / elapsed as i128
 }
 
+// #1645: the per-token invoice index is stored as fixed-size pages so that no
+// single persistent entry grows without bound. Page `n` holds the ids at
+// positions `n * TOKEN_INVOICE_ID_PAGE_SIZE .. (n + 1) * TOKEN_INVOICE_ID_PAGE_SIZE`.
+// Kept in its own key enum because `DataKey` is at the #[contracttype] union's
+// 50-case cap.
+const TOKEN_INVOICE_ID_PAGE_SIZE: u32 = 200;
+
+#[contracttype]
+#[derive(Clone)]
+pub enum InvoiceIndexKey {
+    /// token -> total number of invoice ids recorded for that token
+    Count(Address),
+    /// (token, page index) -> up to TOKEN_INVOICE_ID_PAGE_SIZE invoice ids
+    Page(Address, u32),
+}
+
 fn record_funded_invoice_id(env: &Env, token: &Address, invoice_id: u64) {
-    let key = DataKey::TokenInvoiceIds(token.clone());
+    let count_key = InvoiceIndexKey::Count(token.clone());
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let page_key = InvoiceIndexKey::Page(token.clone(), count / TOKEN_INVOICE_ID_PAGE_SIZE);
+    let mut page: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&page_key)
+        .unwrap_or(Vec::new(env));
+    page.push_back(invoice_id);
+    env.storage().persistent().set(&page_key, &page);
+    env.storage().persistent().set(&count_key, &(count + 1));
+}
+
+// Returns every invoice id recorded for `token`, in funding order. Ids written
+// before paging existed live under the legacy `DataKey::TokenInvoiceIds` entry
+// and are returned first; paged ids follow.
+fn load_token_invoice_ids(env: &Env, token: &Address) -> Vec<u64> {
     let mut ids: Vec<u64> = env
         .storage()
         .persistent()
-        .get(&key)
+        .get(&DataKey::TokenInvoiceIds(token.clone()))
         .unwrap_or(Vec::new(env));
-    ids.push_back(invoice_id);
-    env.storage().persistent().set(&key, &ids);
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&InvoiceIndexKey::Count(token.clone()))
+        .unwrap_or(0);
+    let pages = count.div_ceil(TOKEN_INVOICE_ID_PAGE_SIZE);
+    for page_index in 0..pages {
+        let page: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&InvoiceIndexKey::Page(token.clone(), page_index))
+            .unwrap_or(Vec::new(env));
+        for invoice_id in page.iter() {
+            ids.push_back(invoice_id);
+        }
+    }
+    ids
 }
 
 fn calculate_reward_delta(total_interest: i128, total_shares: i128) -> PoolResult<i128> {
@@ -2344,11 +2392,7 @@ impl FundingPool {
         // (TokenInvoiceIds), instead of scanning every funded invoice ever recorded
         // across all tokens — total_funded_invoices only ever grows, so the old scan
         // became prohibitively expensive as the pool's lifetime invoice count grew.
-        let token_invoice_ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TokenInvoiceIds(token.clone()))
-            .unwrap_or(Vec::new(env));
+        let token_invoice_ids: Vec<u64> = load_token_invoice_ids(env, token);
 
         for i in 0..token_invoice_ids.len() {
             let invoice_id = token_invoice_ids.get(i).ok_or(PoolError::StorageCorrupted)?;
@@ -2987,11 +3031,7 @@ impl FundingPool {
     }
 
     pub fn get_open_invoices_for_token(env: Env, token: Address) -> Vec<FundedInvoice> {
-        let ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TokenInvoiceIds(token.clone()))
-            .unwrap_or(Vec::new(&env));
+        let ids: Vec<u64> = load_token_invoice_ids(&env, &token);
         let mut open = Vec::new(&env);
         for invoice_id in ids.iter() {
             if let Some(record) = env
