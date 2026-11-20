@@ -231,6 +231,10 @@ const MAX_CO_FUNDING_PARTICIPANTS: u32 = 20;
 // time (request_withdrawal rejects a second with AlreadyQueuedForWithdrawal), so this is
 // effectively a cap on the number of distinct investors queued at once.
 const DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH: u32 = 500;
+// #1639: late-payment interest is off by default (0 bps); the accrual window
+// defaults to 90 days past due_date.
+const DEFAULT_LATE_INTEREST_BPS: u32 = 0;
+const DEFAULT_LATE_INTEREST_MAX_SECS: u64 = 90 * SECS_PER_DAY;
 // #865: fixed-size ring buffer capacity for the trailing deposit-inflow rate used by
 // estimate_withdrawal_wait/get_liquidity_forecast, mirroring the credit_score contract's
 // PaymentHistory rolling-window pattern.
@@ -348,6 +352,12 @@ pub struct PoolConfig {
     pub max_withdrawal_queue_age_days: u32,
     // #865: global cap on outstanding withdrawal-queue entries per token (0 = unlimited).
     pub max_withdrawal_queue_depth: u32,
+    // #1639: simple late-payment interest (bps, on principal) accrued from due_date
+    // until repayment. 0 = disabled.
+    pub late_interest_bps: u32,
+    // #1639: maximum seconds past due_date over which late interest accrues
+    // (grace period plus default window). Late accrual stops at this cap.
+    pub late_interest_max_secs: u64,
 }
 
 #[contracttype]
@@ -1379,12 +1389,27 @@ fn calculate_total_due(
     // #863: interest accrues at the rate locked in when the invoice was
     // funded (curve output at funding-time utilization, or the static
     // yield_bps fallback) — never the current live rate.
-    let total_interest = calculate_interest(
+    let mut total_interest = calculate_interest(
         record.principal as u128,
         record.locked_yield_bps,
         elapsed_secs,
         config.compound_interest,
     )?;
+    // #1639: late-payment interest accrues from due_date to `now`, capped at
+    // late_interest_max_secs past due_date. Simple interest on principal.
+    if now > record.due_date && config.late_interest_bps > 0 {
+        let late_end = now.min(record.due_date.saturating_add(config.late_interest_max_secs));
+        let late_secs = late_end - record.due_date;
+        let late_interest = calculate_interest(
+            record.principal as u128,
+            config.late_interest_bps,
+            late_secs,
+            false,
+        )?;
+        total_interest = total_interest
+            .checked_add(late_interest)
+            .ok_or(PoolError::AmountOverflow)?;
+    }
     let total_interest_i128 = u128_to_i128(total_interest)?;
     let total_due = record
         .principal
@@ -2081,6 +2106,8 @@ impl FundingPool {
             utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
             max_withdrawal_queue_age_days: DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS,
             max_withdrawal_queue_depth: DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH,
+            late_interest_bps: DEFAULT_LATE_INTEREST_BPS,
+            late_interest_max_secs: DEFAULT_LATE_INTEREST_MAX_SECS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -2548,6 +2575,9 @@ impl FundingPool {
 
         Self::non_reentrant_end(&env);
 
+        // #1640: a deposit changes pool_value, so utilization moves — record a sample.
+        record_rate_snapshot(&env, &token);
+
         env.events().publish(
             (EVT, symbol_short!("deposit")),
             (
@@ -2693,6 +2723,9 @@ impl FundingPool {
 
         Self::non_reentrant_end(&env); // <- ADD GUARD END
 
+        // #1640: a withdrawal changes pool_value, so utilization moves — record a sample.
+        record_rate_snapshot(&env, &token);
+
         env.events().publish(
             (EVT, symbol_short!("withdraw")),
             (investor, token, amount, shares, now),
@@ -2731,13 +2764,10 @@ impl FundingPool {
             }
         }
 
-        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        let position: InvestorPosition = env
-            .storage()
-            .persistent()
-            .get(&investor_pos_key)
-            .unwrap_or_default();
-        if shares > position.available {
+        // Transfers move share tokens without touching pool-side `available`, so
+        // the share-token balance is the source of truth. Queued requests were
+        // rejected above, so no shares are held out of the balance here.
+        if shares > share_balance_of(&env, &token, &investor)? {
             return Err(PoolError::WithdrawalExceedsLimit);
         }
 
@@ -2917,13 +2947,7 @@ impl FundingPool {
         // Shares are held out of `available` while queued, so growing the request
         // must draw from it and shrinking must return the difference.
         let delta = new_shares - request.shares;
-        let pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
-        let position: InvestorPosition = env
-            .storage()
-            .persistent()
-            .get(&pos_key)
-            .unwrap_or_default();
-        if delta > 0 && position.available < delta {
+        if new_shares > share_balance_of(&env, &token, &investor)? {
             return Err(PoolError::WithdrawalExceedsLimit);
         }
         update_investor_available(&env, &investor, &token, -delta)?;
@@ -3261,8 +3285,11 @@ impl FundingPool {
 
         env.storage().persistent().set(&queue_key, &remaining_queue);
 
-        let token_totals_key = DataKey::TokenTotals(token);
+        let token_totals_key = DataKey::TokenTotals(token.clone());
         env.storage().instance().set(&token_totals_key, &tt);
+
+        // #1640: queued payouts change pool_value / deployed capital — record a sample.
+        record_rate_snapshot(env, &token);
 
         Ok(())
     }
@@ -3799,6 +3826,9 @@ impl FundingPool {
         // #863: a repayment changes utilization (deployed capital and/or pool
         // value) — record a rate sample for the history chart.
         record_rate_snapshot(env, &token);
+        // #1641: repayments return cash to the pool, so they count toward the
+        // trailing inflow rate used by withdrawal wait forecasts, like deposits do.
+        record_inflow_event(env, &token, actual_payment);
 
         if fully_repaid {
             // #217: Process withdrawal queue after repayment
@@ -6075,6 +6105,35 @@ impl FundingPool {
         Ok(())
     }
 
+    /// #1639: admin-set late-payment interest rate (bps). 0 disables.
+    pub fn set_late_interest_bps(env: Env, admin: Address, bps: u32) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config = get_config_cached(&env)?;
+        config.late_interest_bps = bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("late_bps")), (admin, bps));
+        Ok(())
+    }
+
+    /// #1639: admin-set cap (seconds past due_date) on late-interest accrual.
+    pub fn set_late_interest_max_secs(env: Env, admin: Address, secs: u64) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut config = get_config_cached(&env)?;
+        config.late_interest_max_secs = secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("late_cap")), (admin, secs));
+        Ok(())
+    }
+
     pub fn set_max_withdrawal_queue_depth(
         env: Env,
         admin: Address,
@@ -7208,6 +7267,8 @@ impl FundingPool {
         })
     }
 
+    /// #1639: the estimate includes late-payment interest accrued past due_date
+    /// (late_interest_bps, capped at late_interest_max_secs).
     pub fn estimate_repayment(
         env: Env,
         invoice_id: u64,
@@ -8471,6 +8532,14 @@ mod test {
                     .set(&symbol_short!("tot"), &(t - amount));
                 env.storage().persistent().set(&from, &(b - amount));
             }
+            pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+                let from_balance = Self::balance(env.clone(), from.clone());
+                let to_balance = Self::balance(env.clone(), to.clone());
+                env.storage()
+                    .persistent()
+                    .set(&from, &(from_balance - amount));
+                env.storage().persistent().set(&to, &(to_balance + amount));
+            }
         }
     }
     pub use dummy_share_contract::DummyShare;
@@ -8915,6 +8984,39 @@ mod test {
         assert_eq!(tt.pool_value, principal);
         assert!(tt.reward_per_share > 0);
         assert_eq!(tt.total_paid_out, principal + expected_interest);
+    }
+
+    // #1641: a repayment returns liquidity to the pool and must raise the trailing
+    // inflow rate, otherwise withdrawal wait forecasts overestimate wait times.
+    #[test]
+    fn test_repayment_raises_trailing_inflow_rate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let principal: i128 = 1_000_000_000;
+
+        mint(&env, &usdc_id, &investor, principal);
+        mint(&env, &usdc_id, &sme, principal * 2);
+        client.deposit(&investor, &usdc_id, &principal, &None);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + SECS_PER_YEAR),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += SECS_PER_YEAR);
+        let rate_before = client.get_trailing_inflow_rate(&usdc_id);
+
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        let rate_after = client.get_trailing_inflow_rate(&usdc_id);
+        assert!(rate_after > rate_before);
     }
 
     #[test]
@@ -11094,6 +11196,77 @@ mod test {
     }
 
     #[test]
+    fn test_late_interest_disabled_keeps_repayment_flat_after_due() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 20_000);
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
+        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &due_date, &usdc_id);
+
+        env.ledger().with_mut(|l| l.timestamp = due_date);
+        let on_time = client.estimate_repayment(&1u64, &None);
+        env.ledger()
+            .with_mut(|l| l.timestamp = due_date + 30 * SECS_PER_DAY);
+        let late = client.estimate_repayment(&1u64, &None);
+
+        assert_eq!(on_time, late);
+    }
+
+    #[test]
+    fn test_late_interest_accrues_after_due_date() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 20_000);
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
+        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &due_date, &usdc_id);
+        client.set_late_interest_bps(&admin, &1_000u32);
+
+        env.ledger().with_mut(|l| l.timestamp = due_date);
+        let on_time = client.estimate_repayment(&1u64, &None);
+        env.ledger()
+            .with_mut(|l| l.timestamp = due_date + 30 * SECS_PER_DAY);
+        let late = client.estimate_repayment(&1u64, &None);
+
+        // 5_000 principal at 10% simple over 30 days = 41 (half-up).
+        assert_eq!(late - on_time, 41);
+    }
+
+    #[test]
+    fn test_late_interest_stops_at_max_secs_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 20_000);
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
+        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &due_date, &usdc_id);
+        client.set_late_interest_bps(&admin, &1_000u32);
+        client.set_late_interest_max_secs(&admin, &(30 * SECS_PER_DAY));
+
+        env.ledger().with_mut(|l| l.timestamp = due_date);
+        let on_time = client.estimate_repayment(&1u64, &None);
+        env.ledger()
+            .with_mut(|l| l.timestamp = due_date + 365 * SECS_PER_DAY);
+        let very_late = client.estimate_repayment(&1u64, &None);
+
+        // Accrual is capped at 30 days past due, so the late portion is still 41.
+        assert_eq!(very_late - on_time, 41);
+    }
+
+    #[test]
     fn test_total_due_overflow_returns_amount_overflow() {
         let env = Env::default();
         let token = Address::generate(&env);
@@ -11132,6 +11305,8 @@ mod test {
             utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
             max_withdrawal_queue_age_days: DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS,
             max_withdrawal_queue_depth: DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH,
+            late_interest_bps: DEFAULT_LATE_INTEREST_BPS,
+            late_interest_max_secs: DEFAULT_LATE_INTEREST_MAX_SECS,
         };
 
         assert_eq!(
@@ -12379,6 +12554,43 @@ mod test {
     }
 
     #[test]
+    fn test_queued_withdrawal_from_share_transferee_uses_share_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &investor, 10_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000, &None);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &10_000,
+            &sme,
+            &(env.ledger().timestamp() + 86400),
+            &usdc_id,
+        );
+
+        // Peer-to-peer transfer moves share tokens but not pool-side `available`.
+        soroban_sdk::token::Client::new(&env, &share_token).transfer(&investor, &recipient, &5_000);
+
+        // The recipient holds the shares, so a queued withdrawal is accepted.
+        let request_id = client.request_withdrawal(&recipient, &usdc_id, &5_000);
+        assert!(request_id > 0);
+        let queue = client.get_withdrawal_queue(&usdc_id);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.get(0).unwrap().investor, recipient);
+
+        // The sender no longer holds 6_000 shares, so the larger request is rejected.
+        assert!(client
+            .try_request_withdrawal(&investor, &usdc_id, &6_000)
+            .is_err());
+    }
+
+    #[test]
     fn test_withdrawal_request_counter_preserves_queue() {
         let env = Env::default();
         env.mock_all_auths();
@@ -12434,6 +12646,51 @@ mod test {
             client.try_cancel_withdrawal_request(&investor, &usdc_id),
             Err(Ok(PoolError::WithdrawalRequestNotFound))
         );
+    }
+
+    #[test]
+    fn test_deposit_records_rate_snapshot() {
+        // #1640: a deposit that moves utilization must append a new rate snapshot.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint(&env, &usdc_id, &alice, 10_000);
+        mint(&env, &usdc_id, &bob, 10_000);
+        mint(&env, &usdc_id, &sme, 20_000);
+        client.deposit(&alice, &usdc_id, &10_000, &None);
+
+        // Configure a rate model (propose, wait out the timelock, execute).
+        env.ledger().with_mut(|l| l.timestamp += 400 * SECS_PER_DAY);
+        client.propose_rate_model_change(
+            &admin,
+            &usdc_id,
+            &RateModelConfig {
+                base_rate_bps: 200,
+                optimal_utilization_bps: 8_000,
+                slope1_bps: 500,
+                slope2_bps: 5_000,
+                max_rate_bps: 10_000,
+            },
+        );
+        env.ledger().with_mut(|l| l.timestamp += 400 * SECS_PER_DAY);
+        client.execute_rate_model_change(&usdc_id);
+
+        // Deploy capital so utilization is non-zero.
+        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
+        client.fund_invoice(&admin, &1u64, &10_000, &sme, &due_date, &usdc_id);
+        let before = client.get_rate_history(&usdc_id, &100).len();
+
+        // Second deposit doubles pool_value, so utilization drops (10000 -> 5000 bps).
+        client.deposit(&bob, &usdc_id, &10_000, &None);
+
+        let history = client.get_rate_history(&usdc_id, &100);
+        assert_eq!(history.len(), before + 1);
+        let latest = history.get(history.len() - 1).unwrap();
+        assert_eq!(latest.utilization_bps, 5_000);
     }
 
     #[test]
