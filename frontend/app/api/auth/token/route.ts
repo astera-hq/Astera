@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { TransactionBuilder, Networks, Keypair, StrKey } from '@stellar/stellar-sdk';
 import { SignJWT } from 'jose';
 import { getSep10Secret, SEP10_AUDIENCE, SEP10_ISSUER, SEP10_TTL_SECONDS, sep10Key } from '@/lib/sep10-jwt';
+import { checkRateLimit, getClientIdentifier, getRateLimitHeaders } from '@/lib/rateLimiter';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,6 +17,16 @@ function badRequest(msg = 'invalid') {
 }
 
 export async function POST(request: Request) {
+  const identifier = getClientIdentifier(request);
+  const rateLimitResult = checkRateLimit(identifier, { maxRequests: 10, windowMs: 60_000 });
+
+  if (!rateLimitResult.allowed) {
+    return NextResponse.json(
+      { error: 'Too many requests' },
+      { status: 429, headers: getRateLimitHeaders(rateLimitResult) },
+    );
+  }
+
   if (!JWT_SECRET || !SERVER_SEED)
     return NextResponse.json({ error: 'server_not_configured' }, { status: 500 });
 
@@ -24,13 +35,9 @@ export async function POST(request: Request) {
   if (!signedXdr) return badRequest('missing_signed_xdr');
 
   try {
-    // Parse transaction envelope
     const tx = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
     const txHash = tx.hash();
 
-    // Verify signatures: must contain a signature from the client pubkey
-    // Extract all potential signers (signatures) and try verifying with claimed public key
-    // The client public key is in the operation source (manageData.source)
     const ops = tx.operations || [];
     let clientAccount: string | null = null;
     for (const op of ops) {
@@ -42,7 +49,6 @@ export async function POST(request: Request) {
     if (!clientAccount || !StrKey.isValidEd25519PublicKey(clientAccount))
       return badRequest('invalid_challenge');
 
-    // Verify at least one signature matches clientAccount
     const clientKeypair = Keypair.fromPublicKey(clientAccount);
     const sigs = tx.signatures || [];
     let clientSigned = false;
@@ -59,7 +65,6 @@ export async function POST(request: Request) {
 
     if (!clientSigned) return NextResponse.json({ error: 'invalid_signature' }, { status: 401 });
 
-    // Issue JWT
     const now = Math.floor(Date.now() / 1000);
     const exp = now + SEP10_TTL_SECONDS;
 
@@ -73,7 +78,10 @@ export async function POST(request: Request) {
       .setExpirationTime(exp)
       .sign(algSecret);
 
-    return NextResponse.json({ token, expires_at: exp });
+    return NextResponse.json(
+      { token, expires_at: exp },
+      { headers: getRateLimitHeaders(rateLimitResult) },
+    );
   } catch (err: unknown) {
     console.error('[SEP-0010] token error', err);
     return NextResponse.json({ error: 'invalid_request' }, { status: 400 });

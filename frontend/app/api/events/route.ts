@@ -142,7 +142,7 @@ export async function GET(request: NextRequest) {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  const account = consumeTicket(ticket);
+  const account = await consumeTicket(ticket);
   if (!account) {
     return new Response('Unauthorized', { status: 401 });
   }

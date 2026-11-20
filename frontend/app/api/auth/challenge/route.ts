@@ -1,12 +1,6 @@
 import { NextResponse } from 'next/server';
-import {
-  Account,
-  Keypair,
-  TransactionBuilder,
-  Networks,
-  BASE_FEE,
-  Operation,
-} from '@stellar/stellar-sdk';
+import { TransactionBuilder, Networks, Keypair, BASE_FEE, Operation, Account } from '@stellar/stellar-sdk';
+import { checkRateLimit, getClientIdentifier, getRateLimitHeaders } from '@/lib/rateLimiter';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +17,16 @@ function randomNonce(len = 24) {
 }
 
 export async function POST(request: Request) {
+  const identifier = getClientIdentifier(request);
+  const rateLimitResult = checkRateLimit(identifier, { maxRequests: 10, windowMs: 60_000 });
+
+  if (!rateLimitResult.allowed) {
+    return NextResponse.json(
+      { error: 'Too many requests' },
+      { status: 429, headers: getRateLimitHeaders(rateLimitResult) },
+    );
+  }
+
   if (!SERVER_SEED) {
     return NextResponse.json({ error: 'Server not configured' }, { status: 500 });
   }
@@ -36,7 +40,6 @@ export async function POST(request: Request) {
   try {
     const serverKey = Keypair.fromSecret(SERVER_SEED);
 
-    // Build a challenge transaction per SEP-0010: server -> client ManageData
     const serverAccount = new Account(serverKey.publicKey(), '0');
 
     const tx = new TransactionBuilder(serverAccount, {
@@ -54,16 +57,18 @@ export async function POST(request: Request) {
       .setTimeout(300)
       .build();
 
-    // Sign with server key so the client can present their signature later
     tx.sign(serverKey);
 
     const envelope = tx.toEnvelope().toXDR('base64');
 
-    return NextResponse.json({
-      transaction: envelope,
-      network_passphrase: NETWORK_PASSPHRASE,
-      server_account: serverKey.publicKey(),
-    });
+    return NextResponse.json(
+      {
+        transaction: envelope,
+        network_passphrase: NETWORK_PASSPHRASE,
+        server_account: serverKey.publicKey(),
+      },
+      { headers: getRateLimitHeaders(rateLimitResult) },
+    );
   } catch (err: unknown) {
     console.error('[SEP-0010] challenge error', err);
     return NextResponse.json({ error: 'server_error' }, { status: 500 });
