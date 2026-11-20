@@ -1341,7 +1341,19 @@ fn calculate_pending_yield(
             .get(&DataKey::InvestorPosition(investor.clone(), token.clone()))
             .unwrap_or_default();
         let config = get_config_cached(env)?;
-        if config.yield_bps > 0 {
+        // #1637: the bonus is a fraction of the yield being paid out. When a rate
+        // model prices the pool, that yield accrues at the curve rate (not the
+        // static yield_bps, which may be 0), so use the curve rate as the base.
+        // Without a rate model this is config.yield_bps, so the value is unchanged.
+        let realised_bps = match env
+            .storage()
+            .instance()
+            .get::<DataKey, RateModelConfig>(&DataKey::RateModel(token.clone()))
+        {
+            Some(model) => compute_current_rate(utilization_bps(totals), &model),
+            None => config.yield_bps,
+        };
+        if realised_bps > 0 {
             let tiers = get_loyalty_tiers_cached(env);
             let days_active = loyalty_days_active(env, position.loyalty_start_at);
             let (_, bonus_bps, _) = resolve_loyalty_tier(&tiers, days_active);
@@ -1349,7 +1361,7 @@ fn calculate_pending_yield(
                 bonus = claimable
                     .checked_mul(bonus_bps as i128)
                     .ok_or(PoolError::AmountOverflow)?
-                    .checked_div(config.yield_bps as i128)
+                    .checked_div(realised_bps as i128)
                     .ok_or(PoolError::AmountOverflow)?
                     .min(totals.protocol_revenue)
                     .max(0);
@@ -9496,6 +9508,144 @@ mod test {
         let protocol_revenue_after = client.get_protocol_revenue(&usdc_id);
         assert!(protocol_revenue_after < protocol_revenue_before);
         assert!(claimed > 0);
+    }
+
+    // #1637: builds one funded-and-repaid invoice for a single investor, with an
+    // optional constant rate model (slopes 0, so the rate is `base_rate_bps` at any
+    // utilization) and an explicit static `yield_bps`. Returns the investor and token.
+    fn setup_loyalty_bonus_scenario(
+        env: &Env,
+        client: &FundingPoolClient<'_>,
+        admin: &Address,
+        usdc_id: &Address,
+        static_yield_bps: u32,
+        curve_base_bps: Option<u32>,
+    ) -> Address {
+        let investor = Address::generate(env);
+        let sme = Address::generate(env);
+        let principal: i128 = 1_000_000_000;
+        mint(env, usdc_id, &investor, principal);
+        mint(env, usdc_id, &sme, principal * 2);
+
+        client.set_factoring_fee(admin, &250); // funds protocol_revenue for the bonus
+        env.as_contract(&client.address, || {
+            let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+            config.yield_bps = static_yield_bps;
+            env.storage().instance().set(&DataKey::Config, &config);
+            if let Some(base) = curve_base_bps {
+                let model = RateModelConfig {
+                    base_rate_bps: base,
+                    optimal_utilization_bps: BPS_DENOM,
+                    slope1_bps: 0,
+                    slope2_bps: 0,
+                    max_rate_bps: BPS_DENOM,
+                };
+                env.storage()
+                    .instance()
+                    .set(&DataKey::RateModel(usdc_id.clone()), &model);
+            }
+        });
+
+        client.deposit(&investor, usdc_id, &principal, &None);
+        client.fund_invoice(
+            admin,
+            &1u64,
+            &principal,
+            &sme,
+            &(env.ledger().timestamp() + 30 * 86_400),
+            usdc_id,
+        );
+        // Tier 3 (+150 bps) before the yield is realised.
+        env.ledger().with_mut(|l| l.timestamp += 100 * SECS_PER_DAY);
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+        investor
+    }
+
+    // #1637: (claimable, bonus) as claim_yield would compute them for `investor`.
+    fn pending_yield_and_bonus(
+        env: &Env,
+        client: &FundingPoolClient<'_>,
+        investor: &Address,
+        token: &Address,
+    ) -> (i128, i128) {
+        env.as_contract(&client.address, || {
+            let tt: PoolTokenTotals = env
+                .storage()
+                .instance()
+                .get(&DataKey::TokenTotals(token.clone()))
+                .unwrap_or_default();
+            let (claimable, bonus, _) =
+                calculate_pending_yield(env, investor, token, &tt).unwrap();
+            (claimable, bonus)
+        })
+    }
+
+    #[test]
+    fn test_loyalty_bonus_paid_with_rate_model_when_static_yield_is_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = setup_loyalty_bonus_scenario(
+            &env,
+            &client,
+            &admin,
+            &usdc_id,
+            0,
+            Some(1_200),
+        );
+
+        let (claimable, bonus) = pending_yield_and_bonus(&env, &client, &investor, &usdc_id);
+        assert!(claimable > 0);
+        // Curve rate 1200 bps is the base, so the bonus is claimable * 150 / 1200.
+        assert_eq!(bonus, claimable * 150 / 1_200);
+        assert!(bonus > 0);
+    }
+
+    #[test]
+    fn test_loyalty_bonus_is_fraction_of_claimable_at_curve_rate_above_static() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = setup_loyalty_bonus_scenario(
+            &env,
+            &client,
+            &admin,
+            &usdc_id,
+            800,
+            Some(1_200),
+        );
+
+        let (claimable, bonus) = pending_yield_and_bonus(&env, &client, &investor, &usdc_id);
+        assert!(claimable > 0);
+        assert_eq!(bonus, claimable * 150 / 1_200);
+        // The old static-rate scaling would have overpaid against the 800 bps base.
+        assert!(bonus < claimable * 150 / 800);
+    }
+
+    #[test]
+    fn test_loyalty_bonus_unchanged_without_rate_model() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = setup_loyalty_bonus_scenario(&env, &client, &admin, &usdc_id, 800, None);
+
+        let (claimable, bonus) = pending_yield_and_bonus(&env, &client, &investor, &usdc_id);
+        assert!(claimable > 0);
+        // No curve: identical to the pre-#1637 value claimable * bonus_bps / yield_bps.
+        assert_eq!(bonus, claimable * 150 / 800);
+    }
+
+    #[test]
+    fn test_loyalty_bonus_zero_when_no_rate_is_active() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = setup_loyalty_bonus_scenario(&env, &client, &admin, &usdc_id, 0, None);
+
+        let (claimable, bonus) = pending_yield_and_bonus(&env, &client, &investor, &usdc_id);
+        assert_eq!(bonus, 0);
+        assert!(claimable >= 0);
     }
 
     // #799: referral program integration — the pool contract pays a
