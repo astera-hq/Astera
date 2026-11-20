@@ -3687,11 +3687,6 @@ impl FundingPool {
             .get(&funded_invoice_key)
             .ok_or(PoolError::InvoiceNotFound)?;
 
-        // #536: only the invoice's borrower (SME) may repay their own invoice
-        if payer != record.sme {
-            return Err(PoolError::Unauthorized);
-        }
-
         let now = env.ledger().timestamp();
         let (total_interest, total_due) = calculate_total_due(&record, &config, now)?;
         let total_interest_i128 = u128_to_i128(total_interest)?;
