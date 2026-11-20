@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
-import { TransactionBuilder, Networks, Keypair, StrKey } from '@stellar/stellar-sdk';
+import { TransactionBuilder, Networks, Keypair, StrKey, Utils } from '@stellar/stellar-sdk';
 import { SignJWT } from 'jose';
 import { getSep10Secret, SEP10_AUDIENCE, SEP10_ISSUER, SEP10_TTL_SECONDS, sep10Key } from '@/lib/sep10-jwt';
 import { checkRateLimit, getClientIdentifier, getRateLimitHeaders } from '@/lib/rateLimiter';
+import { markNonceUsed } from '@/lib/nonce-store';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,6 +12,9 @@ const NETWORK_PASSPHRASE =
 
 const JWT_SECRET = getSep10Secret();
 const SERVER_SEED = process.env.SEP10_SERVER_SEED;
+const HOME_DOMAIN = process.env.NEXT_PUBLIC_APP_URL 
+  ? new URL(process.env.NEXT_PUBLIC_APP_URL).hostname 
+  : 'localhost';
 
 function badRequest(msg = 'invalid') {
   return NextResponse.json({ error: msg }, { status: 400 });
@@ -36,25 +40,63 @@ export async function POST(request: Request) {
 
   try {
     const tx = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+    const serverKeypair = Keypair.fromSecret(SERVER_SEED);
+    
+    if (tx.source !== serverKeypair.publicKey()) {
+      return badRequest('invalid_source_account');
+    }
+    
+    if (tx.sequence !== '0') {
+      return badRequest('invalid_sequence');
+    }
+    
+    const now = Math.floor(Date.now() / 1000);
+    const timeBounds = tx.timeBounds;
+    if (!timeBounds || timeBounds.maxTime === '0' || Number(timeBounds.maxTime) < now) {
+      return badRequest('challenge_expired');
+    }
+    
     const txHash = tx.hash();
-
-    const ops = tx.operations || [];
-    let clientAccount: string | null = null;
-    for (const op of ops) {
-      if (op.type === 'manageData' && op.source) {
-        clientAccount = op.source;
-        break;
+    let serverSigned = false;
+    for (const sig of tx.signatures || []) {
+      try {
+        if (serverKeypair.verify(txHash, sig.signature())) {
+          serverSigned = true;
+          break;
+        }
+      } catch (e) {
+        // ignore
       }
     }
-    if (!clientAccount || !StrKey.isValidEd25519PublicKey(clientAccount))
-      return badRequest('invalid_challenge');
+    if (!serverSigned) {
+      return badRequest('server_signature_missing');
+    }
 
+    const ops = tx.operations || [];
+    if (ops.length !== 1 || ops[0].type !== 'manageData') {
+      return badRequest('invalid_operations');
+    }
+    
+    const op = ops[0];
+    if (!op.source || !StrKey.isValidEd25519PublicKey(op.source)) {
+      return badRequest('invalid_client_account');
+    }
+    
+    if (op.name !== `${HOME_DOMAIN} auth`) {
+      return badRequest('invalid_operation_name');
+    }
+    
+    const nonce = op.value?.toString('base64');
+    if (!nonce || !markNonceUsed(nonce)) {
+      return badRequest('nonce_already_used');
+    }
+
+    const clientAccount = op.source;
     const clientKeypair = Keypair.fromPublicKey(clientAccount);
-    const sigs = tx.signatures || [];
     let clientSigned = false;
-    for (const s of sigs) {
+    for (const sig of tx.signatures || []) {
       try {
-        if (clientKeypair.verify(txHash, s.signature())) {
+        if (clientKeypair.verify(txHash, sig.signature())) {
           clientSigned = true;
           break;
         }
@@ -65,7 +107,6 @@ export async function POST(request: Request) {
 
     if (!clientSigned) return NextResponse.json({ error: 'invalid_signature' }, { status: 401 });
 
-    const now = Math.floor(Date.now() / 1000);
     const exp = now + SEP10_TTL_SECONDS;
 
     const algSecret = sep10Key(JWT_SECRET);
