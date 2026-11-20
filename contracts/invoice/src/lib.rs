@@ -2117,8 +2117,13 @@ impl InvoiceContract {
             .get(&DataKey::Pool)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         let empty_str = String::from_str(&env, "");
+        // #1651: an invoice must enter the verification flow whenever either
+        // verification path is configured. A registry-only (consensus)
+        // deployment has no legacy `Oracle`, so checking only that key would
+        // create invoices as Pending and let them be funded unverified.
         let has_oracle = env.storage().instance().has(&DataKey::Oracle);
-        let initial_status = if has_oracle {
+        let has_registry = env.storage().instance().has(&DataKey::OracleRegistry);
+        let initial_status = if has_oracle || has_registry {
             InvoiceStatus::AwaitingVerification
         } else {
             InvoiceStatus::Pending
