@@ -188,6 +188,10 @@ pub enum PoolError {
     ReentrantCall = 98,
     // #1737: prevent seizure of collateral before a funded invoice is overdue.
     InvoiceNotDue = 99,
+    // #1642: funding args must match the invoice contract's record
+    FundingSmeMismatch = 100,
+    FundingDueDateMismatch = 101,
+    FundingExceedsInvoice = 102,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -763,6 +767,7 @@ pub trait CreditScoreContract {
 #[contractclient(name = "InvoiceContractClient")]
 pub trait InvoiceContract {
     fn get_authorized_pool(env: Env) -> Address;
+    fn get_invoice(env: Env, id: u64) -> InvoiceRecord;
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
     fn record_funding(env: Env, id: u64, amount: i128, pool: Address);
     fn mark_cancelled(env: Env, id: u64, pool: Address);
@@ -771,6 +776,17 @@ pub trait InvoiceContract {
 #[contractclient(name = "ComplianceClient")]
 pub trait ComplianceContract {
     fn is_cleared(env: Env, address: Address) -> bool;
+}
+
+// #1642: local mirror of the invoice contract's `Invoice`, decoded by field
+// name. Only the fields fund_invoice validates against are declared.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvoiceRecord {
+    pub owner: Address,
+    pub amount: i128,
+    pub due_date: u64,
+    pub funded_amount: i128,
 }
 
 #[contracttype]
@@ -3348,6 +3364,22 @@ impl FundingPool {
         match invoice_client.try_get_authorized_pool() {
             Ok(Ok(ref auth_pool)) if auth_pool == &this_contract => {}
             _ => return Err(PoolError::InvoicePoolMismatch),
+        }
+        // #1642: the SME and due date must come from the invoice itself, and
+        // the principal may not push the invoice past its face amount.
+        let invoice = invoice_client.get_invoice(&invoice_id);
+        if sme != invoice.owner {
+            return Err(PoolError::FundingSmeMismatch);
+        }
+        if due_date != invoice.due_date {
+            return Err(PoolError::FundingDueDateMismatch);
+        }
+        let remaining = invoice
+            .amount
+            .checked_sub(invoice.funded_amount)
+            .ok_or(PoolError::AmountOverflow)?;
+        if principal > remaining {
+            return Err(PoolError::FundingExceedsInvoice);
         }
         let accepted_tokens: Vec<Address> = env
             .storage()
