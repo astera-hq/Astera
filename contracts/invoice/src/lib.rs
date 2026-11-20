@@ -224,6 +224,14 @@ pub enum InvoiceError {
     UnauthorizedArbitration = 47,
     InvalidRespondent = 48,
     ArbitrationRequired = 49,
+    /// create_invoice_with_metadata: the debtor has no registration record (registration is required).
+    DebtorNotRegistered = 50,
+    /// create_invoice_with_metadata: the debtor is registered but deactivated.
+    DebtorInactive = 51,
+    /// create_invoice_with_metadata: the amount is above the configured per-invoice maximum.
+    AmountExceedsMax = 52,
+    /// create_invoice_with_metadata: the max-amount configuration has not been set.
+    NotInitialized = 53,
 }
 
 #[contracttype]
@@ -2017,9 +2025,9 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::MaxInvoiceAmount)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvalidAmount));
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
         if amount > max_invoice_amount {
-            panic_with_error!(&env, InvoiceError::AmountOverflow);
+            panic_with_error!(&env, InvoiceError::AmountExceedsMax);
         }
         // #798: due_date must lie in the future regardless of the
         // admin-configurable min-due-date window (which may be set to 0).
@@ -2045,9 +2053,9 @@ impl InvoiceContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::DebtorRecord(debtor.clone()))
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::DebtorNotRegistered));
             if !record.is_active {
-                panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+                panic_with_error!(&env, InvoiceError::DebtorInactive);
             }
             if record.current_exposure + amount > record.max_exposure {
                 panic_with_error!(&env, InvoiceError::SmeExposureLimitExceeded);
