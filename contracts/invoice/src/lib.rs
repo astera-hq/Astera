@@ -2117,8 +2117,13 @@ impl InvoiceContract {
             .get(&DataKey::Pool)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::Unauthorized));
         let empty_str = String::from_str(&env, "");
+        // #1651: an invoice must enter the verification flow whenever either
+        // verification path is configured. A registry-only (consensus)
+        // deployment has no legacy `Oracle`, so checking only that key would
+        // create invoices as Pending and let them be funded unverified.
         let has_oracle = env.storage().instance().has(&DataKey::Oracle);
-        let initial_status = if has_oracle {
+        let has_registry = env.storage().instance().has(&DataKey::OracleRegistry);
+        let initial_status = if has_oracle || has_registry {
             InvoiceStatus::AwaitingVerification
         } else {
             InvoiceStatus::Pending
@@ -3210,12 +3215,15 @@ impl InvoiceContract {
     ///
     /// # Security
     ///
-    /// Only decrements `sme_outstanding` and `debtor_exposure` when cancelling
-    /// a Funded invoice, since these counters are only incremented in
-    /// `mark_funded()`. Unfunded invoices (Pending, AwaitingVerification,
-    /// Verified, Disputed) never incremented these counters, so decrementing
-    /// them would incorrectly reduce the SME's tracked outstanding balance
-    /// below its true funded value, allowing bypass of `max_outstanding_per_sme`.
+    /// Only decrements `sme_outstanding` when cancelling a Funded invoice,
+    /// since it is only incremented in `mark_funded()`. Unfunded invoices
+    /// (Pending, AwaitingVerification, Verified, Disputed) never incremented
+    /// it, so decrementing it would incorrectly reduce the SME's tracked
+    /// outstanding balance below its true funded value, allowing bypass of
+    /// `max_outstanding_per_sme`.
+    ///
+    /// `debtor_exposure` is incremented at creation, so it is always released
+    /// here, including for unfunded invoices.
     pub fn cancel_invoice(env: Env, id: u64, caller: Address) {
         caller.require_auth();
         require_not_paused(&env);
@@ -3256,19 +3264,21 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
         
-        // #1501: Only decrement counters if the invoice was previously funded.
-        // sme_outstanding and debtor_exposure are only incremented in mark_funded(),
-        // so only Funded invoices have contributed to these counters.
+        // #1501: sme_outstanding is only incremented in mark_funded(), so only
+        // decrement it if the invoice was previously funded.
         let was_funded = invoice.status == InvoiceStatus::Funded;
-        
+
         invoice.status = InvoiceStatus::Cancelled;
         remove_invoice_from_owner(&env, &invoice.owner, id);
         let sme = invoice.owner.clone();
         let debtor = invoice.debtor.clone();
-        
+
+        // #1652: debtor current_exposure is incremented at invoice creation
+        // (when the debtor registry is enforced), not at funding, so it must
+        // be released on every cancellation, funded or not.
+        decrease_debtor_exposure(&env, &debtor, invoice.amount);
         if was_funded {
             decrease_sme_outstanding(&env, &sme, invoice.amount);
-            decrease_debtor_exposure(&env, &debtor, invoice.amount);
         }
         
         remove_invoice_from_debtor(&env, &debtor, id);
