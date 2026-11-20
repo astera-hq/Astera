@@ -427,7 +427,10 @@ pub struct DepositInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvestorTokenPositionSummary {
     pub token: Address,
+    /// Lifetime USDC deposited (never decremented on withdrawal).
     pub deposited: i128,
+    /// #1635: current value of the investor's available shares in USDC terms.
+    pub current_value: i128,
     pub available_shares: i128,
     pub deployed_shares: i128,
     pub earned: i128,
@@ -1611,6 +1614,27 @@ fn record_funded_invoice_id(env: &Env, token: &Address, invoice_id: u64) {
     env.storage().persistent().set(&key, &ids);
 }
 
+// #1635: an investor's concentration is measured on the current value of the
+// shares they hold (available shares x pool_value / total_shares), not on the
+// lifetime USDC they ever deposited. `InvestorPosition.deposited` is never
+// decremented on withdrawal, so using it would permanently lock out LPs who
+// exit and re-enter.
+fn investor_current_value(
+    position: &InvestorPosition,
+    pool_value: i128,
+    total_shares: i128,
+) -> PoolResult<i128> {
+    if position.available <= 0 || pool_value <= 0 || total_shares <= 0 {
+        return Ok(0);
+    }
+    position
+        .available
+        .checked_mul(pool_value)
+        .ok_or(PoolError::AmountOverflow)?
+        .checked_div(total_shares)
+        .ok_or(PoolError::AmountOverflow)
+}
+
 fn calculate_reward_delta(total_interest: i128, total_shares: i128) -> PoolResult<i128> {
     total_interest
         .checked_mul(REWARD_PRECISION)
@@ -2462,10 +2486,26 @@ impl FundingPool {
             .unwrap_or(10_000u32);
         let usdc_received = (amount * rate_bps as i128) / 10_000i128;
 
-        // #233: enforce maximum single-investor concentration limit
+        let share_token: Address = env
+            .storage()
+            .instance()
+            .get(&share_token_key)
+            .ok_or(PoolError::ShareTokenNotConfigured)?;
+        let total_shares: i128 = env.invoke_contract(
+            &share_token,
+            &Symbol::new(&env, "total_supply"),
+            Vec::new(&env),
+        );
+
+        // #233: enforce maximum single-investor concentration limit.
         // Reuse the config loaded for minimum deposit and min_rate checks.
+        // #1635: measured on current share value, not lifetime deposits.
         if config.max_single_investor_bps < 10_000 {
-            let new_investor_total = investor_position.deposited + usdc_received;
+            let investor_value =
+                investor_current_value(&investor_position, tt.pool_value, total_shares)?;
+            let new_investor_total = investor_value
+                .checked_add(usdc_received)
+                .ok_or(PoolError::AmountOverflow)?;
             let new_pool_total = tt.pool_value + usdc_received;
             if new_pool_total > 0 {
                 let investor_share_bps =
@@ -2484,19 +2524,7 @@ impl FundingPool {
             }
         }
 
-        let share_token: Address = env
-            .storage()
-            .instance()
-            .get(&share_token_key)
-            .ok_or(PoolError::ShareTokenNotConfigured)?;
-
         // Calculate shares using USDC-equivalent deposit value
-        let total_shares: i128 = env.invoke_contract(
-            &share_token,
-            &Symbol::new(&env, "total_supply"),
-            Vec::new(&env),
-        );
-
         let shares_to_mint = if total_shares == 0 || tt.pool_value == 0 {
             usdc_received
         } else {
@@ -5034,10 +5062,22 @@ impl FundingPool {
         if tt.pool_value <= 0 {
             return Ok(0);
         }
-        let pos_key = DataKey::InvestorPosition(investor.clone(), token);
+        let pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
         let position: InvestorPosition =
             env.storage().persistent().get(&pos_key).unwrap_or_default();
-        let share_bps = ((position.deposited as u128 * 10_000u128) / tt.pool_value as u128) as u32;
+        // #1635: current share value, not lifetime deposits.
+        let share_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ShareToken(token))
+            .ok_or(PoolError::ShareTokenNotConfigured)?;
+        let total_shares: i128 = env.invoke_contract(
+            &share_token,
+            &Symbol::new(&env, "total_supply"),
+            Vec::new(&env),
+        );
+        let value = investor_current_value(&position, tt.pool_value, total_shares)?;
+        let share_bps = ((value as u128 * 10_000u128) / tt.pool_value as u128) as u32;
         Ok(share_bps)
     }
 
@@ -6353,7 +6393,10 @@ impl FundingPool {
                     .checked_sub(usdc_equiv)
                     .ok_or(PoolError::AmountOverflow)?;
                 if post_pool_value > 0 {
-                    let investor_share_bps = ((position.deposited as u128 * BPS_DENOM as u128)
+                    // #1635: current share value, not lifetime deposits.
+                    let investor_value =
+                        investor_current_value(&position, tt.pool_value, total_shares)?;
+                    let investor_share_bps = ((investor_value as u128 * BPS_DENOM as u128)
                         / post_pool_value as u128) as u32;
                     if investor_share_bps > config.max_single_investor_bps {
                         return Err(PoolError::ConcentrationLimitExceeded);
@@ -6817,6 +6860,22 @@ impl FundingPool {
             let pending_yield = claimable
                 .checked_add(bonus)
                 .ok_or(PoolError::AmountOverflow)?;
+            // #1635: current value of held shares (0 if no share token configured).
+            let share_token: Option<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::ShareToken(token.clone()));
+            let current_value = match share_token {
+                Some(share_token) => {
+                    let total_shares: i128 = env.invoke_contract(
+                        &share_token,
+                        &Symbol::new(&env, "total_supply"),
+                        Vec::new(&env),
+                    );
+                    investor_current_value(&position, totals.pool_value, total_shares)?
+                }
+                None => 0,
+            };
             if position.deposited != 0
                 || position.available != 0
                 || position.deployed != 0
@@ -6826,6 +6885,7 @@ impl FundingPool {
                 deposits.push_back(InvestorTokenPositionSummary {
                     token,
                     deposited: position.deposited,
+                    current_value,
                     available_shares: position.available,
                     deployed_shares: position.deployed,
                     earned: position.earned,
@@ -13382,6 +13442,78 @@ mod test {
             client.try_risk_liquidate_collateral(&attacker, &1u64),
             Err(Ok(PoolError::Unauthorized))
         );
+    }
+
+    // #1635: a holder who fully exits must be able to re-deposit the same
+    // amount. Lifetime deposits (20_000) would exceed the 50% cap; current
+    // value (0 before re-deposit) does not.
+    #[test]
+    fn test_concentration_allows_redeposit_after_full_withdrawal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        mint(&env, &usdc_id, &alice, 20_000);
+        mint(&env, &usdc_id, &bob, 10_000);
+        client.deposit(&alice, &usdc_id, &10_000, &None);
+        client.deposit(&bob, &usdc_id, &10_000, &None);
+        client.set_max_investor_concentration(&admin, &5_000u32);
+
+        client.withdraw(&alice, &usdc_id, &10_000);
+        client.deposit(&alice, &usdc_id, &10_000, &None);
+
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 20_000);
+        assert_eq!(client.get_investor_concentration(&alice, &usdc_id), 5_000);
+    }
+
+    // #1635: a holder whose current share value already exceeds the cap is
+    // still rejected on any further deposit.
+    #[test]
+    fn test_concentration_rejects_holder_whose_current_value_exceeds_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        mint(&env, &usdc_id, &alice, 10_000);
+        mint(&env, &usdc_id, &bob, 31_000);
+        client.deposit(&alice, &usdc_id, &10_000, &None);
+        client.deposit(&bob, &usdc_id, &30_000, &None);
+        client.set_max_investor_concentration(&admin, &5_000u32);
+
+        // Bob holds 30_000 of a 40_000 pool (75%), above the 50% cap.
+        let result = client.try_deposit(&bob, &usdc_id, &1_000, &None);
+        assert_eq!(result, Err(Ok(PoolError::ConcentrationLimitExceeded)));
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 40_000);
+    }
+
+    // #1635: the cap still applies to a fresh large deposit from a new LP.
+    #[test]
+    fn test_concentration_still_limits_fresh_large_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let carol = Address::generate(&env);
+
+        mint(&env, &usdc_id, &alice, 10_000);
+        mint(&env, &usdc_id, &bob, 10_000);
+        mint(&env, &usdc_id, &carol, 50_000);
+        client.deposit(&alice, &usdc_id, &10_000, &None);
+        client.deposit(&bob, &usdc_id, &10_000, &None);
+        client.set_max_investor_concentration(&admin, &5_000u32);
+
+        // 40_000 into a 20_000 pool: 40_000 / 60_000 = 66.6% > 50%.
+        let too_big = client.try_deposit(&carol, &usdc_id, &40_000, &None);
+        assert_eq!(too_big, Err(Ok(PoolError::ConcentrationLimitExceeded)));
+
+        // 10_000 into a 20_000 pool: 10_000 / 30_000 = 33.3% <= 50%.
+        client.deposit(&carol, &usdc_id, &10_000, &None);
+        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 30_000);
     }
 
 }
