@@ -758,6 +758,24 @@ const RISK_CONTRACT: Symbol = symbol_short!("risk_ctr");
 pub trait CreditScoreContract {
     fn get_credit_score(env: Env, sme: Address) -> CreditScoreData;
     fn record_funding(env: Env, caller: Address, invoice_id: u64, sme: Address, amount: i128);
+    // #1634: repayment / default outcomes feed the SME's on-chain credit history.
+    fn record_payment(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        sme: Address,
+        amount: i128,
+        due_date: u64,
+        paid_at: u64,
+    );
+    fn record_default(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        sme: Address,
+        amount: i128,
+        due_date: u64,
+    );
 }
 
 #[contractclient(name = "InvoiceContractClient")]
@@ -766,6 +784,8 @@ pub trait InvoiceContract {
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
     fn record_funding(env: Env, id: u64, amount: i128, pool: Address);
     fn mark_cancelled(env: Env, id: u64, pool: Address);
+    // #1634: requires pool.require_auth(); satisfied because the pool is the direct caller.
+    fn mark_paid(env: Env, id: u64, pool: Address);
 }
 
 #[contractclient(name = "ComplianceClient")]
@@ -3801,6 +3821,27 @@ impl FundingPool {
         record_rate_snapshot(env, &token);
 
         if fully_repaid {
+            // #1634: mark the invoice Paid on the invoice contract. Fatal on
+            // purpose: a fully repaid invoice must not stay Funded. The pool is
+            // the direct caller, so mark_paid's pool.require_auth() is satisfied
+            // by Soroban's automatic authorization of the invoking contract.
+            let invoice_client = InvoiceContractClient::new(env, &config.invoice_contract);
+            invoice_client.mark_paid(&invoice_id, &env.current_contract_address());
+
+            // #1634: record the payment in the SME's credit history. Non-fatal:
+            // a credit score failure must never block a repayment.
+            if let Some(cs_contract) = get_credit_score_contract(env) {
+                let cs_client = CreditScoreClient::new(env, &cs_contract);
+                let _ = cs_client.try_record_payment(
+                    &env.current_contract_address(),
+                    &invoice_id,
+                    &record.sme,
+                    &record.principal,
+                    &record.due_date,
+                    &now,
+                );
+            }
+
             // #217: Process withdrawal queue after repayment
             if let Err(e) = Self::process_withdrawal_queue(env, token.clone(), available_amount) {
                 // Log error but don't fail the repayment
@@ -4342,6 +4383,18 @@ impl FundingPool {
                     now,
                 ),
             );
+
+            // #1634: record the default in the SME's credit history. Non-fatal.
+            if let Some(cs_contract) = get_credit_score_contract(env) {
+                let cs_client = CreditScoreClient::new(env, &cs_contract);
+                let _ = cs_client.try_record_default(
+                    &env.current_contract_address(),
+                    &invoice_id,
+                    &record.sme,
+                    &record.principal,
+                    &record.due_date,
+                );
+            }
 
             // #866: the default-insurance reserve's file_claim is deliberately
             // *not* called from here — insurance.file_claim calls back into
@@ -8547,6 +8600,44 @@ mod test {
         pub struct DummyCreditScoreContract;
         #[contractimpl]
         impl DummyCreditScoreContract {
+            // #1634: test hooks recording which invoices got a payment / default.
+            pub fn record_payment(
+                env: Env,
+                _caller: Address,
+                invoice_id: u64,
+                _sme: Address,
+                _amount: i128,
+                _due_date: u64,
+                _paid_at: u64,
+            ) {
+                env.storage()
+                    .persistent()
+                    .set(&(symbol_short!("pay"), invoice_id), &true);
+            }
+            pub fn record_default(
+                env: Env,
+                _caller: Address,
+                invoice_id: u64,
+                _sme: Address,
+                _amount: i128,
+                _due_date: u64,
+            ) {
+                env.storage()
+                    .persistent()
+                    .set(&(symbol_short!("def"), invoice_id), &true);
+            }
+            pub fn payment_recorded(env: Env, invoice_id: u64) -> bool {
+                env.storage()
+                    .persistent()
+                    .get(&(symbol_short!("pay"), invoice_id))
+                    .unwrap_or(false)
+            }
+            pub fn default_recorded(env: Env, invoice_id: u64) -> bool {
+                env.storage()
+                    .persistent()
+                    .get(&(symbol_short!("def"), invoice_id))
+                    .unwrap_or(false)
+            }
             pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreData {
                 CreditScoreData {
                     sme,
@@ -8563,7 +8654,39 @@ mod test {
             }
         }
     }
-    pub use dummy_credit_score_contract::DummyCreditScoreContract;
+    pub use dummy_credit_score_contract::{DummyCreditScoreContract, DummyCreditScoreContractClient};
+
+    mod failing_credit_score_contract {
+        use super::*;
+
+        #[contract]
+        pub struct FailingCreditScoreContract;
+        #[contractimpl]
+        impl FailingCreditScoreContract {
+            pub fn record_payment(
+                _env: Env,
+                _caller: Address,
+                _invoice_id: u64,
+                _sme: Address,
+                _amount: i128,
+                _due_date: u64,
+                _paid_at: u64,
+            ) {
+                panic!("credit score unavailable");
+            }
+            pub fn record_default(
+                _env: Env,
+                _caller: Address,
+                _invoice_id: u64,
+                _sme: Address,
+                _amount: i128,
+                _due_date: u64,
+            ) {
+                panic!("credit score unavailable");
+            }
+        }
+    }
+    pub use failing_credit_score_contract::FailingCreditScoreContract;
 
     mod dummy_token_6_decimals_contract {
         use super::*;
@@ -8611,6 +8734,19 @@ mod test {
                         .persistent()
                         .set(&DataKey::FundedInvoice(id), &false);
                 }
+            }
+            // #1634: mirrors the real invoice contract's pool-only mark_paid.
+            pub fn mark_paid(env: Env, id: u64, pool: Address) {
+                pool.require_auth();
+                env.storage()
+                    .persistent()
+                    .set(&(symbol_short!("paid"), id), &true);
+            }
+            pub fn is_paid(env: Env, id: u64) -> bool {
+                env.storage()
+                    .persistent()
+                    .get(&(symbol_short!("paid"), id))
+                    .unwrap_or(false)
             }
             pub fn add_funding(env: Env, id: u64, amount: i128, pool: Address) -> i128 {
                 pool.require_auth();
@@ -8661,6 +8797,13 @@ mod test {
     pub use mock_reflector_contract::{MockReflector, MockReflectorClient};
 
     fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
+        let (client, admin, usdc_id, share_token, _invoice) = setup_with_invoice(env);
+        (client, admin, usdc_id, share_token)
+    }
+
+    fn setup_with_invoice(
+        env: &Env,
+    ) -> (FundingPoolClient<'_>, Address, Address, Address, Address) {
         env.ledger().with_mut(|l| l.timestamp = 100_000);
         let contract_id = env.register(FundingPool, ());
         let client = FundingPoolClient::new(env, &contract_id);
@@ -8677,7 +8820,7 @@ mod test {
         // Most unit tests assume a single investor can fully fund the pool.
         // Disable the concentration limit in this test harness.
         client.set_max_investor_concentration(&admin, &10_000u32);
-        (client, admin, usdc_id, share_token)
+        (client, admin, usdc_id, share_token, invoice_contract)
     }
 
     #[test]
@@ -11668,6 +11811,98 @@ mod test {
         client.repay_invoice(&1u64, &sme, &total_due);
 
         // Second full repayment must be rejected
+        let result = client.try_repay_invoice(&1u64, &sme, &total_due);
+        assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
+    }
+
+    // #1634: full repayment must mark the invoice Paid on the invoice contract.
+    #[test]
+    fn test_full_repayment_marks_invoice_paid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token, invoice_contract) = setup_with_invoice(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 5_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+        client.deposit(&investor, &usdc_id, &5_000, &None);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &2_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 50_000),
+            &usdc_id,
+        );
+        let invoice = DummyInvoiceClient::new(&env, &invoice_contract);
+        assert!(!invoice.is_paid(&1u64));
+
+        env.ledger().with_mut(|l| l.timestamp += 5_000);
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        assert!(invoice.is_paid(&1u64));
+    }
+
+    // #1634: full repayment must record the payment in the credit score contract.
+    #[test]
+    fn test_full_repayment_records_payment_in_credit_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let credit_score = env.register(DummyCreditScoreContract, ());
+        client.set_credit_score_contract(&admin, &credit_score);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 5_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+        client.deposit(&investor, &usdc_id, &5_000, &None);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &2_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 50_000),
+            &usdc_id,
+        );
+        let cs = DummyCreditScoreContractClient::new(&env, &credit_score);
+        assert!(!cs.payment_recorded(&1u64));
+
+        env.ledger().with_mut(|l| l.timestamp += 5_000);
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        assert!(cs.payment_recorded(&1u64));
+        assert!(!cs.default_recorded(&1u64));
+    }
+
+    // #1634: a failing credit score contract must not block a full repayment.
+    #[test]
+    fn test_repayment_succeeds_when_credit_score_call_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token, invoice_contract) = setup_with_invoice(&env);
+        let failing_cs = env.register(FailingCreditScoreContract, ());
+        client.set_credit_score_contract(&admin, &failing_cs);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 5_000);
+        mint(&env, &usdc_id, &sme, 10_000);
+        client.deposit(&investor, &usdc_id, &5_000, &None);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &2_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 50_000),
+            &usdc_id,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 5_000);
+        let total_due = client.estimate_repayment(&1u64, &None);
+        client.repay_invoice(&1u64, &sme, &total_due);
+
+        assert!(DummyInvoiceClient::new(&env, &invoice_contract).is_paid(&1u64));
         let result = client.try_repay_invoice(&1u64, &sme, &total_due);
         assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
     }
