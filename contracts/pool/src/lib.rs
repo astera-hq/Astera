@@ -3735,10 +3735,11 @@ impl FundingPool {
             .get(&funded_invoice_key)
             .ok_or(PoolError::InvoiceNotFound)?;
 
-        // #536: only the invoice's borrower (SME) may repay their own invoice
-        if payer != record.sme {
-            return Err(PoolError::Unauthorized);
-        }
+        // Any payer that authorized this call may repay (SME, debtor, or a
+        // third party). The payer only supplies tokens; the principal and
+        // interest flow to the pool's investors and collateral is returned to
+        // its original depositor, so the repayment cannot redirect funds.
+        // `record.sme` stays the attributed borrower for referrals and scoring.
 
         let now = env.ledger().timestamp();
         let (total_interest, total_due) = calculate_total_due(&record, &config, now)?;
@@ -3976,7 +3977,7 @@ impl FundingPool {
         } else {
             env.events().publish(
                 (EVT, symbol_short!("part_pay")),
-                (invoice_id, actual_payment, repaid_amount, now),
+                (invoice_id, payer.clone(), actual_payment, repaid_amount, now),
             );
         }
         Ok(())
