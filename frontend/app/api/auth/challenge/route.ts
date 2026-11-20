@@ -8,12 +8,14 @@ const NETWORK_PASSPHRASE =
   process.env.NEXT_PUBLIC_STELLAR_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
 const SERVER_SEED = process.env.SEP10_SERVER_SEED;
+const HOME_DOMAIN = process.env.NEXT_PUBLIC_APP_URL 
+  ? new URL(process.env.NEXT_PUBLIC_APP_URL).hostname 
+  : 'localhost';
 
-function randomNonce(len = 24) {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let out = '';
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
+function randomNonce(): string {
+  const bytes = new Uint8Array(48);
+  crypto.getRandomValues(bytes);
+  return Buffer.from(bytes).toString('base64');
 }
 
 export async function POST(request: Request) {
@@ -49,8 +51,8 @@ export async function POST(request: Request) {
     })
       .addOperation(
         Operation.manageData({
-          name: `sep0010_auth_${randomNonce(8)}`,
-          value: Buffer.from(randomNonce(16)).toString('base64'),
+          name: `${HOME_DOMAIN} auth`,
+          value: randomNonce(),
           source: account,
         }),
       )

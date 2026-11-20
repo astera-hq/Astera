@@ -8,9 +8,38 @@ import {
 
 export const dynamic = 'force-dynamic';
 
+function timingSafeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  
+  if (bufA.length !== bufB.length) {
+    return false;
+  }
+  
+  try {
+    return crypto.subtle.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(request: Request) {
-  if (request.headers.get('authorization') !== `Bearer ${process.env.NOTIFICATION_DISPATCH_TOKEN}`)
+  const token = process.env.NOTIFICATION_DISPATCH_TOKEN;
+  
+  if (!token) {
+    return NextResponse.json(
+      { error: 'Service not configured' }, 
+      { status: 503 }
+    );
+  }
+  
+  const authHeader = request.headers.get('authorization') || '';
+  const expectedAuth = `Bearer ${token}`;
+  
+  if (!timingSafeEqual(authHeader, expectedAuth)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  
   try {
     const body = (await request.json()) as {
       payload: NotificationPayload;
