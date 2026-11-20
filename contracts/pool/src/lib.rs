@@ -188,6 +188,10 @@ pub enum PoolError {
     ReentrantCall = 98,
     // #1737: prevent seizure of collateral before a funded invoice is overdue.
     InvoiceNotDue = 99,
+    // #1642: funding args must match the invoice contract's record
+    FundingSmeMismatch = 100,
+    FundingDueDateMismatch = 101,
+    FundingExceedsInvoice = 102,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -231,10 +235,6 @@ const MAX_CO_FUNDING_PARTICIPANTS: u32 = 20;
 // time (request_withdrawal rejects a second with AlreadyQueuedForWithdrawal), so this is
 // effectively a cap on the number of distinct investors queued at once.
 const DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH: u32 = 500;
-// #1639: late-payment interest is off by default (0 bps); the accrual window
-// defaults to 90 days past due_date.
-const DEFAULT_LATE_INTEREST_BPS: u32 = 0;
-const DEFAULT_LATE_INTEREST_MAX_SECS: u64 = 90 * SECS_PER_DAY;
 // #865: fixed-size ring buffer capacity for the trailing deposit-inflow rate used by
 // estimate_withdrawal_wait/get_liquidity_forecast, mirroring the credit_score contract's
 // PaymentHistory rolling-window pattern.
@@ -352,12 +352,6 @@ pub struct PoolConfig {
     pub max_withdrawal_queue_age_days: u32,
     // #865: global cap on outstanding withdrawal-queue entries per token (0 = unlimited).
     pub max_withdrawal_queue_depth: u32,
-    // #1639: simple late-payment interest (bps, on principal) accrued from due_date
-    // until repayment. 0 = disabled.
-    pub late_interest_bps: u32,
-    // #1639: maximum seconds past due_date over which late interest accrues
-    // (grace period plus default window). Late accrual stops at this cap.
-    pub late_interest_max_secs: u64,
 }
 
 #[contracttype]
@@ -437,10 +431,7 @@ pub struct DepositInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvestorTokenPositionSummary {
     pub token: Address,
-    /// Lifetime USDC deposited (never decremented on withdrawal).
     pub deposited: i128,
-    /// #1635: current value of the investor's available shares in USDC terms.
-    pub current_value: i128,
     pub available_shares: i128,
     pub deployed_shares: i128,
     pub earned: i128,
@@ -674,6 +665,7 @@ pub enum DataKey {
     // #865: per-token index of every invoice_id ever funded, so liquidity forecasting and
     // wait estimation can enumerate open invoices without assuming caller-supplied
     // invoice_ids are a dense sequential range (they are not — see fund_invoice_request).
+    // #1645: legacy single-entry form, read-only. New ids are written to InvoiceIndexKey pages.
     TokenInvoiceIds(Address),
     // #865: deposit-inflow ring buffer (token -> current length / start index), mirroring
     // the credit_score contract's PaymentHistory pattern. Instance storage: small, hot.
@@ -771,39 +763,31 @@ const RISK_CONTRACT: Symbol = symbol_short!("risk_ctr");
 pub trait CreditScoreContract {
     fn get_credit_score(env: Env, sme: Address) -> CreditScoreData;
     fn record_funding(env: Env, caller: Address, invoice_id: u64, sme: Address, amount: i128);
-    // #1634: repayment / default outcomes feed the SME's on-chain credit history.
-    fn record_payment(
-        env: Env,
-        caller: Address,
-        invoice_id: u64,
-        sme: Address,
-        amount: i128,
-        due_date: u64,
-        paid_at: u64,
-    );
-    fn record_default(
-        env: Env,
-        caller: Address,
-        invoice_id: u64,
-        sme: Address,
-        amount: i128,
-        due_date: u64,
-    );
 }
 
 #[contractclient(name = "InvoiceContractClient")]
 pub trait InvoiceContract {
     fn get_authorized_pool(env: Env) -> Address;
+    fn get_invoice(env: Env, id: u64) -> InvoiceRecord;
     fn is_invoice_defaulted(env: Env, id: u64) -> bool;
     fn record_funding(env: Env, id: u64, amount: i128, pool: Address);
     fn mark_cancelled(env: Env, id: u64, pool: Address);
-    // #1634: requires pool.require_auth(); satisfied because the pool is the direct caller.
-    fn mark_paid(env: Env, id: u64, pool: Address);
 }
 
 #[contractclient(name = "ComplianceClient")]
 pub trait ComplianceContract {
     fn is_cleared(env: Env, address: Address) -> bool;
+}
+
+// #1642: local mirror of the invoice contract's `Invoice`, decoded by field
+// name. Only the fields fund_invoice validates against are declared.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvoiceRecord {
+    pub owner: Address,
+    pub amount: i128,
+    pub due_date: u64,
+    pub funded_amount: i128,
 }
 
 #[contracttype]
@@ -1351,19 +1335,7 @@ fn calculate_pending_yield(
             .get(&DataKey::InvestorPosition(investor.clone(), token.clone()))
             .unwrap_or_default();
         let config = get_config_cached(env)?;
-        // #1637: the bonus is a fraction of the yield being paid out. When a rate
-        // model prices the pool, that yield accrues at the curve rate (not the
-        // static yield_bps, which may be 0), so use the curve rate as the base.
-        // Without a rate model this is config.yield_bps, so the value is unchanged.
-        let realised_bps = match env
-            .storage()
-            .instance()
-            .get::<DataKey, RateModelConfig>(&DataKey::RateModel(token.clone()))
-        {
-            Some(model) => compute_current_rate(utilization_bps(totals), &model),
-            None => config.yield_bps,
-        };
-        if realised_bps > 0 {
+        if config.yield_bps > 0 {
             let tiers = get_loyalty_tiers_cached(env);
             let days_active = loyalty_days_active(env, position.loyalty_start_at);
             let (_, bonus_bps, _) = resolve_loyalty_tier(&tiers, days_active);
@@ -1371,7 +1343,7 @@ fn calculate_pending_yield(
                 bonus = claimable
                     .checked_mul(bonus_bps as i128)
                     .ok_or(PoolError::AmountOverflow)?
-                    .checked_div(realised_bps as i128)
+                    .checked_div(config.yield_bps as i128)
                     .ok_or(PoolError::AmountOverflow)?
                     .min(totals.protocol_revenue)
                     .max(0);
@@ -1424,27 +1396,12 @@ fn calculate_total_due(
     // #863: interest accrues at the rate locked in when the invoice was
     // funded (curve output at funding-time utilization, or the static
     // yield_bps fallback) — never the current live rate.
-    let mut total_interest = calculate_interest(
+    let total_interest = calculate_interest(
         record.principal as u128,
         record.locked_yield_bps,
         elapsed_secs,
         config.compound_interest,
     )?;
-    // #1639: late-payment interest accrues from due_date to `now`, capped at
-    // late_interest_max_secs past due_date. Simple interest on principal.
-    if now > record.due_date && config.late_interest_bps > 0 {
-        let late_end = now.min(record.due_date.saturating_add(config.late_interest_max_secs));
-        let late_secs = late_end - record.due_date;
-        let late_interest = calculate_interest(
-            record.principal as u128,
-            config.late_interest_bps,
-            late_secs,
-            false,
-        )?;
-        total_interest = total_interest
-            .checked_add(late_interest)
-            .ok_or(PoolError::AmountOverflow)?;
-    }
     let total_interest_i128 = u128_to_i128(total_interest)?;
     let total_due = record
         .principal
@@ -1640,36 +1597,62 @@ fn trailing_inflow_rate_per_sec(env: &Env, token: &Address) -> i128 {
     total / elapsed as i128
 }
 
+// #1645: the per-token invoice index is stored as fixed-size pages so that no
+// single persistent entry grows without bound. Page `n` holds the ids at
+// positions `n * TOKEN_INVOICE_ID_PAGE_SIZE .. (n + 1) * TOKEN_INVOICE_ID_PAGE_SIZE`.
+// Kept in its own key enum because `DataKey` is at the #[contracttype] union's
+// 50-case cap.
+const TOKEN_INVOICE_ID_PAGE_SIZE: u32 = 200;
+
+#[contracttype]
+#[derive(Clone)]
+pub enum InvoiceIndexKey {
+    /// token -> total number of invoice ids recorded for that token
+    Count(Address),
+    /// (token, page index) -> up to TOKEN_INVOICE_ID_PAGE_SIZE invoice ids
+    Page(Address, u32),
+}
+
 fn record_funded_invoice_id(env: &Env, token: &Address, invoice_id: u64) {
-    let key = DataKey::TokenInvoiceIds(token.clone());
+    let count_key = InvoiceIndexKey::Count(token.clone());
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let page_key = InvoiceIndexKey::Page(token.clone(), count / TOKEN_INVOICE_ID_PAGE_SIZE);
+    let mut page: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&page_key)
+        .unwrap_or(Vec::new(env));
+    page.push_back(invoice_id);
+    env.storage().persistent().set(&page_key, &page);
+    env.storage().persistent().set(&count_key, &(count + 1));
+}
+
+// Returns every invoice id recorded for `token`, in funding order. Ids written
+// before paging existed live under the legacy `DataKey::TokenInvoiceIds` entry
+// and are returned first; paged ids follow.
+fn load_token_invoice_ids(env: &Env, token: &Address) -> Vec<u64> {
     let mut ids: Vec<u64> = env
         .storage()
         .persistent()
-        .get(&key)
+        .get(&DataKey::TokenInvoiceIds(token.clone()))
         .unwrap_or(Vec::new(env));
-    ids.push_back(invoice_id);
-    env.storage().persistent().set(&key, &ids);
-}
-
-// #1635: an investor's concentration is measured on the current value of the
-// shares they hold (available shares x pool_value / total_shares), not on the
-// lifetime USDC they ever deposited. `InvestorPosition.deposited` is never
-// decremented on withdrawal, so using it would permanently lock out LPs who
-// exit and re-enter.
-fn investor_current_value(
-    position: &InvestorPosition,
-    pool_value: i128,
-    total_shares: i128,
-) -> PoolResult<i128> {
-    if position.available <= 0 || pool_value <= 0 || total_shares <= 0 {
-        return Ok(0);
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&InvoiceIndexKey::Count(token.clone()))
+        .unwrap_or(0);
+    let pages = count.div_ceil(TOKEN_INVOICE_ID_PAGE_SIZE);
+    for page_index in 0..pages {
+        let page: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&InvoiceIndexKey::Page(token.clone(), page_index))
+            .unwrap_or(Vec::new(env));
+        for invoice_id in page.iter() {
+            ids.push_back(invoice_id);
+        }
     }
-    position
-        .available
-        .checked_mul(pool_value)
-        .ok_or(PoolError::AmountOverflow)?
-        .checked_div(total_shares)
-        .ok_or(PoolError::AmountOverflow)
+    ids
 }
 
 fn calculate_reward_delta(total_interest: i128, total_shares: i128) -> PoolResult<i128> {
@@ -2162,8 +2145,6 @@ impl FundingPool {
             utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
             max_withdrawal_queue_age_days: DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS,
             max_withdrawal_queue_depth: DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH,
-            late_interest_bps: DEFAULT_LATE_INTEREST_BPS,
-            late_interest_max_secs: DEFAULT_LATE_INTEREST_MAX_SECS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -2427,11 +2408,7 @@ impl FundingPool {
         // (TokenInvoiceIds), instead of scanning every funded invoice ever recorded
         // across all tokens — total_funded_invoices only ever grows, so the old scan
         // became prohibitively expensive as the pool's lifetime invoice count grew.
-        let token_invoice_ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TokenInvoiceIds(token.clone()))
-            .unwrap_or(Vec::new(env));
+        let token_invoice_ids: Vec<u64> = load_token_invoice_ids(env, token);
 
         for i in 0..token_invoice_ids.len() {
             let invoice_id = token_invoice_ids.get(i).ok_or(PoolError::StorageCorrupted)?;
@@ -2525,26 +2502,10 @@ impl FundingPool {
             .unwrap_or(10_000u32);
         let usdc_received = (amount * rate_bps as i128) / 10_000i128;
 
-        let share_token: Address = env
-            .storage()
-            .instance()
-            .get(&share_token_key)
-            .ok_or(PoolError::ShareTokenNotConfigured)?;
-        let total_shares: i128 = env.invoke_contract(
-            &share_token,
-            &Symbol::new(&env, "total_supply"),
-            Vec::new(&env),
-        );
-
-        // #233: enforce maximum single-investor concentration limit.
+        // #233: enforce maximum single-investor concentration limit
         // Reuse the config loaded for minimum deposit and min_rate checks.
-        // #1635: measured on current share value, not lifetime deposits.
         if config.max_single_investor_bps < 10_000 {
-            let investor_value =
-                investor_current_value(&investor_position, tt.pool_value, total_shares)?;
-            let new_investor_total = investor_value
-                .checked_add(usdc_received)
-                .ok_or(PoolError::AmountOverflow)?;
+            let new_investor_total = investor_position.deposited + usdc_received;
             let new_pool_total = tt.pool_value + usdc_received;
             if new_pool_total > 0 {
                 let investor_share_bps =
@@ -2563,7 +2524,19 @@ impl FundingPool {
             }
         }
 
+        let share_token: Address = env
+            .storage()
+            .instance()
+            .get(&share_token_key)
+            .ok_or(PoolError::ShareTokenNotConfigured)?;
+
         // Calculate shares using USDC-equivalent deposit value
+        let total_shares: i128 = env.invoke_contract(
+            &share_token,
+            &Symbol::new(&env, "total_supply"),
+            Vec::new(&env),
+        );
+
         let shares_to_mint = if total_shares == 0 || tt.pool_value == 0 {
             usdc_received
         } else {
@@ -2634,9 +2607,6 @@ impl FundingPool {
         }
 
         Self::non_reentrant_end(&env);
-
-        // #1640: a deposit changes pool_value, so utilization moves — record a sample.
-        record_rate_snapshot(&env, &token);
 
         env.events().publish(
             (EVT, symbol_short!("deposit")),
@@ -2737,15 +2707,7 @@ impl FundingPool {
         // cover this withdrawal — otherwise the accounting step could
         // succeed while the token transfer later fails, burning the
         // investor's shares without paying them out.
-        // #1636: liquidity reserved for queued withdrawal requests is not available to a
-        // direct withdraw, so the FIFO queue keeps its claim on partially restored liquidity.
-        let reserved_for_queue =
-            Self::queued_withdrawal_reserve(&env, &token, tt.pool_value, total_shares)?;
-        let available_liquidity = tt
-            .pool_value
-            .checked_sub(tt.total_deployed)
-            .and_then(|value| value.checked_sub(reserved_for_queue))
-            .ok_or(PoolError::AmountOverflow)?;
+        let available_liquidity = tt.pool_value - tt.total_deployed;
         if available_liquidity < usdc_amount {
             return Err(PoolError::InsufficientLiquidity);
         }
@@ -2791,9 +2753,6 @@ impl FundingPool {
 
         Self::non_reentrant_end(&env); // <- ADD GUARD END
 
-        // #1640: a withdrawal changes pool_value, so utilization moves — record a sample.
-        record_rate_snapshot(&env, &token);
-
         env.events().publish(
             (EVT, symbol_short!("withdraw")),
             (investor, token, amount, shares, now),
@@ -2832,10 +2791,13 @@ impl FundingPool {
             }
         }
 
-        // Transfers move share tokens without touching pool-side `available`, so
-        // the share-token balance is the source of truth. Queued requests were
-        // rejected above, so no shares are held out of the balance here.
-        if shares > share_balance_of(&env, &token, &investor)? {
+        let investor_pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+        let position: InvestorPosition = env
+            .storage()
+            .persistent()
+            .get(&investor_pos_key)
+            .unwrap_or_default();
+        if shares > position.available {
             return Err(PoolError::WithdrawalExceedsLimit);
         }
 
@@ -3015,7 +2977,13 @@ impl FundingPool {
         // Shares are held out of `available` while queued, so growing the request
         // must draw from it and shrinking must return the difference.
         let delta = new_shares - request.shares;
-        if new_shares > share_balance_of(&env, &token, &investor)? {
+        let pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+        let position: InvestorPosition = env
+            .storage()
+            .persistent()
+            .get(&pos_key)
+            .unwrap_or_default();
+        if delta > 0 && position.available < delta {
             return Err(PoolError::WithdrawalExceedsLimit);
         }
         update_investor_available(&env, &investor, &token, -delta)?;
@@ -3079,11 +3047,7 @@ impl FundingPool {
     }
 
     pub fn get_open_invoices_for_token(env: Env, token: Address) -> Vec<FundedInvoice> {
-        let ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TokenInvoiceIds(token.clone()))
-            .unwrap_or(Vec::new(&env));
+        let ids: Vec<u64> = load_token_invoice_ids(&env, &token);
         let mut open = Vec::new(&env);
         for invoice_id in ids.iter() {
             if let Some(record) = env
@@ -3115,31 +3079,6 @@ impl FundingPool {
             .checked_mul(pool_value)
             .and_then(|value| value.checked_div(total_shares))
             .ok_or(PoolError::AmountOverflow)
-    }
-
-    /// #1636: USDC value reserved for every request still in the withdrawal queue for
-    /// `token`, valued the same way process_withdrawal_queue values them. A partially
-    /// served head keeps only its remaining shares in the queue, so it is counted at
-    /// that remainder.
-    fn queued_withdrawal_reserve(
-        env: &Env,
-        token: &Address,
-        pool_value: i128,
-        total_shares: i128,
-    ) -> PoolResult<i128> {
-        let queue: Vec<WithdrawalRequest> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::WithdrawalQueue(token.clone()))
-            .unwrap_or(Vec::new(env));
-        let mut reserved: i128 = 0;
-        for request in queue.iter() {
-            let amount = Self::withdrawal_amount(request.shares, pool_value, total_shares)?;
-            reserved = reserved
-                .checked_add(amount)
-                .ok_or(PoolError::AmountOverflow)?;
-        }
-        Ok(reserved)
     }
 
     fn burn_withdrawal_shares(env: &Env, share_token: &Address, investor: Address, shares: i128) {
@@ -3378,11 +3317,8 @@ impl FundingPool {
 
         env.storage().persistent().set(&queue_key, &remaining_queue);
 
-        let token_totals_key = DataKey::TokenTotals(token.clone());
+        let token_totals_key = DataKey::TokenTotals(token);
         env.storage().instance().set(&token_totals_key, &tt);
-
-        // #1640: queued payouts change pool_value / deployed capital — record a sample.
-        record_rate_snapshot(env, &token);
 
         Ok(())
     }
@@ -3468,6 +3404,22 @@ impl FundingPool {
         match invoice_client.try_get_authorized_pool() {
             Ok(Ok(ref auth_pool)) if auth_pool == &this_contract => {}
             _ => return Err(PoolError::InvoicePoolMismatch),
+        }
+        // #1642: the SME and due date must come from the invoice itself, and
+        // the principal may not push the invoice past its face amount.
+        let invoice = invoice_client.get_invoice(&invoice_id);
+        if sme != invoice.owner {
+            return Err(PoolError::FundingSmeMismatch);
+        }
+        if due_date != invoice.due_date {
+            return Err(PoolError::FundingDueDateMismatch);
+        }
+        let remaining = invoice
+            .amount
+            .checked_sub(invoice.funded_amount)
+            .ok_or(PoolError::AmountOverflow)?;
+        if principal > remaining {
+            return Err(PoolError::FundingExceedsInvoice);
         }
         let accepted_tokens: Vec<Address> = env
             .storage()
@@ -3735,11 +3687,10 @@ impl FundingPool {
             .get(&funded_invoice_key)
             .ok_or(PoolError::InvoiceNotFound)?;
 
-        // Any payer that authorized this call may repay (SME, debtor, or a
-        // third party). The payer only supplies tokens; the principal and
-        // interest flow to the pool's investors and collateral is returned to
-        // its original depositor, so the repayment cannot redirect funds.
-        // `record.sme` stays the attributed borrower for referrals and scoring.
+        // #536: only the invoice's borrower (SME) may repay their own invoice
+        if payer != record.sme {
+            return Err(PoolError::Unauthorized);
+        }
 
         let now = env.ledger().timestamp();
         let (total_interest, total_due) = calculate_total_due(&record, &config, now)?;
@@ -3920,32 +3871,8 @@ impl FundingPool {
         // #863: a repayment changes utilization (deployed capital and/or pool
         // value) — record a rate sample for the history chart.
         record_rate_snapshot(env, &token);
-        // #1641: repayments return cash to the pool, so they count toward the
-        // trailing inflow rate used by withdrawal wait forecasts, like deposits do.
-        record_inflow_event(env, &token, actual_payment);
 
         if fully_repaid {
-            // #1634: mark the invoice Paid on the invoice contract. Fatal on
-            // purpose: a fully repaid invoice must not stay Funded. The pool is
-            // the direct caller, so mark_paid's pool.require_auth() is satisfied
-            // by Soroban's automatic authorization of the invoking contract.
-            let invoice_client = InvoiceContractClient::new(env, &config.invoice_contract);
-            invoice_client.mark_paid(&invoice_id, &env.current_contract_address());
-
-            // #1634: record the payment in the SME's credit history. Non-fatal:
-            // a credit score failure must never block a repayment.
-            if let Some(cs_contract) = get_credit_score_contract(env) {
-                let cs_client = CreditScoreClient::new(env, &cs_contract);
-                let _ = cs_client.try_record_payment(
-                    &env.current_contract_address(),
-                    &invoice_id,
-                    &record.sme,
-                    &record.principal,
-                    &record.due_date,
-                    &now,
-                );
-            }
-
             // #217: Process withdrawal queue after repayment
             if let Err(e) = Self::process_withdrawal_queue(env, token.clone(), available_amount) {
                 // Log error but don't fail the repayment
@@ -3977,7 +3904,7 @@ impl FundingPool {
         } else {
             env.events().publish(
                 (EVT, symbol_short!("part_pay")),
-                (invoice_id, payer.clone(), actual_payment, repaid_amount, now),
+                (invoice_id, actual_payment, repaid_amount, now),
             );
         }
         Ok(())
@@ -4487,18 +4414,6 @@ impl FundingPool {
                     now,
                 ),
             );
-
-            // #1634: record the default in the SME's credit history. Non-fatal.
-            if let Some(cs_contract) = get_credit_score_contract(env) {
-                let cs_client = CreditScoreClient::new(env, &cs_contract);
-                let _ = cs_client.try_record_default(
-                    &env.current_contract_address(),
-                    &invoice_id,
-                    &record.sme,
-                    &record.principal,
-                    &record.due_date,
-                );
-            }
 
             // #866: the default-insurance reserve's file_claim is deliberately
             // *not* called from here — insurance.file_claim calls back into
@@ -5138,22 +5053,10 @@ impl FundingPool {
         if tt.pool_value <= 0 {
             return Ok(0);
         }
-        let pos_key = DataKey::InvestorPosition(investor.clone(), token.clone());
+        let pos_key = DataKey::InvestorPosition(investor.clone(), token);
         let position: InvestorPosition =
             env.storage().persistent().get(&pos_key).unwrap_or_default();
-        // #1635: current share value, not lifetime deposits.
-        let share_token: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::ShareToken(token))
-            .ok_or(PoolError::ShareTokenNotConfigured)?;
-        let total_shares: i128 = env.invoke_contract(
-            &share_token,
-            &Symbol::new(&env, "total_supply"),
-            Vec::new(&env),
-        );
-        let value = investor_current_value(&position, tt.pool_value, total_shares)?;
-        let share_bps = ((value as u128 * 10_000u128) / tt.pool_value as u128) as u32;
+        let share_bps = ((position.deposited as u128 * 10_000u128) / tt.pool_value as u128) as u32;
         Ok(share_bps)
     }
 
@@ -6244,35 +6147,6 @@ impl FundingPool {
         Ok(())
     }
 
-    /// #1639: admin-set late-payment interest rate (bps). 0 disables.
-    pub fn set_late_interest_bps(env: Env, admin: Address, bps: u32) -> Result<(), PoolError> {
-        admin.require_auth();
-        bump_instance(&env);
-        Self::require_admin(&env, &admin)?;
-        if bps > BPS_DENOM {
-            return Err(PoolError::InvalidAmount);
-        }
-        let mut config = get_config_cached(&env)?;
-        config.late_interest_bps = bps;
-        env.storage().instance().set(&DataKey::Config, &config);
-        env.events()
-            .publish((EVT, symbol_short!("late_bps")), (admin, bps));
-        Ok(())
-    }
-
-    /// #1639: admin-set cap (seconds past due_date) on late-interest accrual.
-    pub fn set_late_interest_max_secs(env: Env, admin: Address, secs: u64) -> Result<(), PoolError> {
-        admin.require_auth();
-        bump_instance(&env);
-        Self::require_admin(&env, &admin)?;
-        let mut config = get_config_cached(&env)?;
-        config.late_interest_max_secs = secs;
-        env.storage().instance().set(&DataKey::Config, &config);
-        env.events()
-            .publish((EVT, symbol_short!("late_cap")), (admin, secs));
-        Ok(())
-    }
-
     pub fn set_max_withdrawal_queue_depth(
         env: Env,
         admin: Address,
@@ -6498,10 +6372,7 @@ impl FundingPool {
                     .checked_sub(usdc_equiv)
                     .ok_or(PoolError::AmountOverflow)?;
                 if post_pool_value > 0 {
-                    // #1635: current share value, not lifetime deposits.
-                    let investor_value =
-                        investor_current_value(&position, tt.pool_value, total_shares)?;
-                    let investor_share_bps = ((investor_value as u128 * BPS_DENOM as u128)
+                    let investor_share_bps = ((position.deposited as u128 * BPS_DENOM as u128)
                         / post_pool_value as u128) as u32;
                     if investor_share_bps > config.max_single_investor_bps {
                         return Err(PoolError::ConcentrationLimitExceeded);
@@ -6965,22 +6836,6 @@ impl FundingPool {
             let pending_yield = claimable
                 .checked_add(bonus)
                 .ok_or(PoolError::AmountOverflow)?;
-            // #1635: current value of held shares (0 if no share token configured).
-            let share_token: Option<Address> = env
-                .storage()
-                .instance()
-                .get(&DataKey::ShareToken(token.clone()));
-            let current_value = match share_token {
-                Some(share_token) => {
-                    let total_shares: i128 = env.invoke_contract(
-                        &share_token,
-                        &Symbol::new(&env, "total_supply"),
-                        Vec::new(&env),
-                    );
-                    investor_current_value(&position, totals.pool_value, total_shares)?
-                }
-                None => 0,
-            };
             if position.deposited != 0
                 || position.available != 0
                 || position.deployed != 0
@@ -6990,7 +6845,6 @@ impl FundingPool {
                 deposits.push_back(InvestorTokenPositionSummary {
                     token,
                     deposited: position.deposited,
-                    current_value,
                     available_shares: position.available,
                     deployed_shares: position.deployed,
                     earned: position.earned,
@@ -7426,8 +7280,6 @@ impl FundingPool {
         })
     }
 
-    /// #1639: the estimate includes late-payment interest accrued past due_date
-    /// (late_interest_bps, capped at late_interest_max_secs).
     pub fn estimate_repayment(
         env: Env,
         invoice_id: u64,
@@ -8691,14 +8543,6 @@ mod test {
                     .set(&symbol_short!("tot"), &(t - amount));
                 env.storage().persistent().set(&from, &(b - amount));
             }
-            pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
-                let from_balance = Self::balance(env.clone(), from.clone());
-                let to_balance = Self::balance(env.clone(), to.clone());
-                env.storage()
-                    .persistent()
-                    .set(&from, &(from_balance - amount));
-                env.storage().persistent().set(&to, &(to_balance + amount));
-            }
         }
     }
     pub use dummy_share_contract::DummyShare;
@@ -8775,44 +8619,6 @@ mod test {
         pub struct DummyCreditScoreContract;
         #[contractimpl]
         impl DummyCreditScoreContract {
-            // #1634: test hooks recording which invoices got a payment / default.
-            pub fn record_payment(
-                env: Env,
-                _caller: Address,
-                invoice_id: u64,
-                _sme: Address,
-                _amount: i128,
-                _due_date: u64,
-                _paid_at: u64,
-            ) {
-                env.storage()
-                    .persistent()
-                    .set(&(symbol_short!("pay"), invoice_id), &true);
-            }
-            pub fn record_default(
-                env: Env,
-                _caller: Address,
-                invoice_id: u64,
-                _sme: Address,
-                _amount: i128,
-                _due_date: u64,
-            ) {
-                env.storage()
-                    .persistent()
-                    .set(&(symbol_short!("def"), invoice_id), &true);
-            }
-            pub fn payment_recorded(env: Env, invoice_id: u64) -> bool {
-                env.storage()
-                    .persistent()
-                    .get(&(symbol_short!("pay"), invoice_id))
-                    .unwrap_or(false)
-            }
-            pub fn default_recorded(env: Env, invoice_id: u64) -> bool {
-                env.storage()
-                    .persistent()
-                    .get(&(symbol_short!("def"), invoice_id))
-                    .unwrap_or(false)
-            }
             pub fn get_credit_score(env: Env, sme: Address) -> CreditScoreData {
                 CreditScoreData {
                     sme,
@@ -8829,39 +8635,7 @@ mod test {
             }
         }
     }
-    pub use dummy_credit_score_contract::{DummyCreditScoreContract, DummyCreditScoreContractClient};
-
-    mod failing_credit_score_contract {
-        use super::*;
-
-        #[contract]
-        pub struct FailingCreditScoreContract;
-        #[contractimpl]
-        impl FailingCreditScoreContract {
-            pub fn record_payment(
-                _env: Env,
-                _caller: Address,
-                _invoice_id: u64,
-                _sme: Address,
-                _amount: i128,
-                _due_date: u64,
-                _paid_at: u64,
-            ) {
-                panic!("credit score unavailable");
-            }
-            pub fn record_default(
-                _env: Env,
-                _caller: Address,
-                _invoice_id: u64,
-                _sme: Address,
-                _amount: i128,
-                _due_date: u64,
-            ) {
-                panic!("credit score unavailable");
-            }
-        }
-    }
-    pub use failing_credit_score_contract::FailingCreditScoreContract;
+    pub use dummy_credit_score_contract::DummyCreditScoreContract;
 
     mod dummy_token_6_decimals_contract {
         use super::*;
@@ -8909,19 +8683,6 @@ mod test {
                         .persistent()
                         .set(&DataKey::FundedInvoice(id), &false);
                 }
-            }
-            // #1634: mirrors the real invoice contract's pool-only mark_paid.
-            pub fn mark_paid(env: Env, id: u64, pool: Address) {
-                pool.require_auth();
-                env.storage()
-                    .persistent()
-                    .set(&(symbol_short!("paid"), id), &true);
-            }
-            pub fn is_paid(env: Env, id: u64) -> bool {
-                env.storage()
-                    .persistent()
-                    .get(&(symbol_short!("paid"), id))
-                    .unwrap_or(false)
             }
             pub fn add_funding(env: Env, id: u64, amount: i128, pool: Address) -> i128 {
                 pool.require_auth();
@@ -8972,13 +8733,6 @@ mod test {
     pub use mock_reflector_contract::{MockReflector, MockReflectorClient};
 
     fn setup(env: &Env) -> (FundingPoolClient<'_>, Address, Address, Address) {
-        let (client, admin, usdc_id, share_token, _invoice) = setup_with_invoice(env);
-        (client, admin, usdc_id, share_token)
-    }
-
-    fn setup_with_invoice(
-        env: &Env,
-    ) -> (FundingPoolClient<'_>, Address, Address, Address, Address) {
         env.ledger().with_mut(|l| l.timestamp = 100_000);
         let contract_id = env.register(FundingPool, ());
         let client = FundingPoolClient::new(env, &contract_id);
@@ -8995,7 +8749,7 @@ mod test {
         // Most unit tests assume a single investor can fully fund the pool.
         // Disable the concentration limit in this test harness.
         client.set_max_investor_concentration(&admin, &10_000u32);
-        (client, admin, usdc_id, share_token, invoice_contract)
+        (client, admin, usdc_id, share_token)
     }
 
     #[test]
@@ -9233,39 +8987,6 @@ mod test {
         assert_eq!(tt.pool_value, principal);
         assert!(tt.reward_per_share > 0);
         assert_eq!(tt.total_paid_out, principal + expected_interest);
-    }
-
-    // #1641: a repayment returns liquidity to the pool and must raise the trailing
-    // inflow rate, otherwise withdrawal wait forecasts overestimate wait times.
-    #[test]
-    fn test_repayment_raises_trailing_inflow_rate() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-        let principal: i128 = 1_000_000_000;
-
-        mint(&env, &usdc_id, &investor, principal);
-        mint(&env, &usdc_id, &sme, principal * 2);
-        client.deposit(&investor, &usdc_id, &principal, &None);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &principal,
-            &sme,
-            &(env.ledger().timestamp() + SECS_PER_YEAR),
-            &usdc_id,
-        );
-
-        env.ledger().with_mut(|l| l.timestamp += SECS_PER_YEAR);
-        let rate_before = client.get_trailing_inflow_rate(&usdc_id);
-
-        let total_due = client.estimate_repayment(&1u64, &None);
-        client.repay_invoice(&1u64, &sme, &total_due);
-
-        let rate_after = client.get_trailing_inflow_rate(&usdc_id);
-        assert!(rate_after > rate_before);
     }
 
     #[test]
@@ -9611,144 +9332,6 @@ mod test {
         let protocol_revenue_after = client.get_protocol_revenue(&usdc_id);
         assert!(protocol_revenue_after < protocol_revenue_before);
         assert!(claimed > 0);
-    }
-
-    // #1637: builds one funded-and-repaid invoice for a single investor, with an
-    // optional constant rate model (slopes 0, so the rate is `base_rate_bps` at any
-    // utilization) and an explicit static `yield_bps`. Returns the investor and token.
-    fn setup_loyalty_bonus_scenario(
-        env: &Env,
-        client: &FundingPoolClient<'_>,
-        admin: &Address,
-        usdc_id: &Address,
-        static_yield_bps: u32,
-        curve_base_bps: Option<u32>,
-    ) -> Address {
-        let investor = Address::generate(env);
-        let sme = Address::generate(env);
-        let principal: i128 = 1_000_000_000;
-        mint(env, usdc_id, &investor, principal);
-        mint(env, usdc_id, &sme, principal * 2);
-
-        client.set_factoring_fee(admin, &250); // funds protocol_revenue for the bonus
-        env.as_contract(&client.address, || {
-            let mut config: PoolConfig = env.storage().instance().get(&DataKey::Config).unwrap();
-            config.yield_bps = static_yield_bps;
-            env.storage().instance().set(&DataKey::Config, &config);
-            if let Some(base) = curve_base_bps {
-                let model = RateModelConfig {
-                    base_rate_bps: base,
-                    optimal_utilization_bps: BPS_DENOM,
-                    slope1_bps: 0,
-                    slope2_bps: 0,
-                    max_rate_bps: BPS_DENOM,
-                };
-                env.storage()
-                    .instance()
-                    .set(&DataKey::RateModel(usdc_id.clone()), &model);
-            }
-        });
-
-        client.deposit(&investor, usdc_id, &principal, &None);
-        client.fund_invoice(
-            admin,
-            &1u64,
-            &principal,
-            &sme,
-            &(env.ledger().timestamp() + 30 * 86_400),
-            usdc_id,
-        );
-        // Tier 3 (+150 bps) before the yield is realised.
-        env.ledger().with_mut(|l| l.timestamp += 100 * SECS_PER_DAY);
-        let total_due = client.estimate_repayment(&1u64, &None);
-        client.repay_invoice(&1u64, &sme, &total_due);
-        investor
-    }
-
-    // #1637: (claimable, bonus) as claim_yield would compute them for `investor`.
-    fn pending_yield_and_bonus(
-        env: &Env,
-        client: &FundingPoolClient<'_>,
-        investor: &Address,
-        token: &Address,
-    ) -> (i128, i128) {
-        env.as_contract(&client.address, || {
-            let tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&DataKey::TokenTotals(token.clone()))
-                .unwrap_or_default();
-            let (claimable, bonus, _) =
-                calculate_pending_yield(env, investor, token, &tt).unwrap();
-            (claimable, bonus)
-        })
-    }
-
-    #[test]
-    fn test_loyalty_bonus_paid_with_rate_model_when_static_yield_is_zero() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = setup_loyalty_bonus_scenario(
-            &env,
-            &client,
-            &admin,
-            &usdc_id,
-            0,
-            Some(1_200),
-        );
-
-        let (claimable, bonus) = pending_yield_and_bonus(&env, &client, &investor, &usdc_id);
-        assert!(claimable > 0);
-        // Curve rate 1200 bps is the base, so the bonus is claimable * 150 / 1200.
-        assert_eq!(bonus, claimable * 150 / 1_200);
-        assert!(bonus > 0);
-    }
-
-    #[test]
-    fn test_loyalty_bonus_is_fraction_of_claimable_at_curve_rate_above_static() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = setup_loyalty_bonus_scenario(
-            &env,
-            &client,
-            &admin,
-            &usdc_id,
-            800,
-            Some(1_200),
-        );
-
-        let (claimable, bonus) = pending_yield_and_bonus(&env, &client, &investor, &usdc_id);
-        assert!(claimable > 0);
-        assert_eq!(bonus, claimable * 150 / 1_200);
-        // The old static-rate scaling would have overpaid against the 800 bps base.
-        assert!(bonus < claimable * 150 / 800);
-    }
-
-    #[test]
-    fn test_loyalty_bonus_unchanged_without_rate_model() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = setup_loyalty_bonus_scenario(&env, &client, &admin, &usdc_id, 800, None);
-
-        let (claimable, bonus) = pending_yield_and_bonus(&env, &client, &investor, &usdc_id);
-        assert!(claimable > 0);
-        // No curve: identical to the pre-#1637 value claimable * bonus_bps / yield_bps.
-        assert_eq!(bonus, claimable * 150 / 800);
-    }
-
-    #[test]
-    fn test_loyalty_bonus_zero_when_no_rate_is_active() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = setup_loyalty_bonus_scenario(&env, &client, &admin, &usdc_id, 0, None);
-
-        let (claimable, bonus) = pending_yield_and_bonus(&env, &client, &investor, &usdc_id);
-        assert_eq!(bonus, 0);
-        assert!(claimable >= 0);
     }
 
     // #799: referral program integration — the pool contract pays a
@@ -11583,77 +11166,6 @@ mod test {
     }
 
     #[test]
-    fn test_late_interest_disabled_keeps_repayment_flat_after_due() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-        mint(&env, &usdc_id, &investor, 10_000);
-        mint(&env, &usdc_id, &sme, 20_000);
-        client.deposit(&investor, &usdc_id, &10_000, &None);
-        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
-        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &due_date, &usdc_id);
-
-        env.ledger().with_mut(|l| l.timestamp = due_date);
-        let on_time = client.estimate_repayment(&1u64, &None);
-        env.ledger()
-            .with_mut(|l| l.timestamp = due_date + 30 * SECS_PER_DAY);
-        let late = client.estimate_repayment(&1u64, &None);
-
-        assert_eq!(on_time, late);
-    }
-
-    #[test]
-    fn test_late_interest_accrues_after_due_date() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-        mint(&env, &usdc_id, &investor, 10_000);
-        mint(&env, &usdc_id, &sme, 20_000);
-        client.deposit(&investor, &usdc_id, &10_000, &None);
-        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
-        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &due_date, &usdc_id);
-        client.set_late_interest_bps(&admin, &1_000u32);
-
-        env.ledger().with_mut(|l| l.timestamp = due_date);
-        let on_time = client.estimate_repayment(&1u64, &None);
-        env.ledger()
-            .with_mut(|l| l.timestamp = due_date + 30 * SECS_PER_DAY);
-        let late = client.estimate_repayment(&1u64, &None);
-
-        // 5_000 principal at 10% simple over 30 days = 41 (half-up).
-        assert_eq!(late - on_time, 41);
-    }
-
-    #[test]
-    fn test_late_interest_stops_at_max_secs_cap() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-        mint(&env, &usdc_id, &investor, 10_000);
-        mint(&env, &usdc_id, &sme, 20_000);
-        client.deposit(&investor, &usdc_id, &10_000, &None);
-        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
-        client.fund_invoice(&admin, &1u64, &5_000i128, &sme, &due_date, &usdc_id);
-        client.set_late_interest_bps(&admin, &1_000u32);
-        client.set_late_interest_max_secs(&admin, &(30 * SECS_PER_DAY));
-
-        env.ledger().with_mut(|l| l.timestamp = due_date);
-        let on_time = client.estimate_repayment(&1u64, &None);
-        env.ledger()
-            .with_mut(|l| l.timestamp = due_date + 365 * SECS_PER_DAY);
-        let very_late = client.estimate_repayment(&1u64, &None);
-
-        // Accrual is capped at 30 days past due, so the late portion is still 41.
-        assert_eq!(very_late - on_time, 41);
-    }
-
-    #[test]
     fn test_total_due_overflow_returns_amount_overflow() {
         let env = Env::default();
         let token = Address::generate(&env);
@@ -11692,8 +11204,6 @@ mod test {
             utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
             max_withdrawal_queue_age_days: DEFAULT_MAX_WITHDRAWAL_QUEUE_AGE_DAYS,
             max_withdrawal_queue_depth: DEFAULT_MAX_WITHDRAWAL_QUEUE_DEPTH,
-            late_interest_bps: DEFAULT_LATE_INTEREST_BPS,
-            late_interest_max_secs: DEFAULT_LATE_INTEREST_MAX_SECS,
         };
 
         assert_eq!(
@@ -12230,98 +11740,6 @@ mod test {
         client.repay_invoice(&1u64, &sme, &total_due);
 
         // Second full repayment must be rejected
-        let result = client.try_repay_invoice(&1u64, &sme, &total_due);
-        assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
-    }
-
-    // #1634: full repayment must mark the invoice Paid on the invoice contract.
-    #[test]
-    fn test_full_repayment_marks_invoice_paid() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token, invoice_contract) = setup_with_invoice(&env);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-        mint(&env, &usdc_id, &investor, 5_000);
-        mint(&env, &usdc_id, &sme, 10_000);
-        client.deposit(&investor, &usdc_id, &5_000, &None);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &2_000i128,
-            &sme,
-            &(env.ledger().timestamp() + 50_000),
-            &usdc_id,
-        );
-        let invoice = DummyInvoiceClient::new(&env, &invoice_contract);
-        assert!(!invoice.is_paid(&1u64));
-
-        env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64, &None);
-        client.repay_invoice(&1u64, &sme, &total_due);
-
-        assert!(invoice.is_paid(&1u64));
-    }
-
-    // #1634: full repayment must record the payment in the credit score contract.
-    #[test]
-    fn test_full_repayment_records_payment_in_credit_score() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let credit_score = env.register(DummyCreditScoreContract, ());
-        client.set_credit_score_contract(&admin, &credit_score);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-        mint(&env, &usdc_id, &investor, 5_000);
-        mint(&env, &usdc_id, &sme, 10_000);
-        client.deposit(&investor, &usdc_id, &5_000, &None);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &2_000i128,
-            &sme,
-            &(env.ledger().timestamp() + 50_000),
-            &usdc_id,
-        );
-        let cs = DummyCreditScoreContractClient::new(&env, &credit_score);
-        assert!(!cs.payment_recorded(&1u64));
-
-        env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64, &None);
-        client.repay_invoice(&1u64, &sme, &total_due);
-
-        assert!(cs.payment_recorded(&1u64));
-        assert!(!cs.default_recorded(&1u64));
-    }
-
-    // #1634: a failing credit score contract must not block a full repayment.
-    #[test]
-    fn test_repayment_succeeds_when_credit_score_call_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token, invoice_contract) = setup_with_invoice(&env);
-        let failing_cs = env.register(FailingCreditScoreContract, ());
-        client.set_credit_score_contract(&admin, &failing_cs);
-        let investor = Address::generate(&env);
-        let sme = Address::generate(&env);
-        mint(&env, &usdc_id, &investor, 5_000);
-        mint(&env, &usdc_id, &sme, 10_000);
-        client.deposit(&investor, &usdc_id, &5_000, &None);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &2_000i128,
-            &sme,
-            &(env.ledger().timestamp() + 50_000),
-            &usdc_id,
-        );
-
-        env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64, &None);
-        client.repay_invoice(&1u64, &sme, &total_due);
-
-        assert!(DummyInvoiceClient::new(&env, &invoice_contract).is_paid(&1u64));
         let result = client.try_repay_invoice(&1u64, &sme, &total_due);
         assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
     }
@@ -13033,43 +12451,6 @@ mod test {
     }
 
     #[test]
-    fn test_queued_withdrawal_from_share_transferee_uses_share_balance() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, share_token) = setup(&env);
-        let investor = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let sme = Address::generate(&env);
-
-        mint(&env, &usdc_id, &investor, 10_000);
-        mint(&env, &usdc_id, &sme, 10_000);
-        client.deposit(&investor, &usdc_id, &10_000, &None);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + 86400),
-            &usdc_id,
-        );
-
-        // Peer-to-peer transfer moves share tokens but not pool-side `available`.
-        soroban_sdk::token::Client::new(&env, &share_token).transfer(&investor, &recipient, &5_000);
-
-        // The recipient holds the shares, so a queued withdrawal is accepted.
-        let request_id = client.request_withdrawal(&recipient, &usdc_id, &5_000);
-        assert!(request_id > 0);
-        let queue = client.get_withdrawal_queue(&usdc_id);
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue.get(0).unwrap().investor, recipient);
-
-        // The sender no longer holds 6_000 shares, so the larger request is rejected.
-        assert!(client
-            .try_request_withdrawal(&investor, &usdc_id, &6_000)
-            .is_err());
-    }
-
-    #[test]
     fn test_withdrawal_request_counter_preserves_queue() {
         let env = Env::default();
         env.mock_all_auths();
@@ -13128,51 +12509,6 @@ mod test {
     }
 
     #[test]
-    fn test_deposit_records_rate_snapshot() {
-        // #1640: a deposit that moves utilization must append a new rate snapshot.
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let sme = Address::generate(&env);
-
-        mint(&env, &usdc_id, &alice, 10_000);
-        mint(&env, &usdc_id, &bob, 10_000);
-        mint(&env, &usdc_id, &sme, 20_000);
-        client.deposit(&alice, &usdc_id, &10_000, &None);
-
-        // Configure a rate model (propose, wait out the timelock, execute).
-        env.ledger().with_mut(|l| l.timestamp += 400 * SECS_PER_DAY);
-        client.propose_rate_model_change(
-            &admin,
-            &usdc_id,
-            &RateModelConfig {
-                base_rate_bps: 200,
-                optimal_utilization_bps: 8_000,
-                slope1_bps: 500,
-                slope2_bps: 5_000,
-                max_rate_bps: 10_000,
-            },
-        );
-        env.ledger().with_mut(|l| l.timestamp += 400 * SECS_PER_DAY);
-        client.execute_rate_model_change(&usdc_id);
-
-        // Deploy capital so utilization is non-zero.
-        let due_date = env.ledger().timestamp() + SECS_PER_DAY;
-        client.fund_invoice(&admin, &1u64, &10_000, &sme, &due_date, &usdc_id);
-        let before = client.get_rate_history(&usdc_id, &100).len();
-
-        // Second deposit doubles pool_value, so utilization drops (10000 -> 5000 bps).
-        client.deposit(&bob, &usdc_id, &10_000, &None);
-
-        let history = client.get_rate_history(&usdc_id, &100);
-        assert_eq!(history.len(), before + 1);
-        let latest = history.get(history.len() - 1).unwrap();
-        assert_eq!(latest.utilization_bps, 5_000);
-    }
-
-    #[test]
     fn test_repayment_processes_withdrawal_queue_pro_rata() {
         let env = Env::default();
         env.mock_all_auths();
@@ -13211,115 +12547,6 @@ mod test {
         assert_eq!(queue.len(), 2);
         assert_eq!(queue.get(0).unwrap().shares, 5_000);
         assert_eq!(queue.get(1).unwrap().shares, 5_000);
-    }
-
-    // ── #1636: queued withdrawals are reserved against direct withdraw ─────────
-
-    #[test]
-    fn test_queued_withdrawal_served_before_later_direct_withdraw() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, share_token) = setup(&env);
-        let alice = Address::generate(&env);
-        let carol = Address::generate(&env);
-        let dave = Address::generate(&env);
-        let sme = Address::generate(&env);
-
-        mint(&env, &usdc_id, &alice, 10_000);
-        mint(&env, &usdc_id, &carol, 5_000);
-        mint(&env, &usdc_id, &dave, 2_000);
-        client.deposit(&alice, &usdc_id, &10_000, &None);
-        client.deposit(&carol, &usdc_id, &5_000, &None);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + SECS_PER_DAY),
-            &usdc_id,
-        );
-        // pool 15_000, deployed 10_000 -> 5_000 liquid
-        assert_eq!(client.available_liquidity(&usdc_id), 5_000);
-
-        // alice's 10_000 shares exceed the 5_000 liquid, so her request is queued.
-        client.request_withdrawal(&alice, &usdc_id, &10_000);
-        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 1);
-
-        // carol's 3_000 fits in the 5_000 liquid, but alice's queued 10_000 is reserved.
-        let result = client.try_withdraw(&carol, &usdc_id, &3_000);
-        assert_eq!(result, Err(Ok(PoolError::InsufficientLiquidity)));
-
-        // dave's deposit partially restores liquidity to 7_000. The queue is served
-        // first: alice receives 7_000 and keeps 3_000 shares queued at the head.
-        client.deposit(&dave, &usdc_id, &2_000, &None);
-        let queue = client.get_withdrawal_queue(&usdc_id);
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue.get(0).unwrap().investor, alice);
-        assert_eq!(queue.get(0).unwrap().shares, 3_000);
-        assert_eq!(token::Client::new(&env, &usdc_id).balance(&alice), 7_000);
-
-        // Only the queued remainder is reserved now, and no liquidity is left over,
-        // so carol's direct withdraw is still rejected and her shares stay intact.
-        let result = client.try_withdraw(&carol, &usdc_id, &3_000);
-        assert_eq!(result, Err(Ok(PoolError::InsufficientLiquidity)));
-        assert_eq!(token::Client::new(&env, &share_token).balance(&carol), 5_000);
-    }
-
-    #[test]
-    fn test_direct_withdraw_proceeds_when_queue_empty() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _admin, usdc_id, share_token) = setup(&env);
-        let investor = Address::generate(&env);
-
-        mint(&env, &usdc_id, &investor, 10_000);
-        client.deposit(&investor, &usdc_id, &10_000, &None);
-        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 0);
-
-        client.withdraw(&investor, &usdc_id, &4_000);
-
-        assert_eq!(token::Client::new(&env, &usdc_id).balance(&investor), 4_000);
-        assert_eq!(
-            token::Client::new(&env, &share_token).balance(&investor),
-            6_000
-        );
-    }
-
-    #[test]
-    fn test_direct_withdraw_proceeds_with_liquidity_beyond_queued_total() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let alice = Address::generate(&env);
-        let carol = Address::generate(&env);
-        let dave = Address::generate(&env);
-        let sme = Address::generate(&env);
-
-        mint(&env, &usdc_id, &alice, 10_000);
-        mint(&env, &usdc_id, &carol, 5_000);
-        mint(&env, &usdc_id, &dave, 20_000);
-        client.deposit(&alice, &usdc_id, &10_000, &None);
-        client.deposit(&carol, &usdc_id, &5_000, &None);
-        client.fund_invoice(
-            &admin,
-            &1u64,
-            &10_000,
-            &sme,
-            &(env.ledger().timestamp() + SECS_PER_DAY),
-            &usdc_id,
-        );
-        client.request_withdrawal(&alice, &usdc_id, &10_000);
-        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 1);
-
-        // dave's 20_000 lifts liquidity to 25_000, well beyond alice's queued 10_000.
-        // The queue drains in full, and the remaining 15_000 liquidity is free for
-        // carol's direct withdraw.
-        client.deposit(&dave, &usdc_id, &20_000, &None);
-        assert_eq!(client.get_withdrawal_queue(&usdc_id).len(), 0);
-        assert_eq!(token::Client::new(&env, &usdc_id).balance(&alice), 10_000);
-
-        client.withdraw(&carol, &usdc_id, &3_000);
-        assert_eq!(token::Client::new(&env, &usdc_id).balance(&carol), 3_000);
     }
 
     #[test]
@@ -13992,78 +13219,6 @@ mod test {
             client.try_risk_liquidate_collateral(&attacker, &1u64),
             Err(Ok(PoolError::Unauthorized))
         );
-    }
-
-    // #1635: a holder who fully exits must be able to re-deposit the same
-    // amount. Lifetime deposits (20_000) would exceed the 50% cap; current
-    // value (0 before re-deposit) does not.
-    #[test]
-    fn test_concentration_allows_redeposit_after_full_withdrawal() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-
-        mint(&env, &usdc_id, &alice, 20_000);
-        mint(&env, &usdc_id, &bob, 10_000);
-        client.deposit(&alice, &usdc_id, &10_000, &None);
-        client.deposit(&bob, &usdc_id, &10_000, &None);
-        client.set_max_investor_concentration(&admin, &5_000u32);
-
-        client.withdraw(&alice, &usdc_id, &10_000);
-        client.deposit(&alice, &usdc_id, &10_000, &None);
-
-        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 20_000);
-        assert_eq!(client.get_investor_concentration(&alice, &usdc_id), 5_000);
-    }
-
-    // #1635: a holder whose current share value already exceeds the cap is
-    // still rejected on any further deposit.
-    #[test]
-    fn test_concentration_rejects_holder_whose_current_value_exceeds_limit() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-
-        mint(&env, &usdc_id, &alice, 10_000);
-        mint(&env, &usdc_id, &bob, 31_000);
-        client.deposit(&alice, &usdc_id, &10_000, &None);
-        client.deposit(&bob, &usdc_id, &30_000, &None);
-        client.set_max_investor_concentration(&admin, &5_000u32);
-
-        // Bob holds 30_000 of a 40_000 pool (75%), above the 50% cap.
-        let result = client.try_deposit(&bob, &usdc_id, &1_000, &None);
-        assert_eq!(result, Err(Ok(PoolError::ConcentrationLimitExceeded)));
-        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 40_000);
-    }
-
-    // #1635: the cap still applies to a fresh large deposit from a new LP.
-    #[test]
-    fn test_concentration_still_limits_fresh_large_deposit() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, admin, usdc_id, _share_token) = setup(&env);
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let carol = Address::generate(&env);
-
-        mint(&env, &usdc_id, &alice, 10_000);
-        mint(&env, &usdc_id, &bob, 10_000);
-        mint(&env, &usdc_id, &carol, 50_000);
-        client.deposit(&alice, &usdc_id, &10_000, &None);
-        client.deposit(&bob, &usdc_id, &10_000, &None);
-        client.set_max_investor_concentration(&admin, &5_000u32);
-
-        // 40_000 into a 20_000 pool: 40_000 / 60_000 = 66.6% > 50%.
-        let too_big = client.try_deposit(&carol, &usdc_id, &40_000, &None);
-        assert_eq!(too_big, Err(Ok(PoolError::ConcentrationLimitExceeded)));
-
-        // 10_000 into a 20_000 pool: 10_000 / 30_000 = 33.3% <= 50%.
-        client.deposit(&carol, &usdc_id, &10_000, &None);
-        assert_eq!(client.get_token_totals(&usdc_id).pool_value, 30_000);
     }
 
 }
