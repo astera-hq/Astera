@@ -50,6 +50,8 @@ export default function InvestPage() {
   const [txStatus, setTxStatus] = useState<'idle' | 'pending' | 'confirmed' | 'failed'>('idle');
   const [txHash, setTxHash] = useState<string | null>(null);
   const [txError, setTxError] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [minApyBps, setMinApyBps] = useState<number | null>(null);
   // #780: withdrawals sign and submit immediately with no chance to back out —
   // route them through a confirmation dialog first (deposits stay direct, since
   // they're easily reversed by a later withdrawal).
@@ -78,6 +80,13 @@ export default function InvestPage() {
     loadTokenTotals(selectedToken);
     loadRateModel(selectedToken);
   }, [selectedToken, poolConfig]);
+
+  useEffect(() => {
+    if (liveRateBps !== null && minApyBps === null) {
+      const tolerance = Math.max(10, Math.floor(liveRateBps * 0.02));
+      setMinApyBps(Math.max(0, liveRateBps - tolerance));
+    }
+  }, [liveRateBps, minApyBps]);
 
   useEffect(() => {
     if (wallet.connected && wallet.address && selectedToken) {
@@ -235,14 +244,12 @@ export default function InvestPage() {
       };
 
       if (mode === 'deposit') {
-        // SDK PoolClient.deposit supports min_rate (#992): pass the live curve
-        // rate as the floor so a rate drop between simulation and signing reverts.
         await getPoolClient().deposit({
           signer,
           investor: wallet.address,
           token: selectedToken,
           amount: stroops,
-          minRate: liveRateBps ?? undefined,
+          minRate: minApyBps ?? undefined,
           onProgress,
         });
       } else {
@@ -266,9 +273,12 @@ export default function InvestPage() {
       await loadPosition(wallet.address, selectedToken);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Transaction failed.';
-      toast.error(msg);
+      const displayMsg = msg.includes('RateBelowMinimum')
+        ? 'Deposit rejected: APY dropped below your minimum. Please refresh and try again.'
+        : msg;
+      toast.error(displayMsg);
       setTxStatus('failed');
-      setTxError(msg);
+      setTxError(displayMsg);
     } finally {
       setTxLoading(false);
     }
@@ -522,6 +532,40 @@ export default function InvestPage() {
                       </div>
                     )}
                   </div>
+
+                  {mode === 'deposit' && (
+                    <div className="space-y-3">
+                      <button
+                        type="button"
+                        onClick={() => setShowAdvanced(!showAdvanced)}
+                        className="text-sm text-brand-muted hover:text-white transition-colors flex items-center gap-1"
+                      >
+                        {showAdvanced ? '▼' : '▶'} Advanced Options
+                      </button>
+                      
+                      {showAdvanced && (
+                        <div className="p-4 bg-brand-dark border border-brand-border rounded-xl space-y-3">
+                          <div>
+                            <label className="block text-sm text-brand-muted mb-2">
+                              Minimum APY (basis points)
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              placeholder={liveRateBps?.toString() || '0'}
+                              value={minApyBps ?? ''}
+                              onChange={(e) => setMinApyBps(e.target.value ? Number(e.target.value) : null)}
+                              className="w-full bg-brand-card border border-brand-border rounded-xl px-4 py-2.5 text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold text-sm"
+                            />
+                            <p className="text-xs text-brand-muted mt-1">
+                              Deposit will revert if the pool rate drops below this value. Current rate: {liveRateBps ?? poolConfig?.yieldBps ?? 0} bps ({((liveRateBps ?? poolConfig?.yieldBps ?? 0) / 100).toFixed(2)}%)
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {txStatus !== 'idle' && (
                     <div
