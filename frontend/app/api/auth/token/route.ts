@@ -4,11 +4,12 @@ import { SignJWT } from 'jose';
 import { getSep10Secret, SEP10_AUDIENCE, SEP10_ISSUER, SEP10_TTL_SECONDS, sep10Key } from '@/lib/sep10-jwt';
 import { checkRateLimit, getClientIdentifier, getRateLimitHeaders } from '@/lib/rateLimiter';
 import { markNonceUsed } from '@/lib/nonce-store';
+import { getStellarNetwork } from '@/lib/env';
 
 export const dynamic = 'force-dynamic';
 
 const NETWORK_PASSPHRASE =
-  process.env.NEXT_PUBLIC_STELLAR_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+  getStellarNetwork() === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
 const JWT_SECRET = getSep10Secret();
 const SERVER_SEED = process.env.SEP10_SERVER_SEED;

@@ -1,11 +1,12 @@
 import { NextResponse } from 'next/server';
 import { TransactionBuilder, Networks, Keypair, BASE_FEE, Operation, Account } from '@stellar/stellar-sdk';
 import { checkRateLimit, getClientIdentifier, getRateLimitHeaders } from '@/lib/rateLimiter';
+import { getStellarNetwork } from '@/lib/env';
 
 export const dynamic = 'force-dynamic';
 
 const NETWORK_PASSPHRASE =
-  process.env.NEXT_PUBLIC_STELLAR_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+  getStellarNetwork() === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
 const SERVER_SEED = process.env.SEP10_SERVER_SEED;
 const HOME_DOMAIN = process.env.NEXT_PUBLIC_APP_URL 

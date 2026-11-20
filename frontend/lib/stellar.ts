@@ -9,10 +9,11 @@ import {
   Address,
   xdr,
 } from '@stellar/stellar-sdk';
+import { getStellarNetwork } from './env';
 
 // #659: pick the network passphrase from NEXT_PUBLIC_NETWORK so mainnet builds
 // sign with Networks.PUBLIC instead of falling through to testnet.
-const networkEnv = process.env.NEXT_PUBLIC_NETWORK ?? 'testnet';
+const networkEnv = getStellarNetwork();
 export const NETWORK =
   networkEnv === 'mainnet'
     ? Networks.PUBLIC
@@ -433,8 +434,7 @@ const EXPLORER_BASES: Record<Exclude<StellarNetwork, 'standalone'>, string> = {
 export function explorerUrl(
   type: ExplorerEntity,
   id: string,
-  network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ??
-    'testnet',
+  network: StellarNetwork = getStellarNetwork(),
 ): string | null {
   if (network === 'standalone') return null;
   const base = EXPLORER_BASES[network] ?? EXPLORER_BASES.testnet;
