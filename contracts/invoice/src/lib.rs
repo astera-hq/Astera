@@ -224,6 +224,14 @@ pub enum InvoiceError {
     UnauthorizedArbitration = 47,
     InvalidRespondent = 48,
     ArbitrationRequired = 49,
+    /// create_invoice_with_metadata: the debtor has no registration record (registration is required).
+    DebtorNotRegistered = 50,
+    /// create_invoice_with_metadata: the debtor is registered but deactivated.
+    DebtorInactive = 51,
+    /// create_invoice_with_metadata: the amount is above the configured per-invoice maximum.
+    AmountExceedsMax = 52,
+    /// create_invoice_with_metadata: the max-amount configuration has not been set.
+    NotInitialized = 53,
 }
 
 #[contracttype]
@@ -415,6 +423,41 @@ fn require_access_control(env: &Env, caller: &Address) {
 }
 
 // #1038: Helper function to verify the caller is the configured governance contract
+/// Longest debtor identifier accepted before normalization (bytes).
+const DEBTOR_KEY_MAX_LEN: usize = 256;
+
+/// #1657: canonical key for a debtor. Trims surrounding ASCII whitespace, lowercases ASCII letters
+/// and collapses internal whitespace runs to one space, so "ACME Ltd", "acme ltd" and " ACME   LTD "
+/// all map to "acme ltd". Rejects empty and over-long input.
+fn normalize_debtor_key(env: &Env, raw: &String) -> String {
+    let len = raw.len() as usize;
+    if len == 0 || len > DEBTOR_KEY_MAX_LEN {
+        panic_with_error!(env, InvoiceError::InvalidMetadata);
+    }
+    let mut src = [0u8; DEBTOR_KEY_MAX_LEN];
+    raw.copy_into_slice(&mut src[..len]);
+    let mut out = [0u8; DEBTOR_KEY_MAX_LEN];
+    let mut out_len: usize = 0;
+    let mut pending_space = false;
+    for &byte in &src[..len] {
+        if byte == b' ' || byte == b'\t' || byte == b'\n' || byte == b'\r' {
+            pending_space = out_len > 0;
+            continue;
+        }
+        if pending_space {
+            out[out_len] = b' ';
+            out_len += 1;
+            pending_space = false;
+        }
+        out[out_len] = byte.to_ascii_lowercase();
+        out_len += 1;
+    }
+    if out_len == 0 {
+        panic_with_error!(env, InvoiceError::InvalidMetadata);
+    }
+    String::from_bytes(env, &out[..out_len])
+}
+
 fn require_governance(env: &Env, caller: &Address) {
     let configured: Option<Address> = env.storage().instance().get(&GOVERNANCE);
     match configured {
@@ -977,6 +1020,7 @@ impl InvoiceContract {
         debtor_name: String,
         max_exposure: i128,
     ) {
+        let debtor_id = normalize_debtor_key(&env, &debtor_id);
         admin.require_auth();
         let stored_admin: Address = env
             .storage()
@@ -1016,6 +1060,7 @@ impl InvoiceContract {
     }
 
     pub fn deactivate_debtor(env: Env, admin: Address, debtor_id: String) {
+        let debtor_id = normalize_debtor_key(&env, &debtor_id);
         admin.require_auth();
         let stored_admin: Address = env
             .storage()
@@ -1037,6 +1082,7 @@ impl InvoiceContract {
     }
 
     pub fn get_debtor(env: Env, debtor_id: String) -> DebtorRecord {
+        let debtor_id = normalize_debtor_key(&env, &debtor_id);
         env.storage()
             .persistent()
             .get(&DataKey::DebtorRecord(debtor_id))
@@ -1455,6 +1501,7 @@ impl InvoiceContract {
         debtor_name: String,
         max_exposure: i128,
     ) {
+        let debtor_id = normalize_debtor_key(&env, &debtor_id);
         access_control.require_auth();
         require_access_control(&env, &access_control);
         if max_exposure <= 0 {
@@ -1488,6 +1535,7 @@ impl InvoiceContract {
     }
 
     pub fn deactivate_debtor_via_ac(env: Env, access_control: Address, debtor_id: String) {
+        let debtor_id = normalize_debtor_key(&env, &debtor_id);
         access_control.require_auth();
         require_access_control(&env, &access_control);
         let mut record: DebtorRecord = env
@@ -1970,6 +2018,7 @@ impl InvoiceContract {
         verification_hash: String,
         metadata_url: String,
     ) -> u64 {
+        let debtor = normalize_debtor_key(&env, &debtor);
         if metadata_url.is_empty() {
             soroban_sdk::panic_with_error!(&env, InvoiceError::InvalidMetadata);
         }
@@ -1998,6 +2047,7 @@ impl InvoiceContract {
         verification_hash: String,
         metadata_uri: Option<String>,
     ) -> u64 {
+        let debtor = normalize_debtor_key(&env, &debtor);
         owner.require_auth();
         require_not_paused(&env);
         validate_invoice_strings(&env, &debtor, &description, &verification_hash);
@@ -2017,9 +2067,9 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::MaxInvoiceAmount)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvalidAmount));
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
         if amount > max_invoice_amount {
-            panic_with_error!(&env, InvoiceError::AmountOverflow);
+            panic_with_error!(&env, InvoiceError::AmountExceedsMax);
         }
         // #798: due_date must lie in the future regardless of the
         // admin-configurable min-due-date window (which may be set to 0).
@@ -2045,9 +2095,9 @@ impl InvoiceContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::DebtorRecord(debtor.clone()))
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::InvoiceNotFound));
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::DebtorNotRegistered));
             if !record.is_active {
-                panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+                panic_with_error!(&env, InvoiceError::DebtorInactive);
             }
             if record.current_exposure + amount > record.max_exposure {
                 panic_with_error!(&env, InvoiceError::SmeExposureLimitExceeded);
@@ -3589,6 +3639,7 @@ impl InvoiceContract {
 
     /// Returns all invoice IDs where `debtor` is the named debtor (#895).
     pub fn get_invoices_by_debtor(env: Env, debtor: String) -> Vec<u64> {
+        let debtor = normalize_debtor_key(&env, &debtor);
         bump_instance(&env);
         env.storage()
             .persistent()
