@@ -2643,8 +2643,9 @@ impl FundingPool {
         // #244: withdrawal rate limiting
         let config = get_config_cached(&env)?;
         let now = env.ledger().timestamp();
-        let is_admin = config.admin == investor;
-        if !is_admin && config.withdrawal_cooldown_secs > 0 {
+        // #1647: no admin exemption — limits apply to every LP, including the
+        // admin's own position. Emergency exits go through propose_operation.
+        if config.withdrawal_cooldown_secs > 0 {
             let last: u64 = env
                 .storage()
                 .persistent()
@@ -2712,8 +2713,8 @@ impl FundingPool {
             return Err(PoolError::InsufficientLiquidity);
         }
 
-        // #244: single-withdrawal cap (skip for admin) — compare in USDC terms
-        if !is_admin && config.max_single_withdrawal_bps < BPS_DENOM {
+        // #244: single-withdrawal cap (applies to all LPs) — compare in USDC terms
+        if config.max_single_withdrawal_bps < BPS_DENOM {
             let max_single =
                 (tt.pool_value * config.max_single_withdrawal_bps as i128) / BPS_DENOM as i128;
             if usdc_amount > max_single {
@@ -5522,10 +5523,7 @@ impl FundingPool {
             .storage()
             .instance()
             .get(&COMPLIANCE_CFG)
-            .unwrap_or(ComplianceGateConfig {
-                registry: Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWF5"),
-                required: false,
-            });
+            .ok_or(PoolError::ComplianceCheckFailed)?;
         gate.required = required;
         env.storage().instance().set(&COMPLIANCE_CFG, &gate);
         env.events().publish(
@@ -9099,6 +9097,7 @@ mod test {
     // actual on-chain token balance increased (not just internal counters).
     #[test]
     fn test_fund_invoice_then_withdraw_fees_increases_treasury_balance() {
+        use soroban_sdk::testutils::Events;
         let env = Env::default();
         env.mock_all_auths();
 
