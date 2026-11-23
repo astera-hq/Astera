@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import toast from 'react-hot-toast';
+import { useTranslations } from 'next-intl';
 import { TrancheConfig } from '@/../packages/sdk/src/generated/tranche';
 import { getTrancheClient, sdkSigner } from '@/lib/sdk';
 import { NETWORK, submitTx } from '@/lib/stellar';
@@ -16,6 +17,7 @@ interface TokenTrancheConfig {
 }
 
 export default function TrancheConfigPage() {
+  const t = useTranslations('Admin.tranches');
   const { wallet } = useStore();
   const [selectedToken, setSelectedToken] = useState('USDC');
   const [saving, setSaving] = useState(false);
@@ -103,15 +105,15 @@ export default function TrancheConfigPage() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">Tranche Configuration</h1>
+          <h1 className="text-3xl font-bold text-gray-900">{t('title')}</h1>
           <p className="mt-2 text-gray-600">
-            Configure senior/junior tranches for each supported token
+            {t('description')}
           </p>
         </div>
 
         {/* Token Selector */}
         <div className="mb-6">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Select Token</label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">{t('selectToken')}</label>
           <select
             value={selectedToken}
             onChange={(e) => setSelectedToken(e.target.value)}
@@ -129,7 +131,7 @@ export default function TrancheConfigPage() {
           {/* Configuration Panel */}
           <div className="bg-white rounded-lg shadow-md p-6 border border-gray-200">
             <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-semibold text-gray-900">{selectedToken} Configuration</h2>
+              <h2 className="text-xl font-semibold text-gray-900">{selectedToken} {t('configuration')}</h2>
               <span
                 className={`px-3 py-1 rounded-full text-xs font-medium ${
                   currentConfig?.enabled
@@ -137,7 +139,7 @@ export default function TrancheConfigPage() {
                     : 'bg-gray-100 text-gray-800'
                 }`}
               >
-                {currentConfig?.enabled ? 'Enabled' : 'Disabled'}
+                {currentConfig?.enabled ? t('enabled') : t('disabled')}
               </span>
             </div>
 
@@ -146,7 +148,7 @@ export default function TrancheConfigPage() {
                 {/* Senior Target Yield */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Senior Target Yield (BPS)
+                    {t('seniorTargetYield')}
                   </label>
                   <input
                     type="number"
@@ -164,15 +166,14 @@ export default function TrancheConfigPage() {
                     disabled={!editingConfig}
                   />
                   <p className="mt-1 text-xs text-gray-500">
-                    {(currentConfig.config.senior_target_yield_bps / 100).toFixed(1)}% target annual
-                    yield
+                    {(currentConfig.config.senior_target_yield_bps / 100).toFixed(1)}% {t('targetYield')}
                   </p>
                 </div>
 
                 {/* Senior Advance Rate */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Senior Advance Rate (BPS)
+                    {t('seniorAdvanceRate')}
                   </label>
                   <input
                     type="number"
@@ -190,15 +191,14 @@ export default function TrancheConfigPage() {
                     disabled={!editingConfig}
                   />
                   <p className="mt-1 text-xs text-gray-500">
-                    {(currentConfig.config.senior_advance_rate_bps / 100).toFixed(0)}% maximum
-                    senior share of pool
+                    {(currentConfig.config.senior_advance_rate_bps / 100).toFixed(0)}% {t('maxSeniorShare')}
                   </p>
                 </div>
 
                 {/* Junior First Loss */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Junior First Loss (BPS)
+                    {t('juniorFirstLoss')}
                   </label>
                   <input
                     type="number"
@@ -216,8 +216,7 @@ export default function TrancheConfigPage() {
                     disabled={!editingConfig}
                   />
                   <p className="mt-1 text-xs text-gray-500">
-                    {(currentConfig.config.junior_first_loss_bps / 100).toFixed(0)}% of losses
-                    junior absorbs before senior
+                    {(currentConfig.config.junior_first_loss_bps / 100).toFixed(0)}% {t('juniorAbsorbs')}
                   </p>
                 </div>
 
@@ -225,7 +224,7 @@ export default function TrancheConfigPage() {
                 <div className="space-y-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Senior Share Token
+                      {t('seniorShareToken')}
                     </label>
                     <input
                       type="text"
@@ -236,7 +235,7 @@ export default function TrancheConfigPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Junior Share Token
+                      {t('juniorShareToken')}
                     </label>
                     <input
                       type="text"
@@ -256,13 +255,13 @@ export default function TrancheConfigPage() {
                         disabled={saving}
                         className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
                       >
-                        {saving ? 'Saving…' : 'Save Changes'}
+                        {saving ? t('saving') : t('saveChanges')}
                       </button>
                       <button
                         onClick={() => setEditingConfig(null)}
                         className="flex-1 bg-gray-200 text-gray-800 py-2 px-4 rounded-lg font-medium hover:bg-gray-300"
                       >
-                        Cancel
+                        {t('cancel')}
                       </button>
                     </>
                   ) : (
@@ -271,13 +270,13 @@ export default function TrancheConfigPage() {
                         onClick={() => handleEditConfig(selectedToken)}
                         className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700"
                       >
-                        Edit Configuration
+                        {t('editConfiguration')}
                       </button>
                       <button
                         onClick={() => handleDisableTranche(selectedToken)}
                         className="flex-1 bg-red-100 text-red-700 py-2 px-4 rounded-lg font-medium hover:bg-red-200"
                       >
-                        Disable Tranche
+                        {t('disableTranche')}
                       </button>
                     </>
                   )}
@@ -285,12 +284,12 @@ export default function TrancheConfigPage() {
               </div>
             ) : (
               <div className="text-center py-12">
-                <p className="text-gray-500 mb-4">Tranche is not enabled for {selectedToken}</p>
+                <p className="text-gray-500 mb-4">{t('notEnabled')} {selectedToken}</p>
                 <button
                   onClick={() => handleEnableTranche(selectedToken)}
                   className="bg-blue-600 text-white py-2 px-6 rounded-lg font-medium hover:bg-blue-700"
                 >
-                  Enable Tranche
+                  {t('enableTranche')}
                 </button>
               </div>
             )}
@@ -298,7 +297,7 @@ export default function TrancheConfigPage() {
 
           {/* All Tokens Overview */}
           <div className="bg-white rounded-lg shadow-md p-6 border border-gray-200">
-            <h2 className="text-xl font-semibold text-gray-900 mb-4">All Token Configurations</h2>
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">{t('allTokens')}</h2>
             <div className="space-y-3">
               {configs.map((config) => (
                 <div
@@ -316,15 +315,15 @@ export default function TrancheConfigPage() {
                         {config.enabled ? (
                           <>
                             <span>
-                              Yield: {(config.config.senior_target_yield_bps / 100).toFixed(1)}%
+                              {t('yield')}: {(config.config.senior_target_yield_bps / 100).toFixed(1)}%
                             </span>
                             <span className="mx-2">•</span>
                             <span>
-                              Advance: {(config.config.senior_advance_rate_bps / 100).toFixed(0)}%
+                              {t('advance')}: {(config.config.senior_advance_rate_bps / 100).toFixed(0)}%
                             </span>
                           </>
                         ) : (
-                          'Not enabled'
+                          t('notEnabled')
                         )}
                       </div>
                     </div>
@@ -333,7 +332,7 @@ export default function TrancheConfigPage() {
                         config.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
                       }`}
                     >
-                      {config.enabled ? 'Active' : 'Inactive'}
+                      {config.enabled ? t('active') : t('inactive')}
                     </span>
                   </div>
                 </div>
@@ -344,22 +343,16 @@ export default function TrancheConfigPage() {
 
         {/* Risk Guidelines */}
         <div className="mt-8 bg-yellow-50 border border-yellow-200 rounded-lg p-6">
-          <h3 className="text-lg font-semibold text-yellow-900 mb-3">Configuration Guidelines</h3>
+          <h3 className="text-lg font-semibold text-yellow-900 mb-3">{t('guidelines')}</h3>
           <div className="space-y-2 text-sm text-yellow-800">
             <p>
-              <strong>Senior Target Yield:</strong> Should reflect market conditions and risk
-              profile. Too high may make senior uncompetitive; too low may reduce junior
-              participation.
+              <strong>{t('seniorTargetYield')}:</strong> {t('seniorYieldDesc')}
             </p>
             <p>
-              <strong>Senior Advance Rate:</strong> Determines how much senior capital can be
-              deployed relative to junior. Higher rates increase senior exposure but require more
-              junior capital for protection.
+              <strong>{t('seniorAdvanceRate')}:</strong> {t('advanceRateDesc')}
             </p>
             <p>
-              <strong>Junior First Loss:</strong> Typically set to 10000 (100%) to ensure junior
-              absorbs all losses before senior. Lower values share risk between tranches but reduce
-              senior protection.
+              <strong>{t('juniorFirstLoss')}:</strong> {t('firstLossDesc')}
             </p>
           </div>
         </div>

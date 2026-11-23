@@ -55,6 +55,21 @@ function validateUrl(value: string | undefined, name: string): EnvValidationErro
   }
 }
 
+export function getStellarNetwork(): 'testnet' | 'mainnet' | 'standalone' {
+  const network = process.env.NEXT_PUBLIC_NETWORK || 'testnet';
+  const legacyNetwork = process.env.NEXT_PUBLIC_STELLAR_NETWORK;
+
+  if (legacyNetwork && legacyNetwork !== network) {
+    const message = `Network configuration mismatch: NEXT_PUBLIC_NETWORK="${network}" but NEXT_PUBLIC_STELLAR_NETWORK="${legacyNetwork}". Use NEXT_PUBLIC_NETWORK only.`;
+    console.error(message);
+    if (typeof window === 'undefined') {
+      throw new Error(message);
+    }
+  }
+
+  return network as 'testnet' | 'mainnet' | 'standalone';
+}
+
 export function validateEnv(): { valid: boolean; errors: EnvValidationError[] } {
   const errors: EnvValidationError[] = [];
 
@@ -62,7 +77,7 @@ export function validateEnv(): { valid: boolean; errors: EnvValidationError[] } 
   const poolId = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID || '';
   const usdcId = process.env.NEXT_PUBLIC_USDC_TOKEN_ID || '';
   const eurcId = process.env.NEXT_PUBLIC_EURC_TOKEN_ID;
-  const network = process.env.NEXT_PUBLIC_NETWORK || 'testnet';
+  const network = getStellarNetwork();
   const horizonUrl = process.env.NEXT_PUBLIC_HORIZON_URL;
   const sorobanUrl = process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
 
@@ -99,8 +114,7 @@ export function validateEnv(): { valid: boolean; errors: EnvValidationError[] } 
 }
 
 export function getEnvConfig(): EnvConfig {
-  const network = (process.env.NEXT_PUBLIC_NETWORK ||
-    'testnet') as EnvConfig['NEXT_PUBLIC_NETWORK'];
+  const network = getStellarNetwork();
 
   return {
     NEXT_PUBLIC_INVOICE_CONTRACT_ID: process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID || '',

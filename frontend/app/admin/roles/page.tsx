@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
+import { useTranslations } from 'next-intl';
 import { useStore } from '@/lib/store';
 import { parseStellarAddress } from '@/lib/types';
 import type { Role, MultiSigConfig, ActionPayload, Proposal } from '@/lib/types';
@@ -17,6 +18,7 @@ import { buildActionPayload } from '@/components/admin/roles/proposalPayload';
 import type { TargetKey } from '@/components/admin/roles/proposalPayload';
 
 export default function RolesAdminPage() {
+  const t = useTranslations('Admin.roles');
   const { wallet } = useStore();
   const [roleConfigs, setRoleConfigs] = useState<Record<Role, MultiSigConfig | null> | null>(null);
   const [proposals, setProposals] = useState<Array<{ id: number; proposal: Proposal }>>([]);
@@ -162,11 +164,9 @@ export default function RolesAdminPage() {
   return (
     <div className="max-w-5xl space-y-8">
       <div>
-        <h1 className="text-3xl font-bold mb-2">Roles & Multisig Access Control</h1>
+        <h1 className="text-3xl font-bold mb-2">{t('title')}</h1>
         <p className="text-brand-muted text-sm">
-          Sensitive admin actions across Pool, Invoice, Credit Score, Oracle Registry, Compliance,
-          Governance, and Referral now route through role-based multisig proposals: propose, gather
-          approvals up to each role&apos;s threshold, then execute.
+          {t('description')}
         </p>
       </div>
 

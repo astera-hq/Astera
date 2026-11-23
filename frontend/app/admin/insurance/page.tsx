@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import useSWR from 'swr';
 import toast from 'react-hot-toast';
+import { useTranslations } from 'next-intl';
 import type { PremiumConfig } from '@/../packages/sdk/src/generated/insurance';
 import {
   getAcceptedTokens,
@@ -48,6 +49,7 @@ async function loadTokenData(token: string) {
 }
 
 export default function InsuranceAdminPage() {
+  const t = useTranslations('Admin.insurance');
   const { wallet } = useStore();
   const [selectedToken, setSelectedToken] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -190,21 +192,20 @@ export default function InsuranceAdminPage() {
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">Insurance Reserve</h1>
+          <h1 className="text-3xl font-bold text-gray-900">{t('title')}</h1>
           <p className="mt-2 text-gray-600">
-            Manage default-insurance premium pricing, per-token reserve health, and the pool ↔
-            insurance link.
+            {t('description')}
           </p>
         </div>
 
         <div className="mb-6 bg-white rounded-lg shadow-md p-6 border border-gray-200">
           <div className="flex justify-between items-center">
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">Pool integration</h2>
+              <h2 className="text-lg font-semibold text-gray-900">{t('poolIntegration')}</h2>
               <p className="text-sm text-gray-500 mt-1">
                 {poolLink
-                  ? `Pool is linked to insurance contract ${poolLink.slice(0, 8)}…${poolLink.slice(-4)}`
-                  : 'Pool is not yet linked to an insurance contract — automatic coverage purchase at funding time is disabled.'}
+                  ? `${t('poolLinked')} ${poolLink.slice(0, 8)}…${poolLink.slice(-4)}`
+                  : t('poolNotLinked')}
               </p>
             </div>
             <button
@@ -212,14 +213,14 @@ export default function InsuranceAdminPage() {
               disabled={saving || !INSURANCE_CONTRACT_ID}
               className="bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-300"
             >
-              Link pool
+              {t('linkPool')}
             </button>
           </div>
         </div>
 
         {tokens && tokens.length > 0 && (
           <div className="mb-6">
-            <label className="block text-sm font-medium text-gray-700 mb-2">Select Token</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">{t('selectToken')}</label>
             <select
               value={token ?? ''}
               onChange={(e) => setSelectedToken(e.target.value)}
@@ -237,7 +238,7 @@ export default function InsuranceAdminPage() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="bg-white rounded-lg shadow-md p-6 border border-gray-200">
             <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-semibold text-gray-900">Reserve health</h2>
+              <h2 className="text-xl font-semibold text-gray-900">{t('reserveHealth')}</h2>
               {tokenData && (
                 <span
                   className={`px-3 py-1 rounded-full text-xs font-medium ${
@@ -246,7 +247,7 @@ export default function InsuranceAdminPage() {
                       : 'bg-red-100 text-red-800'
                   }`}
                 >
-                  {tokenData.health.is_healthy ? 'Healthy' : 'Needs top-up'}
+                  {tokenData.health.is_healthy ? t('healthy') : t('needsTopUp')}
                 </span>
               )}
             </div>
@@ -255,36 +256,36 @@ export default function InsuranceAdminPage() {
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <p className="text-gray-500">
-                    Total reserves
+                    {t('totalReserves')}
                     <span className="block text-lg font-semibold text-gray-900">
                       {formatUSDC(tokenData.reserve.total_reserves)}
                     </span>
                   </p>
                   <p className="text-gray-500">
-                    Covered exposure
+                    {t('coveredExposure')}
                     <span className="block text-lg font-semibold text-gray-900">
                       {formatUSDC(tokenData.reserve.total_covered_exposure)}
                     </span>
                   </p>
                   <p className="text-gray-500">
-                    Premiums collected
+                    {t('premiumsCollected')}
                     <span className="block text-lg font-semibold text-gray-900">
                       {formatUSDC(tokenData.reserve.total_premiums_collected)}
                     </span>
                   </p>
                   <p className="text-gray-500">
-                    Claims paid
+                    {t('claimsPaid')}
                     <span className="block text-lg font-semibold text-gray-900">
                       {formatUSDC(tokenData.reserve.total_claims_paid)}
                     </span>
                   </p>
                 </div>
                 <p className="text-sm text-gray-500">
-                  Coverage ratio:{' '}
+                  {t('coverageRatio')}:{' '}
                   <span className="font-medium text-gray-900">
                     {(tokenData.reserve.coverage_ratio_bps / 100).toFixed(1)}%
                   </span>{' '}
-                  (floor {(tokenData.reserve.min_coverage_ratio_bps / 100).toFixed(1)}%)
+                  ({t('floor')} {(tokenData.reserve.min_coverage_ratio_bps / 100).toFixed(1)}%)
                 </p>
 
                 <div className="pt-4 border-t border-gray-200 space-y-3">
@@ -301,7 +302,7 @@ export default function InsuranceAdminPage() {
                       disabled={saving || !fundAmount}
                       className="whitespace-nowrap bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-300"
                     >
-                      Fund reserve
+                      {t('fundReserve')}
                     </button>
                   </div>
                   <div className="flex gap-2">
@@ -317,7 +318,7 @@ export default function InsuranceAdminPage() {
                       disabled={saving || !minRatioBps}
                       className="whitespace-nowrap bg-gray-700 text-white py-2 px-4 rounded-lg font-medium hover:bg-gray-800 disabled:bg-gray-300"
                     >
-                      Set floor
+                      {t('setFloor')}
                     </button>
                   </div>
                   <div className="flex gap-2">
@@ -333,25 +334,25 @@ export default function InsuranceAdminPage() {
                       disabled={saving || !minReserveInput}
                       className="whitespace-nowrap bg-gray-700 text-white py-2 px-4 rounded-lg font-medium hover:bg-gray-800 disabled:bg-gray-300"
                     >
-                      Set min
+                      {t('setMin')}
                     </button>
                   </div>
                 </div>
               </div>
             ) : (
-              <p className="text-gray-500 text-sm">Loading reserve data…</p>
+              <p className="text-gray-500 text-sm">{t('loading')}</p>
             )}
           </div>
 
           <div className="bg-white rounded-lg shadow-md p-6 border border-gray-200">
             <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-semibold text-gray-900">Premium configuration</h2>
+              <h2 className="text-xl font-semibold text-gray-900">{t('premiumConfig')}</h2>
               {!editingConfig ? (
                 <button
                   onClick={() => setEditingConfig({ ...activeConfig })}
                   className="bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700"
                 >
-                  Edit
+                  {t('edit')}
                 </button>
               ) : (
                 <div className="flex gap-2">
@@ -360,13 +361,13 @@ export default function InsuranceAdminPage() {
                     disabled={saving}
                     className="bg-blue-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-300"
                   >
-                    {saving ? 'Saving…' : 'Save'}
+                    {saving ? t('saving') : t('save')}
                   </button>
                   <button
                     onClick={() => setEditingConfig(null)}
                     className="bg-gray-200 text-gray-800 py-2 px-4 rounded-lg font-medium hover:bg-gray-300"
                   >
-                    Cancel
+                    {t('cancel')}
                   </button>
                 </div>
               )}
@@ -375,7 +376,7 @@ export default function InsuranceAdminPage() {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Base rate (bps/year)
+                  {t('baseRate')}
                 </label>
                 <input
                   type="number"

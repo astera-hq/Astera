@@ -104,9 +104,8 @@ async function fetchAnalyticsSummary(): Promise<Record<string, number> | null> {
   return payload.latest ?? payload.summary ?? null;
 }
 
-// ---- Simulated Historical Data Generator ----
-// In production, this would query a time-series DB or subgraph.
-// For now, we generate realistic mock data based on current on-chain state.
+// ---- Real-time Data Aggregation ----
+// Aggregates on-chain invoice data into chart-ready formats.
 
 function generateInvoiceFunnel(invoices: Invoice[]): InvoiceFunnelData[] {
   const stages: Record<string, { count: number; value: number }> = {
