@@ -812,3 +812,66 @@ fn test_set_proposal_expiry_with_external_target_is_rejected() {
         AccessControlError::IncoherentProposal
     );
 }
+
+#[test]
+fn test_prune_proposal_removes_terminal_proposals() {
+    let f = setup();
+    let prop_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(3_600),
+    );
+
+    f.client.approve_action(&f.s2, &prop_id);
+    f.client.execute_action(&f.s1, &prop_id);
+
+    let proposals_before = f.client.list_proposals(&0, &10, &None);
+    assert_eq!(proposals_before.len(), 1);
+    assert_eq!(proposals_before.get(0).unwrap().status, ProposalStatus::Executed);
+
+    f.client.prune_proposal(&prop_id);
+
+    let proposals_after = f.client.list_proposals(&0, &10, &None);
+    assert_eq!(proposals_after.len(), 0);
+}
+
+#[test]
+fn test_prune_proposal_rejects_pending_before_expiry() {
+    let f = setup();
+    let prop_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(3_600),
+    );
+
+    let result = f.client.try_prune_proposal(&prop_id);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AccessControlError::ProposalNotPending.into()
+    );
+
+    let proposals = f.client.list_proposals(&0, &10, &None);
+    assert_eq!(proposals.len(), 1);
+}
+
+#[test]
+fn test_prune_proposal_removes_expired_pending() {
+    let f = setup();
+    f.env.ledger().with_mut(|ledger| ledger.timestamp = 1_000_000);
+
+    let prop_id = f.client.propose_action(
+        &Role::SuperAdmin,
+        &f.s1,
+        &f.contract_id,
+        &ActionPayload::SetProposalExpiry(3_600),
+    );
+
+    f.env.ledger().with_mut(|ledger| ledger.timestamp = 2_000_000);
+
+    f.client.prune_proposal(&prop_id);
+
+    let proposals = f.client.list_proposals(&0, &10, &None);
+    assert_eq!(proposals.len(), 0);
+}
