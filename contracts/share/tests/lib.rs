@@ -597,3 +597,60 @@ fn test_legacy_instance_total_supply_is_migrated_on_write() {
         assert!(!env.storage().instance().has(&key));
     });
 }
+
+#[test]
+fn test_get_allowance_expiration_after_approve_with_expiration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    env.ledger().with_mut(|l| l.sequence = 100);
+
+    client.approve(&owner, &spender, &500i128, &150u32);
+    
+    assert_eq!(client.get_allowance_expiration(&owner, &spender), 150);
+}
+
+#[test]
+fn test_get_allowance_expiration_after_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    env.ledger().with_mut(|l| l.sequence = 100);
+
+    client.approve(&owner, &spender, &500i128, &150u32);
+    
+    env.ledger().with_mut(|l| l.sequence = 200);
+    
+    assert_eq!(client.get_allowance_expiration(&owner, &spender), 150);
+    assert_eq!(client.allowance(&owner, &spender), 0);
+}
+
+#[test]
+fn test_is_paused_returns_false_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup(&env);
+
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_is_paused_reflects_pause_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    assert!(!client.is_paused());
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+}

@@ -19,3 +19,7 @@ astera-types = { workspace = true }
 [[test]]
 name = "governance_action_variants"
 path = "tests/governance_action_variants.rs"
+
+[[test]]
+name = "liquidation_tests"
+path = "tests/liquidation_tests.rs"

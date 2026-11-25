@@ -725,7 +725,7 @@ export async function buildDepositTx(
         new Address(investor).toScVal(),
         new Address(token).toScVal(),
         nativeToScVal(amount, { type: 'i128' }),
-        nativeToScVal(null, { type: 'u32' }),
+        xdr.ScVal.scvVoid(),
       ),
     )
     .setTimeout(30)

@@ -21,3 +21,7 @@ path = "tests/lifecycle_tests.rs"
 [[test]]
 name = "access_control_tests"
 path = "tests/access_control_tests.rs"
+
+[[test]]
+name = "admin_tests"
+path = "tests/admin_tests.rs"
