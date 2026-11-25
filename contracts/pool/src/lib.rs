@@ -6965,6 +6965,7 @@ impl FundingPool {
         Self::require_admin(&env, &admin)?;
 
         non_reentrant!(&env, {
+            (|| -> Result<(), PoolError> {
             let config: PoolConfig = get_config_cached(&env)?;
             let funded_key = DataKey::FundedInvoice(invoice_id);
             let record: FundedInvoice = env
@@ -7092,6 +7093,7 @@ impl FundingPool {
                 (invoice_id, admin, principal, token, now),
             );
             Ok(())
+            })()
         })
     }
 
