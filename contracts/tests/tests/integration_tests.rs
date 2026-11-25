@@ -1866,6 +1866,343 @@ fn test_multi_token_deposit_and_yield() {
     );
 }
 
+/// Deposits, yield, withdrawals, and token removal stay isolated by token.
+#[test]
+fn test_multi_token_deposit_isolation() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor_usdc = Address::generate(&env);
+    let investor_xlm = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_usdc_id = env.register_contract_wasm(None, share::WASM);
+    let share_xlm_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let xlm_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    let share_usdc = share::Client::new(&env, &share_usdc_id);
+    let share_xlm = share::Client::new(&env, &share_xlm_id);
+
+    share_usdc.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "USDC Pool Shares"),
+        &String::from_str(&env, "sUSDC"),
+    );
+    share_xlm.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "XLM Pool Shares"),
+        &String::from_str(&env, "sXLM"),
+    );
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_usdc_id, &invoice_id);
+    pool_client.add_token(&admin, &xlm_id, &share_xlm_id);
+    pool_client.set_exchange_rate(&admin, &xlm_id, &10_000u32);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor_usdc, &2_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &1_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &xlm_id)
+        .mint(&investor_xlm, &2_000_000_000i128);
+
+    pool_client.deposit(&investor_usdc, &usdc_id, &1_000_000_000i128, &None);
+    pool_client.deposit(&investor_xlm, &xlm_id, &1_000_000_000i128, &None);
+    assert_eq!(pool_client.get_token_totals(&usdc_id).pool_value, 1_000_000_000i128);
+    assert_eq!(pool_client.get_token_totals(&xlm_id).pool_value, 1_000_000_000i128);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let invoice = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &500_000_000i128,
+        &due_date,
+        &String::from_str(&env, "USDC invoice"),
+        &String::from_str(&env, "hash_usdc"),
+        &metadata_url(&env),
+    );
+    pool_client.fund_invoice(
+        &admin,
+        &invoice,
+        &500_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+    env.ledger().with_mut(|l| l.timestamp += 10 * 86_400);
+    let amount_due = pool_client.estimate_repayment(&invoice, &None);
+    pool_client.repay_invoice(&invoice, &sme, &amount_due);
+
+    let usdc_totals = pool_client.get_token_totals(&usdc_id);
+    let xlm_totals = pool_client.get_token_totals(&xlm_id);
+    assert!(usdc_totals.reward_per_share > 0, "USDC yield should accrue");
+    assert_eq!(xlm_totals.reward_per_share, 0, "XLM must not receive USDC yield");
+    assert_eq!(usdc_totals.total_deployed, 0);
+    assert_eq!(xlm_totals.total_deployed, 0);
+
+    let usdc_pool_balance = soroban_sdk::token::Client::new(&env, &usdc_id).balance(&pool_id);
+    let xlm_shares = share_xlm.balance(&investor_xlm);
+    pool_client.withdraw(&investor_xlm, &xlm_id, &xlm_shares);
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &usdc_id).balance(&pool_id),
+        usdc_pool_balance,
+        "withdrawing XLM must not change the USDC balance"
+    );
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &xlm_id).balance(&investor_xlm),
+        2_000_000_000i128
+    );
+
+    let xlm_balance_before_usdc_operations =
+        soroban_sdk::token::Client::new(&env, &xlm_id).balance(&investor_xlm);
+    pool_client.claim_yield(&investor_usdc, &usdc_id);
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &xlm_id).balance(&investor_xlm),
+        xlm_balance_before_usdc_operations
+    );
+
+    let usdc_pool_value = pool_client.get_token_totals(&usdc_id).pool_value;
+    assert!(share_usdc.balance(&investor_usdc) > 0);
+
+    let proposal_id =
+        pool_client.propose_operation(&admin, &pool::AdminOperation::RemoveToken(xlm_id.clone()));
+    advance_past_operation_delay(&env, &pool_client);
+    pool_client.execute_operation(&admin, &proposal_id);
+    let accepted_tokens = pool_client.accepted_tokens();
+    assert!(!accepted_tokens.contains(&xlm_id));
+    assert!(accepted_tokens.contains(&usdc_id));
+    assert_eq!(pool_client.get_token_totals(&usdc_id).pool_value, usdc_pool_value);
+
+    let usdc_shares = share_usdc.balance(&investor_usdc);
+    pool_client.withdraw(&investor_usdc, &usdc_id, &usdc_shares);
+    assert!(
+        soroban_sdk::token::Client::new(&env, &usdc_id).balance(&investor_usdc)
+            > 2_000_000_000i128,
+        "USDC withdrawal should include its accrued yield"
+    );
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &xlm_id).balance(&investor_xlm),
+        xlm_balance_before_usdc_operations,
+        "withdrawing USDC must not change the XLM balance"
+    );
+}
+
+/// Invoices funded in different tokens repay into their matching token pools.
+#[test]
+fn test_multi_token_fund_and_repay() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme_usdc = Address::generate(&env);
+    let sme_xlm = Address::generate(&env);
+    let investor_usdc = Address::generate(&env);
+    let investor_xlm = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_usdc_id = env.register_contract_wasm(None, share::WASM);
+    let share_xlm_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let xlm_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    for (share_id, name, symbol) in [
+        (share_usdc_id.clone(), "USDC Pool Shares", "sUSDC"),
+        (share_xlm_id.clone(), "XLM Pool Shares", "sXLM"),
+    ] {
+        share::Client::new(&env, &share_id).initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, name),
+            &String::from_str(&env, symbol),
+        );
+    }
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_usdc_id, &invoice_id);
+    pool_client.add_token(&admin, &xlm_id, &share_xlm_id);
+    pool_client.set_exchange_rate(&admin, &xlm_id, &10_000u32);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor_usdc, &2_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &xlm_id)
+        .mint(&investor_xlm, &2_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme_usdc, &1_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &xlm_id).mint(&sme_xlm, &1_000_000_000i128);
+    pool_client.deposit(&investor_usdc, &usdc_id, &1_000_000_000i128, &None);
+    pool_client.deposit(&investor_xlm, &xlm_id, &1_000_000_000i128, &None);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let usdc_invoice = invoice_client.create_invoice(
+        &sme_usdc,
+        &String::from_str(&env, "USDC Corp"),
+        &300_000_000i128,
+        &due_date,
+        &String::from_str(&env, "USDC invoice"),
+        &String::from_str(&env, "hash_usdc"),
+        &metadata_url(&env),
+    );
+    let xlm_invoice = invoice_client.create_invoice(
+        &sme_xlm,
+        &String::from_str(&env, "XLM Corp"),
+        &400_000_000i128,
+        &due_date,
+        &String::from_str(&env, "XLM invoice"),
+        &String::from_str(&env, "hash_xlm"),
+        &metadata_url(&env),
+    );
+    pool_client.fund_invoice(
+        &admin,
+        &usdc_invoice,
+        &300_000_000i128,
+        &sme_usdc,
+        &due_date,
+        &usdc_id,
+    );
+    pool_client.fund_invoice(
+        &admin,
+        &xlm_invoice,
+        &400_000_000i128,
+        &sme_xlm,
+        &due_date,
+        &xlm_id,
+    );
+
+    assert_eq!(pool_client.get_funded_invoice(&usdc_invoice).unwrap().token, usdc_id);
+    assert_eq!(pool_client.get_funded_invoice(&xlm_invoice).unwrap().token, xlm_id);
+    assert_eq!(pool_client.get_token_totals(&usdc_id).total_deployed, 300_000_000i128);
+    assert_eq!(pool_client.get_token_totals(&xlm_id).total_deployed, 400_000_000i128);
+
+    env.ledger().with_mut(|l| l.timestamp += 10 * 86_400);
+    let usdc_due = pool_client.estimate_repayment(&usdc_invoice, &None);
+    pool_client.repay_invoice(&usdc_invoice, &sme_usdc, &usdc_due);
+    let xlm_due = pool_client.estimate_repayment(&xlm_invoice, &None);
+    pool_client.repay_invoice(&xlm_invoice, &sme_xlm, &xlm_due);
+
+    assert_eq!(pool_client.get_token_totals(&usdc_id).total_deployed, 0);
+    assert_eq!(pool_client.get_token_totals(&xlm_id).total_deployed, 0);
+    assert!(pool_client.get_token_totals(&usdc_id).total_paid_out > 0);
+    assert!(pool_client.get_token_totals(&xlm_id).total_paid_out > 0);
+}
+
+/// An invoice repayment must transfer its funded token, not another pool token.
+#[test]
+fn test_cross_token_repay_rejected() {
+    let env = test_env();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let invoice_id = env.register_contract_wasm(None, invoice::WASM);
+    let pool_id = env.register_contract_wasm(None, pool::WASM);
+    let share_usdc_id = env.register_contract_wasm(None, share::WASM);
+    let share_xlm_id = env.register_contract_wasm(None, share::WASM);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let xlm_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let invoice_client = invoice::Client::new(&env, &invoice_id);
+    let pool_client = pool::Client::new(&env, &pool_id);
+    share::Client::new(&env, &share_usdc_id).initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "USDC Pool Shares"),
+        &String::from_str(&env, "sUSDC"),
+    );
+    share::Client::new(&env, &share_xlm_id).initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "XLM Pool Shares"),
+        &String::from_str(&env, "sXLM"),
+    );
+    invoice_client.initialize(
+        &admin,
+        &pool_id,
+        &10_000_000_000i128,
+        &(30u64 * 86_400u64),
+        &7u32,
+    );
+    initialize_pool(&pool_client, &admin, &usdc_id, &share_usdc_id, &invoice_id);
+    pool_client.add_token(&admin, &xlm_id, &share_xlm_id);
+    pool_client.set_exchange_rate(&admin, &xlm_id, &10_000u32);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
+        .mint(&investor, &1_000_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &xlm_id).mint(&sme, &1_000_000_000i128);
+    pool_client.deposit(&investor, &usdc_id, &1_000_000_000i128, &None);
+
+    let due_date = env.ledger().timestamp() + 30 * 86_400;
+    let invoice = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &300_000_000i128,
+        &due_date,
+        &String::from_str(&env, "USDC invoice"),
+        &String::from_str(&env, "hash_usdc"),
+        &metadata_url(&env),
+    );
+    pool_client.fund_invoice(
+        &admin,
+        &invoice,
+        &300_000_000i128,
+        &sme,
+        &due_date,
+        &usdc_id,
+    );
+
+    env.ledger().with_mut(|l| l.timestamp += 10 * 86_400);
+    let amount_due = pool_client.estimate_repayment(&invoice, &None);
+    let xlm_balance_before = soroban_sdk::token::Client::new(&env, &xlm_id).balance(&sme);
+    assert!(pool_client.try_repay_invoice(&invoice, &sme, &amount_due).is_err());
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &xlm_id).balance(&sme),
+        xlm_balance_before
+    );
+    assert_eq!(pool_client.get_funded_invoice(&invoice).unwrap().repaid_amount, 0);
+    assert_eq!(pool_client.get_token_totals(&usdc_id).total_deployed, 300_000_000i128);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &amount_due);
+    pool_client.repay_invoice(&invoice, &sme, &amount_due);
+    assert_eq!(pool_client.get_token_totals(&usdc_id).total_deployed, 0);
+}
+
 /// Integration test: token removal succeeds when balances are zero
 #[test]
 fn test_token_removal_with_zero_balances() {
