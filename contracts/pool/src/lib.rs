@@ -4048,6 +4048,32 @@ impl FundingPool {
                     &mut stats,
                     fully_repaid,
                 )?;
+
+                // Track the principal component separately from interest and
+                // fees so a later cancellation only attempts to recover what
+                // remains outstanding from the SME.
+                let principal_settled_before = get_principal_settled(env, invoice_id);
+                let outstanding_principal = record
+                    .principal
+                    .checked_sub(principal_settled_before)
+                    .ok_or(PoolError::AmountOverflow)?;
+                let principal_part = if actual_payment >= remaining_amount {
+                    outstanding_principal
+                } else {
+                    actual_payment
+                        .checked_mul(outstanding_principal)
+                        .ok_or(PoolError::AmountOverflow)?
+                        .checked_div(remaining_amount)
+                        .ok_or(PoolError::AmountOverflow)?
+                };
+                set_principal_settled(
+                    env,
+                    invoice_id,
+                    principal_settled_before
+                        .checked_add(principal_part)
+                        .ok_or(PoolError::AmountOverflow)?,
+                );
+
                 tt.total_fee_revenue = tt
                     .total_fee_revenue
                     .checked_add(fee_collected)
@@ -6935,81 +6961,140 @@ impl FundingPool {
     ) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
+        Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
 
-        let config: PoolConfig = get_config_cached(&env)?;
+        non_reentrant!(&env, {
+            (|| -> Result<(), PoolError> {
+                let config: PoolConfig = get_config_cached(&env)?;
+                let funded_key = DataKey::FundedInvoice(invoice_id);
+                let record: FundedInvoice = env
+                    .storage()
+                    .persistent()
+                    .get(&funded_key)
+                    .ok_or(PoolError::InvoiceNotFound)?;
 
-        // Load the funded invoice record
-        let funded_key = DataKey::FundedInvoice(invoice_id);
-        let record: FundedInvoice = env
-            .storage()
-            .persistent()
-            .get(&funded_key)
-            .ok_or(PoolError::InvoiceNotFound)?;
+                let principal = record.principal;
+                let token = record.token.clone();
+                let round_id = record.co_funding_round_id;
+                let settled_key = principal_settled_key(invoice_id);
+                let has_settlement_tracking = env.storage().persistent().has(&settled_key);
+                // Older co-funded records predate principal-settlement tracking.
+                // Do not pull a full principal from those SMEs: some may already
+                // have made partial repayments that were distributed to co-funders.
+                let can_recover = round_id.is_none() || has_settlement_tracking;
+                let outstanding = if can_recover {
+                    principal
+                        .checked_sub(get_principal_settled(&env, invoice_id))
+                        .ok_or(PoolError::AmountOverflow)?
+                } else {
+                    0
+                };
 
-        let principal = record.principal;
-        let token = record.token.clone();
-        let is_co_funded = record.co_funding_round_id.is_some();
+                // The invoice contract must accept Funded -> Cancelled before any
+                // pool accounting or participant records are changed.
+                let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+                match invoice_client.try_mark_cancelled(&invoice_id, &env.current_contract_address()) {
+                    Ok(Ok(())) => {}
+                    _ => return Err(PoolError::InvoiceNotCancelled),
+                }
 
-        // Notify the invoice contract: transition Funded → Cancelled
-        let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
-        match invoice_client.try_mark_cancelled(&invoice_id, &env.current_contract_address()) {
-            Ok(Ok(())) => {}
-            _ => return Err(PoolError::InvoiceNotCancelled),
-        }
+                // If the SME has approved the pool to pull the outstanding
+                // principal, recover it. Otherwise cancellation is an explicit
+                // write-off for pool-funded invoices. Co-funded principal was
+                // already removed from pool_value when investors committed.
+                let pool_address = env.current_contract_address();
+                let principal_returned = if outstanding == 0 {
+                    true
+                } else {
+                    let token_client = token::Client::new(&env, &token);
+                    matches!(
+                        token_client.try_transfer_from(
+                            &pool_address,
+                            &record.sme,
+                            &pool_address,
+                            &outstanding,
+                        ),
+                        Ok(Ok(()))
+                    )
+                };
 
-        // Decrement deployed capital (co-funded invoices bypass total_deployed).
-        // Only the principal still outstanding is deployed: principal already
-        // recovered through repayment (#1630), or written off, is not.
-        if !is_co_funded {
-            let outstanding = principal
-                .checked_sub(get_principal_settled(&env, invoice_id))
-                .ok_or(PoolError::AmountOverflow)?;
-            let token_totals_key = DataKey::TokenTotals(token.clone());
-            let mut tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&token_totals_key)
-                .unwrap_or_default();
-            tt.total_deployed = tt
-                .total_deployed
-                .checked_sub(outstanding)
-                .ok_or(PoolError::AmountOverflow)?;
-            env.storage().instance().set(&token_totals_key, &tt);
+                if let Some(round_id) = round_id {
+                    if principal_returned && outstanding > 0 {
+                        // Co-funders receive any returned principal in proportion
+                        // to their recorded shares. The recovery helper assigns
+                        // rounding dust to the final holder.
+                        distribute_co_funded_recovery(&env, round_id, &token, outstanding)?;
+                    }
 
-            // Record rate snapshot since utilization changed
-            record_rate_snapshot(&env, &token);
-        }
+                    // Retire every co-funder claim, including the exact committed
+                    // amounts, so a cancelled round cannot remain visible as an
+                    // active invoice position or be refunded a second time.
+                    let round_key = DataKey::CoFundingRound(round_id);
+                    let mut round: CoFundingRound = env
+                        .storage()
+                        .persistent()
+                        .get(&round_key)
+                        .ok_or(PoolError::CoFundingRoundNotFound)?;
+                    let participants = round.participants.clone();
+                    for i in 0..participants.len() {
+                        let investor = participants.get(i).ok_or(PoolError::StorageCorrupted)?;
+                        env.storage()
+                            .persistent()
+                            .remove(&DataKey::CoFundShare(round_id, investor.clone()));
+                        env.storage()
+                            .persistent()
+                            .remove(&DataKey::CoFundCommitted(round_id, investor));
+                    }
+                    round.committed_principal = 0;
+                    round.participants = Vec::new(&env);
+                    round.status = CoFundingStatus::Cancelled;
+                    env.storage().persistent().set(&round_key, &round);
+                } else if principal_returned {
+                    // Returned cash replaces the receivable in NAV; only deployed
+                    // capital changes. If the SME cannot return it, write off the
+                    // unrecovered receivable from both NAV and deployed capital.
+                    let token_totals_key = DataKey::TokenTotals(token.clone());
+                    let mut tt: PoolTokenTotals = env
+                        .storage()
+                        .instance()
+                        .get(&token_totals_key)
+                        .unwrap_or_default();
+                    tt.total_deployed = tt
+                        .total_deployed
+                        .checked_sub(outstanding)
+                        .ok_or(PoolError::AmountOverflow)?;
+                    env.storage().instance().set(&token_totals_key, &tt);
+                } else {
+                    write_off_outstanding_principal(&env, &record)?;
+                }
 
-        // Remove the FundedInvoice record, and the settled-principal bookkeeping
-        // with it, so a later re-funding of this invoice id starts from zero.
-        env.storage().persistent().remove(&funded_key);
-        env.storage()
-            .persistent()
-            .remove(&principal_settled_key(invoice_id));
+                // The receivable is now settled or written off. Remove the funded
+                // record and settlement marker so this invoice id can be reused.
+                env.storage().persistent().remove(&funded_key);
+                env.storage().persistent().remove(&settled_key);
 
-        // Update stats
-        let mut stats: PoolStorageStats = env
-            .storage()
-            .instance()
-            .get(&DataKey::StorageStats)
-            .unwrap_or_default();
-        stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
-        env.storage().instance().set(&DataKey::StorageStats, &stats);
+                // Collateral no longer secures an active funded invoice. Return it
+                // to its depositor and retain the settled record for audit.
+                let now = env.ledger().timestamp();
+                release_collateral(&env, invoice_id, &admin, now);
 
-        // Emit cancellation event
-        env.events().publish(
-            (EVT, symbol_short!("inv_cncl")),
-            (
-                invoice_id,
-                admin,
-                principal,
-                token,
-                env.ledger().timestamp(),
-            ),
-        );
+                let mut stats: PoolStorageStats = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::StorageStats)
+                    .unwrap_or_default();
+                stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+                env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        Ok(())
+                record_rate_snapshot(&env, &token);
+                env.events().publish(
+                    (EVT, symbol_short!("inv_cncl")),
+                    (invoice_id, admin, principal, token, now),
+                );
+                Ok(())
+            })()
+        })
     }
 
     pub fn finalize_co_funding(
@@ -7124,6 +7209,7 @@ impl FundingPool {
                 env.storage()
                     .persistent()
                     .set(&DataKey::FundedInvoice(invoice_id), &funded);
+                set_principal_settled(&env, invoice_id, 0);
                 set_funded_invoice_ttl(&env, invoice_id, false);
 
                 stats.total_funded_invoices = stats
