@@ -261,6 +261,10 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 365 * 5;
 // seizure) so auditors and the SME have time to verify the record exists,
 // covering the post-settlement audit/dispute window.
 const SETTLEMENT_COLLATERAL_TTL: u32 = LEDGERS_PER_DAY * 90;
+// #1628: how long collateral must sit against an invoice that is still
+// fundable before its depositor may withdraw it. Cancelled and expired
+// invoices can be withdrawn immediately.
+const COLLATERAL_WITHDRAW_TIMEOUT_SECS: u64 = 30 * SECS_PER_DAY;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours — default
@@ -790,6 +794,24 @@ pub struct InvoiceRecord {
     pub amount: i128,
     pub due_date: u64,
     pub funded_amount: i128,
+    // #1628: needed to tell terminal (cancelled/expired) invoices apart from
+    // ones that could still be funded. Variant names must match the invoice
+    // contract's InvoiceStatus exactly, since it is decoded by name.
+    pub status: InvoiceStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InvoiceStatus {
+    Pending,
+    AwaitingVerification,
+    Verified,
+    Disputed,
+    Funded,
+    Paid,
+    Defaulted,
+    Cancelled,
+    Expired,
 }
 
 #[contracttype]
@@ -1446,6 +1468,134 @@ fn release_collateral(env: &Env, invoice_id: u64, released_by: &Address, settled
             );
         }
     }
+}
+
+// #1630: principal already recognised against a funded invoice, either
+// recovered through repayment or written off on default/liquidation. Kept under
+// a Symbol-tagged tuple key rather than a new DataKey variant (DataKey is at
+// the 50-variant ceiling) or a new FundedInvoice field (which would stop
+// existing FundedInvoice records from decoding). Absent means nothing settled.
+fn principal_settled_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("prin_set"), invoice_id)
+}
+
+fn get_principal_settled(env: &Env, invoice_id: u64) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&principal_settled_key(invoice_id))
+        .unwrap_or(0)
+}
+
+fn set_principal_settled(env: &Env, invoice_id: u64, principal_settled: i128) {
+    let key = principal_settled_key(invoice_id);
+    env.storage().persistent().set(&key, &principal_settled);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, ACTIVE_INVOICE_TTL, ACTIVE_INVOICE_TTL);
+}
+
+// The factoring fee is a fixed share of principal, so the fee recognised once
+// `principal_settled` of the principal has been recovered is proportional to
+// it. Floor division keeps this deterministic, and once the full principal is
+// settled it is exactly `factoring_fee`.
+fn fee_recognized_for(
+    principal: i128,
+    factoring_fee: i128,
+    principal_settled: i128,
+) -> PoolResult<i128> {
+    if principal <= 0 {
+        return Ok(0);
+    }
+    principal_settled
+        .min(principal)
+        .checked_mul(factoring_fee)
+        .ok_or(PoolError::AmountOverflow)?
+        .checked_div(principal)
+        .ok_or(PoolError::AmountOverflow)
+}
+
+// Splits one non-co-funded repayment into (principal_part, fee_part,
+// interest_part). Principal is recovered pro rata to its share of the amount
+// still owed, so an interest-free partial payment reduces principal by the
+// same fraction it covers. The final payment settles all remaining principal.
+// The yield portion is split into fee and interest, and the three always sum
+// to `payment`.
+fn split_non_cofunded_repayment(
+    record: &FundedInvoice,
+    principal_settled_before: i128,
+    outstanding_due_before: i128,
+    payment: i128,
+) -> PoolResult<(i128, i128, i128)> {
+    let outstanding_principal = record
+        .principal
+        .checked_sub(principal_settled_before)
+        .ok_or(PoolError::AmountOverflow)?;
+    let principal_part = if payment >= outstanding_due_before {
+        outstanding_principal
+    } else {
+        payment
+            .checked_mul(outstanding_principal)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(outstanding_due_before)
+            .ok_or(PoolError::AmountOverflow)?
+    };
+    let yield_part = payment
+        .checked_sub(principal_part)
+        .ok_or(PoolError::AmountOverflow)?;
+    let fee_before = fee_recognized_for(
+        record.principal,
+        record.factoring_fee,
+        principal_settled_before,
+    )?;
+    let principal_settled_after = principal_settled_before
+        .checked_add(principal_part)
+        .ok_or(PoolError::AmountOverflow)?;
+    let fee_after = fee_recognized_for(
+        record.principal,
+        record.factoring_fee,
+        principal_settled_after,
+    )?;
+    // Clamped so per-payment rounding can never make interest negative.
+    let fee_part = fee_after
+        .checked_sub(fee_before)
+        .ok_or(PoolError::AmountOverflow)?
+        .min(yield_part);
+    let interest_part = yield_part
+        .checked_sub(fee_part)
+        .ok_or(PoolError::AmountOverflow)?;
+    Ok((principal_part, fee_part, interest_part))
+}
+
+// Writes off the principal still outstanding on an invoice whose collateral is
+// being seized or liquidated. Only the unrecovered remainder is removed from
+// the loan token's NAV and deployed capital, since principal already repaid
+// through partial payments (#1630) is still held by the pool. Marks the
+// principal fully settled so later repayments can't write it off a second time.
+fn write_off_outstanding_principal(env: &Env, record: &FundedInvoice) -> PoolResult<()> {
+    let settled_before = get_principal_settled(env, record.invoice_id);
+    let outstanding = record
+        .principal
+        .checked_sub(settled_before)
+        .ok_or(PoolError::AmountOverflow)?;
+
+    let loan_tt_key = DataKey::TokenTotals(record.token.clone());
+    let mut loan_tt: PoolTokenTotals = env
+        .storage()
+        .instance()
+        .get(&loan_tt_key)
+        .unwrap_or_default();
+    loan_tt.pool_value = loan_tt
+        .pool_value
+        .checked_sub(outstanding)
+        .ok_or(PoolError::AmountOverflow)?;
+    loan_tt.total_deployed = loan_tt
+        .total_deployed
+        .checked_sub(outstanding)
+        .ok_or(PoolError::AmountOverflow)?;
+    env.storage().instance().set(&loan_tt_key, &loan_tt);
+
+    set_principal_settled(env, record.invoice_id, record.principal);
+    Ok(())
 }
 
 fn get_token_config(env: &Env, token: &Address) -> PoolResult<TokenConfig> {
@@ -3906,54 +4056,85 @@ impl FundingPool {
                     .protocol_revenue
                     .checked_add(fee_collected)
                     .ok_or(PoolError::AmountOverflow)?;
-            } else if fully_repaid {
+            } else {
+                // #1630: every payment recovers its pro-rata share of principal
+                // and books the yield portion as it arrives, instead of booking
+                // everything at full repayment. Only the principal recovered here
+                // leaves total_deployed, so a later default writes off just the
+                // unrecovered remainder and the recovered cash stays in NAV.
+                // For a payment that fully repays this matches the previous
+                // accounting exactly.
+                let principal_settled_before = get_principal_settled(env, invoice_id);
+                let (principal_part, fee_part, interest_part) = split_non_cofunded_repayment(
+                    &record,
+                    principal_settled_before,
+                    remaining_amount,
+                    actual_payment,
+                )?;
+                let principal_settled_after = principal_settled_before
+                    .checked_add(principal_part)
+                    .ok_or(PoolError::AmountOverflow)?;
+                set_principal_settled(env, invoice_id, principal_settled_after);
+
                 tt.total_deployed = tt
                     .total_deployed
-                    .checked_sub(record.principal)
+                    .checked_sub(principal_part)
                     .ok_or(PoolError::AmountOverflow)?;
                 tt.total_fee_revenue = tt
                     .total_fee_revenue
-                    .checked_add(record.factoring_fee)
+                    .checked_add(fee_part)
                     .ok_or(PoolError::AmountOverflow)?;
                 tt.protocol_revenue = tt
                     .protocol_revenue
-                    .checked_add(record.factoring_fee)
+                    .checked_add(fee_part)
                     .ok_or(PoolError::AmountOverflow)?;
                 tt.total_paid_out = tt
                     .total_paid_out
-                    .checked_add(total_due)
+                    .checked_add(actual_payment)
                     .ok_or(PoolError::AmountOverflow)?;
-                stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+                if fully_repaid {
+                    stats.active_funded_invoices = stats.active_funded_invoices.saturating_sub(1);
+                }
 
-                // Distribute interest proportionally to share holders via the
-                // reward_per_share accumulator. #1619: this is the ONLY
-                // distribution path for the interest — it is deliberately not
-                // also added to pool_value, otherwise an LP could collect it
-                // through claim_yield and again through a withdraw priced off
-                // the inflated pool_value.
-                let share_token: Address = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::ShareToken(record.token.clone()))
-                    .ok_or(PoolError::ShareTokenNotConfigured)?;
-                let total_shares: i128 = env.invoke_contract(
-                    &share_token,
-                    &Symbol::new(env, "total_supply"),
-                    Vec::new(env),
-                );
-                if total_shares > 0 {
-                    let reward_delta = calculate_reward_delta(total_interest_i128, total_shares)?;
-                    tt.reward_per_share = tt
-                        .reward_per_share
-                        .checked_add(reward_delta)
-                        .ok_or(PoolError::AmountOverflow)?;
-                } else {
-                    // No share holders to accrue to: keep the interest in
-                    // pool value rather than stranding it.
+                if interest_part > 0 && principal_settled_before >= record.principal {
+                    // The principal was already written off on default, so NAV no
+                    // longer counts it. This payment is a recovery of that loss and
+                    // goes back into pool_value rather than being paid out as yield.
                     tt.pool_value = tt
                         .pool_value
-                        .checked_add(total_interest_i128)
+                        .checked_add(interest_part)
                         .ok_or(PoolError::AmountOverflow)?;
+                } else if interest_part > 0 {
+                    // Distribute interest proportionally to share holders via the
+                    // reward_per_share accumulator. #1619: this is the ONLY
+                    // distribution path for the interest — it is deliberately not
+                    // also added to pool_value, otherwise an LP could collect it
+                    // through claim_yield and again through a withdraw priced off
+                    // the inflated pool_value.
+                    let share_token: Address = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::ShareToken(record.token.clone()))
+                        .ok_or(PoolError::ShareTokenNotConfigured)?;
+                    let total_shares: i128 = env.invoke_contract(
+                        &share_token,
+                        &Symbol::new(env, "total_supply"),
+                        Vec::new(env),
+                    );
+                    if total_shares > 0 {
+                        let reward_delta = calculate_reward_delta(interest_part, total_shares)?;
+                        tt.reward_per_share = tt
+                            .reward_per_share
+                            .checked_add(reward_delta)
+                            .ok_or(PoolError::AmountOverflow)?;
+                    } else {
+                        // No share holders to accrue to: keep the interest in
+                        // pool value rather than stranding it.
+                        tt.pool_value = tt
+                            .pool_value
+                            .checked_add(interest_part)
+                            .ok_or(PoolError::AmountOverflow)?;
+                    }
                 }
             }
 
@@ -4212,17 +4393,17 @@ impl FundingPool {
                 return Err(PoolError::CollateralAlreadySettled);
             }
 
-            let token_totals_key = DataKey::TokenTotals(deposit.token.clone());
-            let mut tt: PoolTokenTotals = env
+            // #1629: the collateral is sent to the auction here, so it must not be
+            // credited to pool_value. It was never counted there while held, and it
+            // leaves the pool's real balance now. Write down the funded invoice's
+            // unrecovered principal the same way seize_collateral_core does. Auction
+            // proceeds are only booked once the sale settles.
+            let funded: FundedInvoice = env
                 .storage()
-                .instance()
-                .get(&token_totals_key)
-                .unwrap_or_default();
-            tt.pool_value = tt
-                .pool_value
-                .checked_add(deposit.amount)
-                .ok_or(PoolError::AmountOverflow)?;
-            env.storage().instance().set(&token_totals_key, &tt);
+                .persistent()
+                .get(&DataKey::FundedInvoice(invoice_id))
+                .ok_or(PoolError::InvoiceNotFound)?;
+            write_off_outstanding_principal(&env, &funded)?;
 
             deposit.settled = true;
             deposit.seized_at = env.ledger().timestamp();
@@ -4274,12 +4455,26 @@ impl FundingPool {
                 return Err(PoolError::StorageCorrupted);
             }
 
-            // Prevent double-deposit.
-            if env
+            // #1627: collateral may only be posted by the invoice's owner, and only
+            // for an invoice that exists. Without this, anyone could post a dust
+            // deposit against someone else's invoice and block its funding.
+            let config = get_config_cached(&env)?;
+            let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+            let invoice = match invoice_client.try_get_invoice(&invoice_id) {
+                Ok(Ok(invoice)) => invoice,
+                _ => return Err(PoolError::InvoiceNotFound),
+            };
+            if invoice.owner != depositor {
+                return Err(PoolError::CollateralNotInvoiceOwner);
+            }
+
+            // Prevent double-deposit. A deposit that was withdrawn under #1628 is
+            // settled and no longer secures anything, so the owner may post again.
+            let existing: Option<CollateralDeposit> = env
                 .storage()
                 .persistent()
-                .has(&DataKey::CollateralDeposit(invoice_id))
-            {
+                .get(&DataKey::CollateralDeposit(invoice_id));
+            if existing.is_some_and(|d| !d.settled) {
                 return Err(PoolError::StorageCorrupted);
             }
 
@@ -4378,6 +4573,76 @@ impl FundingPool {
             env.events().publish(
                 (EVT, symbol_short!("col_topup")),
                 (invoice_id, depositor, token, amount, record.amount),
+            );
+            Ok(())
+        })
+    }
+
+    // #1628: lets the depositor recover collateral that can no longer secure a
+    // funding: the invoice was cancelled or expired, or it is still unfunded
+    // after COLLATERAL_WITHDRAW_TIMEOUT_SECS. It is blocked while the invoice is
+    // funded, because the deposit then secures the loan until repayment or
+    // liquidation.
+    pub fn withdraw_collateral(
+        env: Env,
+        invoice_id: u64,
+        depositor: Address,
+    ) -> Result<(), PoolError> {
+        depositor.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        non_reentrant!(&env, {
+            let key = DataKey::CollateralDeposit(invoice_id);
+            let mut record: CollateralDeposit = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(PoolError::CollateralNotFound)?;
+            if record.depositor != depositor {
+                return Err(PoolError::Unauthorized);
+            }
+            if record.settled {
+                return Err(PoolError::CollateralAlreadySettled);
+            }
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::FundedInvoice(invoice_id))
+            {
+                return Err(PoolError::CollateralInUse);
+            }
+
+            let config = get_config_cached(&env)?;
+            let invoice_client = InvoiceContractClient::new(&env, &config.invoice_contract);
+            let invoice = match invoice_client.try_get_invoice(&invoice_id) {
+                Ok(Ok(invoice)) => invoice,
+                _ => return Err(PoolError::InvoiceNotFound),
+            };
+            let now = env.ledger().timestamp();
+            let terminal = matches!(
+                invoice.status,
+                InvoiceStatus::Cancelled | InvoiceStatus::Expired
+            );
+            let timed_out =
+                now >= record.posted_at.saturating_add(COLLATERAL_WITHDRAW_TIMEOUT_SECS);
+            if !terminal && !timed_out {
+                return Err(PoolError::CollateralWithdrawalLocked);
+            }
+
+            record.settled = true;
+            record.released_at = now;
+            env.storage().persistent().set(&key, &record);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, SETTLEMENT_COLLATERAL_TTL, SETTLEMENT_COLLATERAL_TTL);
+
+            let token_client = token::Client::new(&env, &record.token);
+            token_client.transfer(&env.current_contract_address(), &depositor, &record.amount);
+
+            env.events().publish(
+                (EVT, symbol_short!("col_wdr")),
+                (invoice_id, depositor, record.amount, now),
             );
             Ok(())
         })
@@ -6693,8 +6958,13 @@ impl FundingPool {
             _ => return Err(PoolError::InvoiceNotCancelled),
         }
 
-        // Decrement deployed capital (co-funded invoices bypass total_deployed)
+        // Decrement deployed capital (co-funded invoices bypass total_deployed).
+        // Only the principal still outstanding is deployed: principal already
+        // recovered through repayment (#1630), or written off, is not.
         if !is_co_funded {
+            let outstanding = principal
+                .checked_sub(get_principal_settled(&env, invoice_id))
+                .ok_or(PoolError::AmountOverflow)?;
             let token_totals_key = DataKey::TokenTotals(token.clone());
             let mut tt: PoolTokenTotals = env
                 .storage()
@@ -6703,7 +6973,7 @@ impl FundingPool {
                 .unwrap_or_default();
             tt.total_deployed = tt
                 .total_deployed
-                .checked_sub(principal)
+                .checked_sub(outstanding)
                 .ok_or(PoolError::AmountOverflow)?;
             env.storage().instance().set(&token_totals_key, &tt);
 
@@ -6711,8 +6981,12 @@ impl FundingPool {
             record_rate_snapshot(&env, &token);
         }
 
-        // Remove the FundedInvoice record
+        // Remove the FundedInvoice record, and the settled-principal bookkeeping
+        // with it, so a later re-funding of this invoice id starts from zero.
         env.storage().persistent().remove(&funded_key);
+        env.storage()
+            .persistent()
+            .remove(&principal_settled_key(invoice_id));
 
         // Update stats
         let mut stats: PoolStorageStats = env

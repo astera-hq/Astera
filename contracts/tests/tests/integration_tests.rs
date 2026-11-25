@@ -1060,6 +1060,18 @@ fn test_collateral_post_and_release() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id)
         .mint(&sme, &(principal * 2 + required_col));
 
+    // #1627: only the invoice's owner may post collateral, so the invoice exists first.
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &principal,
+        &(env.ledger().timestamp() + 30 * 86_400),
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+    assert_eq!(inv_id, 1);
+
     pool_client.deposit(&investor, &usdc_id, &10_000i128, &None);
 
     // SME posts collateral
@@ -1150,9 +1162,8 @@ fn test_collateral_seize_on_default() {
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&investor, &10_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &required_col);
 
-    pool_client.deposit(&investor, &usdc_id, &10_000i128, &None);
-    pool_client.deposit_collateral(&1u64, &sme, &usdc_id, &required_col);
-
+    // #1627: collateral is only accepted for an invoice that exists and is owned
+    // by the depositor, so the invoice is created first.
     let due_date = env.ledger().timestamp() + 30 * 86_400;
     let inv_id = invoice_client.create_invoice(
         &sme,
@@ -1164,6 +1175,10 @@ fn test_collateral_seize_on_default() {
         &metadata_url(&env),
     );
     assert_eq!(inv_id, 1);
+
+    pool_client.deposit(&investor, &usdc_id, &10_000i128, &None);
+    pool_client.deposit_collateral(&1u64, &sme, &usdc_id, &required_col);
+
     pool_client.fund_invoice(&admin, &1u64, &principal, &sme, &due_date, &usdc_id);
 
     // Advance past due date without repayment — mark as defaulted
@@ -1573,6 +1588,18 @@ fn test_collateral_error_double_deposit() {
     propose_and_execute_set_collateral_config(&env, &pool_client, &admin, 1_000i128, 2_000u32);
 
     soroban_sdk::token::StellarAssetClient::new(&env, &usdc_id).mint(&sme, &5_000i128);
+
+    // #1627: the invoice must exist and be owned by the depositor.
+    let inv_id = invoice_client.create_invoice(
+        &sme,
+        &String::from_str(&env, "ACME Corp"),
+        &5_000i128,
+        &(env.ledger().timestamp() + 30 * 86_400),
+        &String::from_str(&env, "Invoice #001"),
+        &String::from_str(&env, "hash123"),
+        &metadata_url(&env),
+    );
+    assert_eq!(inv_id, 1);
 
     pool_client.deposit_collateral(&1u64, &sme, &usdc_id, &1_000);
 
