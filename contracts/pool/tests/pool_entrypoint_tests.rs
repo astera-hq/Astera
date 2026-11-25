@@ -7,7 +7,7 @@
 
 use pool::{
     CollateralDeposit, DataKey, FundingPool, FundingPoolClient, InvestorPosition, InvoiceRecord,
-    ListingSettlement, PoolError,
+    InvoiceStatus, ListingSettlement, PoolError,
 };
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
@@ -69,8 +69,16 @@ impl DummyInvoice {
     pub fn get_invoice(env: Env, id: u64) -> InvoiceRecord {
         env.storage().persistent().get(&id).expect("no invoice")
     }
-    pub fn is_invoice_defaulted(_env: Env, _id: u64) -> bool {
-        false
+    pub fn is_invoice_defaulted(env: Env, _id: u64) -> bool {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("dflt"))
+            .unwrap_or(false)
+    }
+    pub fn set_defaulted(env: Env, defaulted: bool) {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("dflt"), &defaulted);
     }
     pub fn record_funding(_env: Env, _id: u64, _amount: i128, _pool: Address) {}
     pub fn set_cancel_fails(env: Env, fails: bool) {
@@ -137,6 +145,7 @@ fn setup() -> Fx {
             amount: PRINCIPAL * 2,
             due_date,
             funded_amount: 0,
+            status: InvoiceStatus::Verified,
         },
     );
     let share = DummyShareClient::new(&env, &share_id);
@@ -397,8 +406,33 @@ fn risk_liquidate_collateral_seizes_collateral_to_the_risk_contract() {
     let deposit: CollateralDeposit = f.pool.get_collateral_deposit(&INVOICE_ID).unwrap();
     assert!(deposit.settled);
     assert_eq!(deposit.seized_at, f.due_date + 1);
-    // Deployed capital is not touched by a seizure.
-    assert_eq!(f.pool.get_token_totals(&f.usdc).total_deployed, PRINCIPAL);
+
+    // #1629: the collateral was sent away, so it must not be credited to NAV. The
+    // unrecovered principal is written down exactly as a default seizure does, which
+    // leaves NAV equal to the real token balance.
+    let totals = f.pool.get_token_totals(&f.usdc);
+    assert_eq!(totals.total_deployed, 0, "unrecovered principal written down");
+    assert_eq!(
+        totals.pool_value,
+        f.balance(&f.pool_id),
+        "NAV equals the pool's real balance"
+    );
+}
+
+#[test]
+fn risk_liquidate_collateral_does_not_credit_collateral_to_nav() {
+    let f = setup();
+    let risk = risk_setup(&f);
+    let nav_before = f.pool.get_token_totals(&f.usdc).pool_value;
+    assert_eq!(nav_before, DEPOSIT, "posted collateral is not counted in NAV");
+
+    f.env.ledger().with_mut(|l| l.timestamp = f.due_date + 1);
+    f.pool.risk_liquidate_collateral(&risk, &INVOICE_ID);
+
+    // The pool's NAV drops by the written-off principal only, not by the
+    // principal less a collateral credit that never should have been added.
+    let nav_after = f.pool.get_token_totals(&f.usdc).pool_value;
+    assert_eq!(nav_after, nav_before - PRINCIPAL);
 }
 
 #[test]
@@ -449,6 +483,226 @@ fn risk_liquidate_collateral_rejects_unknown_invoice() {
     let risk = risk_setup(&f);
     let r = f.pool.try_risk_liquidate_collateral(&risk, &777u64);
     assert_eq!(r.unwrap_err().unwrap(), PoolError::InvoiceNotFound);
+}
+
+// ─────────────────────── collateral posting and withdrawal ───────────────────
+
+const WITHDRAW_TIMEOUT_SECS: u64 = 30 * 86_400;
+
+fn post_collateral(f: &Fx) {
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&f.sme, &COLLATERAL);
+    f.pool
+        .deposit_collateral(&INVOICE_ID, &f.sme, &f.usdc, &COLLATERAL);
+}
+
+fn set_invoice_status(f: &Fx, status: InvoiceStatus) {
+    f.invoice.set_invoice(
+        &INVOICE_ID,
+        &InvoiceRecord {
+            owner: f.sme.clone(),
+            amount: PRINCIPAL * 2,
+            due_date: f.due_date,
+            funded_amount: 0,
+            status,
+        },
+    );
+}
+
+#[test]
+fn deposit_collateral_rejects_a_depositor_who_is_not_the_invoice_owner() {
+    // #1627: a stranger must not be able to post collateral against someone
+    // else's invoice and block its funding.
+    let f = setup();
+    let attacker = Address::generate(&f.env);
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&attacker, &1);
+
+    let r = f.pool.try_deposit_collateral(&INVOICE_ID, &attacker, &f.usdc, &1);
+    assert_eq!(r.unwrap_err().unwrap(), PoolError::CollateralNotInvoiceOwner);
+    assert!(f.pool.get_collateral_deposit(&INVOICE_ID).is_none());
+    assert_eq!(f.balance(&attacker), 1, "the attacker's tokens are not taken");
+
+    // The real owner can still post afterwards.
+    post_collateral(&f);
+    assert_eq!(
+        f.pool.get_collateral_deposit(&INVOICE_ID).unwrap().amount,
+        COLLATERAL
+    );
+}
+
+#[test]
+fn deposit_collateral_requires_the_invoice_to_exist() {
+    // #1627: collateral for an invoice that doesn't exist is rejected.
+    let f = setup();
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&f.sme, &COLLATERAL);
+    let r = f
+        .pool
+        .try_deposit_collateral(&777u64, &f.sme, &f.usdc, &COLLATERAL);
+    assert_eq!(r.unwrap_err().unwrap(), PoolError::InvoiceNotFound);
+}
+
+#[test]
+fn withdraw_collateral_returns_it_once_the_invoice_is_cancelled() {
+    // #1628: collateral for a cancelled invoice is no longer locked.
+    let f = setup();
+    post_collateral(&f);
+    set_invoice_status(&f, InvoiceStatus::Cancelled);
+
+    f.pool.withdraw_collateral(&INVOICE_ID, &f.sme);
+
+    assert_eq!(f.balance(&f.sme), COLLATERAL, "the depositor gets it back");
+    let deposit = f.pool.get_collateral_deposit(&INVOICE_ID).unwrap();
+    assert!(deposit.settled);
+    assert_eq!(deposit.released_at, f.env.ledger().timestamp());
+    let r = f.pool.try_withdraw_collateral(&INVOICE_ID, &f.sme);
+    assert_eq!(r.unwrap_err().unwrap(), PoolError::CollateralAlreadySettled);
+}
+
+#[test]
+fn withdraw_collateral_is_locked_while_fundable_until_the_timeout() {
+    // #1628: a verified invoice can still be funded, so its collateral stays
+    // put until the timeout elapses.
+    let f = setup();
+    post_collateral(&f);
+
+    let r = f.pool.try_withdraw_collateral(&INVOICE_ID, &f.sme);
+    assert_eq!(r.unwrap_err().unwrap(), PoolError::CollateralWithdrawalLocked);
+    assert!(!f.pool.get_collateral_deposit(&INVOICE_ID).unwrap().settled);
+
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp += WITHDRAW_TIMEOUT_SECS);
+    f.pool.withdraw_collateral(&INVOICE_ID, &f.sme);
+    assert_eq!(f.balance(&f.sme), COLLATERAL);
+}
+
+#[test]
+fn withdraw_collateral_is_rejected_while_the_invoice_is_funded() {
+    // #1628: once funded, the deposit secures the loan and can't be pulled out,
+    // even if the invoice record later looks terminal.
+    let f = setup();
+    post_collateral(&f);
+    f.fund();
+    set_invoice_status(&f, InvoiceStatus::Cancelled);
+
+    let r = f.pool.try_withdraw_collateral(&INVOICE_ID, &f.sme);
+    assert_eq!(r.unwrap_err().unwrap(), PoolError::CollateralInUse);
+    assert!(!f.pool.get_collateral_deposit(&INVOICE_ID).unwrap().settled);
+    assert_eq!(
+        f.balance(&f.sme),
+        PRINCIPAL,
+        "the SME holds only the funded principal, not the collateral"
+    );
+}
+
+#[test]
+fn withdraw_collateral_rejects_anyone_but_the_depositor() {
+    let f = setup();
+    post_collateral(&f);
+    set_invoice_status(&f, InvoiceStatus::Cancelled);
+    let stranger = Address::generate(&f.env);
+
+    let r = f.pool.try_withdraw_collateral(&INVOICE_ID, &stranger);
+    assert_eq!(r.unwrap_err().unwrap(), PoolError::Unauthorized);
+    assert!(!f.pool.get_collateral_deposit(&INVOICE_ID).unwrap().settled);
+}
+
+#[test]
+fn owner_can_post_collateral_again_after_a_withdrawal() {
+    let f = setup();
+    post_collateral(&f);
+    set_invoice_status(&f, InvoiceStatus::Cancelled);
+    f.pool.withdraw_collateral(&INVOICE_ID, &f.sme);
+
+    // Withdrawn collateral secures nothing, so the owner may post again.
+    set_invoice_status(&f, InvoiceStatus::Verified);
+    post_collateral(&f);
+    let deposit = f.pool.get_collateral_deposit(&INVOICE_ID).unwrap();
+    assert!(!deposit.settled);
+    assert_eq!(deposit.amount, COLLATERAL);
+}
+
+// ─────────────────────── partial repayment accounting ────────────────────────
+
+#[test]
+fn partial_repayment_survives_a_default_with_the_recovered_half_in_nav() {
+    // #1630: 50% repaid, then the invoice defaults. NAV keeps the recovered
+    // half and writes off only the unpaid remainder.
+    let f = setup();
+    post_collateral(&f);
+    f.fund();
+    // Repaid in the funding ledger, so no interest or fee has accrued yet.
+    f.pool.repay_invoice(&INVOICE_ID, &f.sme, &(PRINCIPAL / 2));
+
+    let after_partial = f.pool.get_token_totals(&f.usdc);
+    assert_eq!(
+        after_partial.total_deployed,
+        PRINCIPAL / 2,
+        "the recovered principal is no longer deployed"
+    );
+    assert_eq!(
+        after_partial.pool_value, DEPOSIT,
+        "partial recovery is not a loss"
+    );
+
+    f.invoice.set_defaulted(&true);
+    f.pool.liquidate_invoice(&f.admin, &INVOICE_ID);
+
+    let after_default = f.pool.get_token_totals(&f.usdc);
+    assert_eq!(after_default.total_deployed, 0);
+    assert_eq!(
+        after_default.pool_value,
+        DEPOSIT - PRINCIPAL / 2 + COLLATERAL,
+        "only the unrecovered half is written off, and the collateral is credited"
+    );
+    assert_eq!(
+        after_default.pool_value,
+        f.balance(&f.pool_id),
+        "NAV equals the pool's real balance"
+    );
+}
+
+#[test]
+fn repayment_after_a_default_write_off_is_recovered_into_nav() {
+    // #1630: once the remainder has been written off, a later payment is a
+    // recovery of a loss NAV already took, so it goes back into pool_value
+    // rather than being paid out as yield.
+    let f = setup();
+    post_collateral(&f);
+    f.fund();
+    f.pool.repay_invoice(&INVOICE_ID, &f.sme, &(PRINCIPAL / 2));
+    f.invoice.set_defaulted(&true);
+    f.pool.liquidate_invoice(&f.admin, &INVOICE_ID);
+
+    f.pool.repay_invoice(&INVOICE_ID, &f.sme, &(PRINCIPAL / 2));
+
+    let totals = f.pool.get_token_totals(&f.usdc);
+    assert_eq!(totals.total_deployed, 0, "nothing is written off twice");
+    assert_eq!(
+        totals.pool_value,
+        f.balance(&f.pool_id),
+        "the recovery is reflected in NAV"
+    );
+}
+
+#[test]
+fn partial_then_full_repayment_books_principal_exactly_once() {
+    // #1630: an over-sized final payment is capped at what is owed, and the
+    // books end where a single full repayment would have left them.
+    let f = setup();
+    f.fund();
+    f.pool.repay_invoice(&INVOICE_ID, &f.sme, &(PRINCIPAL / 2));
+    f.pool.repay_invoice(&INVOICE_ID, &f.sme, &PRINCIPAL);
+
+    let totals = f.pool.get_token_totals(&f.usdc);
+    assert_eq!(totals.total_deployed, 0, "principal is released exactly once");
+    assert_eq!(totals.pool_value, DEPOSIT, "NAV is unchanged by repayment");
+    assert_eq!(totals.total_paid_out, PRINCIPAL, "the SME paid what it owed");
+    assert_eq!(f.balance(&f.sme), 0, "only the amount owed was taken");
+    assert_eq!(f.balance(&f.pool_id), DEPOSIT, "the pool holds every token again");
+    assert_eq!(
+        f.pool.get_funded_invoice(&INVOICE_ID).unwrap().repaid_amount,
+        PRINCIPAL
+    );
 }
 
 // ───────────────────────────── run_migration ─────────────────────────────
