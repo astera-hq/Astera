@@ -7089,7 +7089,7 @@ impl FundingPool {
             record_rate_snapshot(&env, &token);
             env.events().publish(
                 (EVT, symbol_short!("inv_cncl")),
-                (invoice_id, admin, principal, token, now, principal_returned),
+                (invoice_id, admin, principal, token, now),
             );
             Ok(())
         })
