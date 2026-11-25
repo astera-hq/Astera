@@ -192,6 +192,8 @@ pub enum PoolError {
     FundingSmeMismatch = 100,
     FundingDueDateMismatch = 101,
     FundingExceedsInvoice = 102,
+    // #1625: a partial top-up must use the same token as the original funding
+    FundingTokenMismatch = 103,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -1834,6 +1836,91 @@ fn distribute_pari_passu_repayment(
     Ok(())
 }
 
+// #1631: distributes collateral recovered from a defaulted co-funded invoice
+// pari-passu to the round's share holders. Each holder is credited through
+// `credit_investor_value`, which mints shares at NAV, so LPs outside the round
+// keep their NAV per share. Co-funded principal never sat in `total_deployed`
+// or `pool_value`, so nothing is written off from the shared totals here.
+fn distribute_co_funded_recovery(
+    env: &Env,
+    round_id: u64,
+    token: &Address,
+    amount: i128,
+) -> PoolResult<()> {
+    if amount <= 0 {
+        return Ok(());
+    }
+    let round: CoFundingRound = env
+        .storage()
+        .persistent()
+        .get(&DataKey::CoFundingRound(round_id))
+        .ok_or(PoolError::CoFundingRoundNotFound)?;
+    let tt_key = DataKey::TokenTotals(token.clone());
+    let mut tt: PoolTokenTotals = env.storage().instance().get(&tt_key).unwrap_or_default();
+    let participants = round.participants.clone();
+
+    // The last holder with a non-zero share takes the rounding remainder, so
+    // the whole recovery is allocated and none is stranded.
+    let mut last_holder: Option<Address> = None;
+    for i in 0..participants.len() {
+        let holder = participants.get(i).ok_or(PoolError::StorageCorrupted)?;
+        let bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoFundShare(round_id, holder.clone()))
+            .unwrap_or(0);
+        if bps > 0 {
+            last_holder = Some(holder);
+        }
+    }
+    let last_holder = match last_holder {
+        Some(holder) => holder,
+        None => {
+            // No share holders remain to receive the recovery. Keep it in the
+            // pool rather than stranding it.
+            tt.pool_value = tt
+                .pool_value
+                .checked_add(amount)
+                .ok_or(PoolError::AmountOverflow)?;
+            env.storage().instance().set(&tt_key, &tt);
+            return Ok(());
+        }
+    };
+
+    let mut distributed: i128 = 0;
+    for i in 0..participants.len() {
+        let holder = participants.get(i).ok_or(PoolError::StorageCorrupted)?;
+        if holder == last_holder {
+            continue;
+        }
+        let bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoFundShare(round_id, holder.clone()))
+            .unwrap_or(0);
+        if bps == 0 {
+            continue;
+        }
+        let holder_amount = amount
+            .checked_mul(bps as i128)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(BPS_DENOM as i128)
+            .ok_or(PoolError::AmountOverflow)?;
+        if holder_amount > 0 {
+            credit_investor_value(env, token, &holder, holder_amount, &mut tt)?;
+            distributed = distributed
+                .checked_add(holder_amount)
+                .ok_or(PoolError::AmountOverflow)?;
+        }
+    }
+    let remainder = amount
+        .checked_sub(distributed)
+        .ok_or(PoolError::AmountOverflow)?;
+    credit_investor_value(env, token, &last_holder, remainder, &mut tt)?;
+    env.storage().instance().set(&tt_key, &tt);
+    Ok(())
+}
+
 fn fund_invoice_request(
     env: &Env,
     config: &PoolConfig,
@@ -1922,10 +2009,52 @@ fn fund_invoice_request(
             .persistent()
             .get(&funded_key)
             .expect("just checked");
-        existing.principal = existing
-            .principal
+        // #1625: a top-up must match the original funding. The receivable is
+        // denominated in one token, owed by one SME, and due on one date;
+        // mixing them would deploy one token's liquidity against another's
+        // receivable.
+        if existing.token != request.token {
+            return Err(PoolError::FundingTokenMismatch);
+        }
+        if existing.sme != request.sme {
+            return Err(PoolError::FundingSmeMismatch);
+        }
+        if existing.due_date != request.due_date {
+            return Err(PoolError::FundingDueDateMismatch);
+        }
+        let old_principal = existing.principal;
+        let new_principal = old_principal
             .checked_add(request.principal)
             .ok_or(PoolError::AmountOverflow)?;
+        let new_principal_u128 = new_principal as u128;
+        let added_principal_u128 = request.principal as u128;
+        let old_principal_u128 = old_principal as u128;
+        // The top-up's factoring fee is computed on the added principal alone,
+        // so the fees accumulate.
+        existing.factoring_fee = existing
+            .factoring_fee
+            .checked_add(factoring_fee)
+            .ok_or(PoolError::AmountOverflow)?;
+        // Principal-weighted rate and funding time: the added principal earns
+        // at the rate live now and accrues from now, not from the original
+        // funding.
+        let old_rate_weight = old_principal_u128 * existing.locked_yield_bps as u128;
+        let added_rate_weight = added_principal_u128 * locked_yield_bps as u128;
+        let weighted_rate = old_rate_weight
+            .checked_add(added_rate_weight)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(new_principal_u128)
+            .ok_or(PoolError::AmountOverflow)?;
+        existing.locked_yield_bps = weighted_rate as u32;
+        let old_time_weight = old_principal_u128 * existing.funded_at as u128;
+        let added_time_weight = added_principal_u128 * now as u128;
+        let weighted_funded_at = old_time_weight
+            .checked_add(added_time_weight)
+            .ok_or(PoolError::AmountOverflow)?
+            .checked_div(new_principal_u128)
+            .ok_or(PoolError::AmountOverflow)?;
+        existing.funded_at = weighted_funded_at as u64;
+        existing.principal = new_principal;
         env.storage().persistent().set(&funded_key, &existing);
     } else {
         let funded = FundedInvoice {
@@ -1947,14 +2076,6 @@ fn fund_invoice_request(
     set_funded_invoice_ttl(env, request.invoice_id, false);
 
     env.storage().instance().set(&token_totals_key, &tt);
-
-    // Update invoice contract's funded_amount via cross-contract call
-    let invoice_client = InvoiceContractClient::new(env, &config.invoice_contract);
-    let _ = invoice_client.try_record_funding(
-        &request.invoice_id,
-        &request.principal,
-        &env.current_contract_address(),
-    );
 
     // #275: check utilization after deployment
     // The caller already supplied the pool config; do not reload it.
@@ -2072,8 +2193,14 @@ fn fund_invoice_request(
                     .instance()
                     .get(&token_totals_key)
                     .unwrap_or_default();
-                tt.protocol_revenue = tt.protocol_revenue.saturating_sub(coverage.premium_paid);
-                tt.pool_value = tt.pool_value.saturating_sub(coverage.premium_paid);
+                // #1626: protocol_revenue is tracked outside pool_value, so only
+                // the premium not covered by revenue comes out of pool_value.
+                // Subtracting the full premium from both understated LP NAV by
+                // min(premium, protocol_revenue) on every insured funding.
+                let premium = coverage.premium_paid;
+                let from_revenue = premium.min(tt.protocol_revenue.max(0));
+                tt.protocol_revenue = tt.protocol_revenue.saturating_sub(from_revenue);
+                tt.pool_value = tt.pool_value.saturating_sub(premium.saturating_sub(from_revenue));
                 env.storage().instance().set(&token_totals_key, &tt);
             }
             // Coverage is optional, so continue funding while making failures
@@ -4348,40 +4475,49 @@ impl FundingPool {
                 return Err(PoolError::CollateralAlreadySettled);
             }
 
-            // Write off the defaulted invoice's principal against the LOAN token's totals
-            // (record.token). The principal receivable is no longer an asset, and
-            // total_deployed drops by the full principal since the invoice is no longer
-            // outstanding. When the collateral token equals the loan token this nets out
-            // identically to the previous single-token accounting.
-            let loan_tt_key = DataKey::TokenTotals(record.token.clone());
-            let mut loan_tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&loan_tt_key)
-                .unwrap_or_default();
-            loan_tt.pool_value = loan_tt
-                .pool_value
-                .checked_sub(record.principal)
-                .ok_or(PoolError::AmountOverflow)?;
-            loan_tt.total_deployed = loan_tt
-                .total_deployed
-                .checked_sub(record.principal)
-                .ok_or(PoolError::AmountOverflow)?;
-            env.storage().instance().set(&loan_tt_key, &loan_tt);
+            if let Some(round_id) = record.co_funding_round_id {
+                // #1631: co-funded capital never entered total_deployed or
+                // pool_value (see finalize_co_funding), so there is nothing to
+                // write off from the shared totals. The co-funders' loss stays
+                // with them, and the recovered collateral goes pari-passu to the
+                // round's share holders instead of to every LP.
+                distribute_co_funded_recovery(env, round_id, &col.token, col.amount)?;
+            } else {
+                // Write off the defaulted invoice's principal against the LOAN token's
+                // totals (record.token). The principal receivable is no longer an asset,
+                // and total_deployed drops by the full principal since the invoice is no
+                // longer outstanding. When the collateral token equals the loan token
+                // this nets out identically to the previous single-token accounting.
+                let loan_tt_key = DataKey::TokenTotals(record.token.clone());
+                let mut loan_tt: PoolTokenTotals = env
+                    .storage()
+                    .instance()
+                    .get(&loan_tt_key)
+                    .unwrap_or_default();
+                loan_tt.pool_value = loan_tt
+                    .pool_value
+                    .checked_sub(record.principal)
+                    .ok_or(PoolError::AmountOverflow)?;
+                loan_tt.total_deployed = loan_tt
+                    .total_deployed
+                    .checked_sub(record.principal)
+                    .ok_or(PoolError::AmountOverflow)?;
+                env.storage().instance().set(&loan_tt_key, &loan_tt);
 
-            // Credit the recovered collateral into the COLLATERAL token's totals
-            // (col.token) so investors benefit from the seizure proceeds.
-            let col_tt_key = DataKey::TokenTotals(col.token.clone());
-            let mut col_tt: PoolTokenTotals = env
-                .storage()
-                .instance()
-                .get(&col_tt_key)
-                .unwrap_or_default();
-            col_tt.pool_value = col_tt
-                .pool_value
-                .checked_add(col.amount)
-                .ok_or(PoolError::AmountOverflow)?;
-            env.storage().instance().set(&col_tt_key, &col_tt);
+                // Credit the recovered collateral into the COLLATERAL token's totals
+                // (col.token) so investors benefit from the seizure proceeds.
+                let col_tt_key = DataKey::TokenTotals(col.token.clone());
+                let mut col_tt: PoolTokenTotals = env
+                    .storage()
+                    .instance()
+                    .get(&col_tt_key)
+                    .unwrap_or_default();
+                col_tt.pool_value = col_tt
+                    .pool_value
+                    .checked_add(col.amount)
+                    .ok_or(PoolError::AmountOverflow)?;
+                env.storage().instance().set(&col_tt_key, &col_tt);
+            }
 
             col.settled = true;
             col.seized_at = now;
