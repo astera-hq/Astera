@@ -6,8 +6,9 @@
 //! authorization failures and accounting assertions.
 
 use pool::{
-    CollateralDeposit, DataKey, FundingPool, FundingPoolClient, InvestorPosition, InvoiceRecord,
-    InvoiceStatus, ListingSettlement, PoolError,
+    CoFundingRound, CoFundingStatus, CollateralDeposit, DataKey, FundingPool, FundingPoolClient,
+    InvestorPosition, InvoiceRecord, InvoiceStatus, ListingSettlement, OpenCoFundingRequest,
+    PoolError,
 };
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
@@ -174,6 +175,23 @@ impl Fx {
             &self.usdc,
         );
     }
+    fn fund_cofunded(&self) {
+        self.pool.open_co_funding(
+            &self.admin,
+            &OpenCoFundingRequest {
+                invoice_id: INVOICE_ID,
+                token: self.usdc.clone(),
+                target_principal: PRINCIPAL,
+                sme: self.sme.clone(),
+                due_date: self.due_date,
+                funding_deadline: self.env.ledger().timestamp() + 86_400,
+                min_commitment: 0,
+                max_investor_bps: 10_000,
+            },
+        );
+        self.pool.commit_to_invoice(&self.lp, &INVOICE_ID, &PRINCIPAL);
+        self.pool.finalize_co_funding(&self.lp, &INVOICE_ID);
+    }
     fn balance(&self, who: &Address) -> i128 {
         token::Client::new(&self.env, &self.usdc).balance(who)
     }
@@ -182,23 +200,124 @@ impl Fx {
 // ───────────────────────── cancel_funded_invoice ─────────────────────────
 
 #[test]
-fn cancel_funded_invoice_releases_deployed_capital_and_removes_record() {
+fn cancel_funded_invoice_writes_off_unreturned_principal_and_releases_collateral() {
     let f = setup();
     f.fund();
+
+    let collateral = 25_000i128;
+    token::StellarAssetClient::new(&f.env, &f.usdc).mint(&f.sme, &collateral);
+    f.pool
+        .deposit_collateral(&INVOICE_ID, &f.sme, &f.usdc, &collateral);
+
     let before = f.pool.get_token_totals(&f.usdc);
     assert_eq!(before.total_deployed, PRINCIPAL);
+    let sme_before_cancel = f.balance(&f.sme);
     let stats_before = f.pool.get_storage_stats();
 
     f.pool.cancel_funded_invoice(&f.admin, &INVOICE_ID);
 
     let after = f.pool.get_token_totals(&f.usdc);
     assert_eq!(after.total_deployed, 0, "principal no longer deployed");
-    assert_eq!(after.pool_value, before.pool_value, "NAV is not rewritten");
+    assert_eq!(
+        after.pool_value,
+        before.pool_value - PRINCIPAL,
+        "unreturned principal is written off from NAV"
+    );
+    assert_eq!(
+        f.balance(&f.sme),
+        sme_before_cancel + collateral,
+        "collateral is returned to its depositor"
+    );
+    let col = f.pool.get_collateral_deposit(&INVOICE_ID).unwrap();
+    assert!(col.settled);
+    assert_eq!(col.released_at, f.env.ledger().timestamp());
     assert!(f.pool.get_funded_invoice(&INVOICE_ID).is_none());
     assert_eq!(
         f.pool.get_storage_stats().active_funded_invoices,
         stats_before.active_funded_invoices - 1
     );
+}
+
+#[test]
+fn cancel_funded_invoice_recovers_principal_when_sme_has_approved_pool() {
+    let f = setup();
+    f.fund();
+    let pool_balance_before_cancel = f.balance(&f.pool_id);
+    let before = f.pool.get_token_totals(&f.usdc);
+
+    let expiration = f.env.ledger().sequence() + 100;
+    token::Client::new(&f.env, &f.usdc).approve(
+        &f.sme,
+        &f.pool_id,
+        &PRINCIPAL,
+        &expiration,
+    );
+    f.pool.cancel_funded_invoice(&f.admin, &INVOICE_ID);
+
+    let after = f.pool.get_token_totals(&f.usdc);
+    assert_eq!(after.total_deployed, 0);
+    assert_eq!(after.pool_value, before.pool_value, "returned cash replaces the receivable");
+    assert_eq!(f.balance(&f.pool_id), pool_balance_before_cancel + PRINCIPAL);
+    assert!(f.pool.get_funded_invoice(&INVOICE_ID).is_none());
+}
+
+#[test]
+fn cancel_cofunded_invoice_clears_claims_and_keeps_the_already_written_down_nav() {
+    let f = setup();
+    f.fund_cofunded();
+    let before = f.pool.get_token_totals(&f.usdc);
+    let shares_before_cancel = f.share.balance(&f.lp);
+    assert_eq!(f.pool.get_co_fund_share(&INVOICE_ID, &f.lp), 10_000);
+
+    f.pool.cancel_funded_invoice(&f.admin, &INVOICE_ID);
+
+    let after = f.pool.get_token_totals(&f.usdc);
+    assert_eq!(after.pool_value, before.pool_value, "co-funded principal was already excluded from NAV");
+    assert_eq!(f.pool.get_co_fund_share(&INVOICE_ID, &f.lp), 0);
+    assert_eq!(f.share.balance(&f.lp), shares_before_cancel);
+    let (round, commitment_exists) = f.env.as_contract(&f.pool_id, || {
+        let round: CoFundingRound = f
+            .env
+            .storage()
+            .persistent()
+            .get(&DataKey::CoFundingRound(INVOICE_ID))
+            .unwrap();
+        let committed = f
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::CoFundCommitted(INVOICE_ID, f.lp.clone()));
+        (round, committed)
+    });
+    assert_eq!(round.status, CoFundingStatus::Cancelled);
+    assert_eq!(round.committed_principal, 0);
+    assert!(round.participants.is_empty());
+    assert!(!commitment_exists);
+    assert!(f.pool.get_funded_invoice(&INVOICE_ID).is_none());
+}
+
+#[test]
+fn cancel_cofunded_invoice_distributes_returned_principal_to_participants() {
+    let f = setup();
+    f.fund_cofunded();
+    let before = f.pool.get_token_totals(&f.usdc);
+    let pool_balance_before_cancel = f.balance(&f.pool_id);
+    let shares_before_cancel = f.share.balance(&f.lp);
+
+    let expiration = f.env.ledger().sequence() + 100;
+    token::Client::new(&f.env, &f.usdc).approve(
+        &f.sme,
+        &f.pool_id,
+        &PRINCIPAL,
+        &expiration,
+    );
+    f.pool.cancel_funded_invoice(&f.admin, &INVOICE_ID);
+
+    let after = f.pool.get_token_totals(&f.usdc);
+    assert_eq!(after.pool_value, before.pool_value + PRINCIPAL);
+    assert_eq!(f.balance(&f.pool_id), pool_balance_before_cancel + PRINCIPAL);
+    assert!(f.share.balance(&f.lp) > shares_before_cancel);
+    assert_eq!(f.pool.get_co_fund_share(&INVOICE_ID, &f.lp), 0);
 }
 
 #[test]
