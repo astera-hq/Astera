@@ -62,7 +62,7 @@ impl DummyInvoice {
     }
 
     pub fn is_invoice_defaulted(env: Env, _id: u64) -> bool {
-        let stored: Option<bool> =
+        let stored: Option<bool> =:
             env.storage().persistent().get(&Symbol::new(&env, "inv_def"));
         stored.unwrap_or(false)
     }
@@ -71,6 +71,18 @@ impl DummyInvoice {
         env.storage()
             .persistent()
             .set(&Symbol::new(&env, "inv_def"), &defaulted);
+    }
+
+    pub fn record_funding(env: Env, _id: u64, _amount: i128) {
+        env.storage()
+            .persistent()
+            .set(&Symbol::new(&env, "inv_funded"), &true);
+    }
+
+    pub fn is_funded(env: Env, _id: u64) -> bool {
+        let stored: Option<bool> =
+            env.storage().persistent().get(&Symbol::new(&env, "inv_funded"));
+        stored.unwrap_or(false)
     }
 }
 
@@ -476,8 +488,6 @@ fn test_invalid_collateral_config_rejected_at_proposal_time() {
     env.mock_all_auths();
     let (client, admin, _usdc_id) = setup(&env);
 
-    // A threshold of exactly 0 is a legitimate "collateralize every invoice"
-    // policy, not an error; only a negative threshold is invalid.
     let result =
         client.try_propose_operation(&admin, &pool::AdminOperation::SetCollateralConfig(-1, 3000));
     assert_eq!(result, Err(Ok(PoolError::InvalidCollateralThreshold)));
@@ -565,9 +575,6 @@ fn test_full_borrower_lifecycle() {
     let investor = Address::generate(&env);
     let borrower = Address::generate(&env);
 
-    // Seed the pool with real liquidity via a proper deposit, so
-    // fund_invoice's internal accounting (available_liquidity) sees funds,
-    // not just the raw token balance.
     mint(&env, &usdc_id, &investor, 100_000);
     pool_client.deposit(&investor, &usdc_id, &100_000, &None);
 
@@ -604,8 +611,40 @@ fn test_full_borrower_lifecycle() {
 }
 
 #[test]
+fn test_finalize_co_funding_records_invoice_funded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, usdc_id) = setup(&env);
+    let investor = Address::generate(&env);
+    let borrower = Address::generate(&env);
+
+    mint(&env, &usdc_id, &investor, 100_000);
+    client.deposit(&investor, &usdc_id, &100_000, &None);
+
+    let invoice_id = 42u64;
+    let target_amount = 10_000i128;
+    let due_date = env.ledger().timestamp() + 50_000;
+
+    let config = client.get_config();
+    let round_id = client.propose_co_funding_round(
+        &admin,
+        &invoice_id,
+        &target_amount,
+        &borrower,
+        &due_date,
+        &usdc_id,
+    );
+
+    client.contribute_co_funding(&investor, &round_id, &target_amount);
+    client.finalize_co_funding(&admin, &round_id);
+
+    let invoice_contract = config.invoice_contract;
+    let is_funded = DummyInvoiceClient::new(&env, &invoice_contract).is_funded(&invoice_id);
+    assert!(is_funded);
+}
+
+#[test]
 fn test_seize_collateral_cross_asset_write_off() {
-    // #1505: collateral seizure accounting when the collateral token differs from the loan token.
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, usdc_id) = setup(&env);
@@ -625,7 +664,6 @@ fn test_seize_collateral_cross_asset_write_off() {
 
     let config = client.get_config();
 
-    // Seed a funded invoice denominated in the loan token (usdc).
     env.storage()
         .persistent()
         .set(
@@ -644,7 +682,6 @@ fn test_seize_collateral_cross_asset_write_off() {
             },
         );
 
-    // Seed a collateral deposit denominated in a DIFFERENT token (collateral_token).
     env.storage()
         .persistent()
         .set(
@@ -663,7 +700,6 @@ fn test_seize_collateral_cross_asset_write_off() {
             },
         );
 
-    // Seed token totals: usdc carries the deployed principal; collateral token starts empty.
     env.storage()
         .instance()
         .set(
@@ -671,7 +707,7 @@ fn test_seize_collateral_cross_asset_write_off() {
             &PoolTokenTotals {
                 pool_value: 100_000,
                 total_deployed: principal,
-                ..Default::default()
+                ..Default::default()+
             },
         );
     env.storage()
@@ -681,23 +717,18 @@ fn test_seize_collateral_cross_asset_write_off() {
             &PoolTokenTotals::default(),
         );
 
-    // Mark the invoice defaulted so seizure is permitted.
     DummyInvoiceClient::new(&env, &config.invoice_contract)
         .set_invoice_defaulted(&invoice_id, &true);
 
-    // Seize the collateral via the permissionless liquidation path.
     client.liquidate_invoice(&caller, &invoice_id);
 
-    // The loan token's principal receivable is written off.
     let usdc_totals = client.get_token_totals(&usdc_id);
     assert_eq!(usdc_totals.pool_value, 100_000 - principal);
     assert_eq!(usdc_totals.total_deployed, 0);
 
-    // The recovered collateral is credited to the collateral token's totals.
     let col_totals = client.get_token_totals(&collateral_token.address);
     assert_eq!(col_totals.pool_value, collateral_amount);
 
-    // The collateral deposit is marked settled.
     let col: CollateralDeposit = env
         .storage()
         .persistent()
